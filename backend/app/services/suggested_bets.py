@@ -1,0 +1,886 @@
+"""
+Suggested Bets Service
+
+Generates suggested bets and parlays based on prediction quality and confidence.
+"""
+from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, desc
+from typing import List, Dict, Optional
+from datetime import date, timedelta
+from app.models.prediction import Prediction
+from app.models.game import Game
+from app.models.player import Player
+from app.models.team import Team
+from itertools import combinations
+
+
+class SuggestedBetsService:
+    """Generate suggested bets and parlays."""
+    
+    def __init__(self, db: Session):
+        self.db = db
+    
+    def get_suggested_bets(
+        self,
+        game_date: Optional[date] = None,
+        limit: int = 10,
+        min_probability: float = 0.60,
+        include_long_shots: bool = True
+    ) -> List[Dict]:
+        """
+        Get suggested bets ranked by quality.
+        
+        Args:
+            game_date: Date to get suggestions for (default: today)
+            limit: Maximum number of suggestions
+            min_probability: Minimum probability threshold for safe bets
+        
+        Returns:
+            List of suggested bet dictionaries
+        """
+        if game_date is None:
+            game_date = date.today()
+        
+        # Get predictions for the date that are recommended (not 'pass')
+        # Include finished games for historical viewing
+        games = self.db.query(Game).filter(
+            Game.game_date == game_date
+        ).all()
+        
+        if not games:
+            return []
+        
+        game_ids = [g.game_id for g in games]
+        
+        # Get predictions with high confidence and good probabilities
+        # Include all bet types: safe, standard, and long_shot
+        predictions = self.db.query(Prediction).filter(
+            and_(
+                Prediction.game_id.in_(game_ids),
+                Prediction.bet_type.in_(['safe', 'standard', 'long_shot']),
+                Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
+                Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
+            )
+        ).all()
+        
+        # If we don't have enough long shots, lower the confidence requirement for them
+        long_shot_count = sum(1 for p in predictions if p.bet_type == 'long_shot')
+        if long_shot_count < 5:  # Want at least 5 long shots for variety
+            additional_long_shots = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.game_id.in_(game_ids),
+                    Prediction.bet_type == 'long_shot',
+                    Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
+                    Prediction.confidence_level == 'LOW'  # Include low confidence long shots
+                )
+            ).limit(10).all()
+            predictions.extend(additional_long_shots)
+        
+        # Filter out injured players
+        from app.services.injury_context import InjuryContext
+        injury_context = InjuryContext(self.db)
+        
+        # Score and rank predictions
+        scored_predictions = []
+        for pred in predictions:
+            # Check injury status - skip if Out, Doubtful, or Questionable
+            injury_status = injury_context.get_player_injury_status(pred.player_id)
+            if injury_status and injury_status['status'] in ['Out', 'Doubtful', 'Questionable']:
+                continue  # Skip injured players
+            
+            # Calculate quality score
+            score = self._calculate_bet_score(pred)
+            
+            # Get probability based on bet type
+            if pred.bet_type == 'safe':
+                probability = pred.safe_probability
+                line = pred.safe_line
+            elif pred.bet_type == 'standard':
+                probability = pred.standard_probability
+                line = pred.standard_line
+            else:  # long_shot
+                probability = pred.long_shot_probability
+                line = pred.long_shot_line
+            
+            # Only include if meets minimum probability (for safe/standard bets)
+            # Long shots have lower probability threshold
+            if pred.bet_type == 'safe' and probability < min_probability:
+                continue
+            if pred.bet_type == 'standard' and probability < 0.40:
+                continue
+            if pred.bet_type == 'long_shot' and (probability < 0.08 or probability > 0.30):
+                continue
+            if not include_long_shots and pred.bet_type == 'long_shot':
+                continue
+            
+            player = self.db.query(Player).filter(Player.player_id == pred.player_id).first()
+            game = self.db.query(Game).filter(Game.game_id == pred.game_id).first()
+            
+            if not player or not game:
+                continue
+            
+            # Get player's team
+            player_team = None
+            if player.current_team_id:
+                team = self.db.query(Team).filter(Team.team_id == player.current_team_id).first()
+                player_team = team.abbreviation if team else None
+            
+            scored_predictions.append({
+                'prediction_id': pred.prediction_id,
+                'player_id': pred.player_id,
+                'player_name': player.name,
+                'player_team': player_team,
+                'game_id': pred.game_id,
+                'game_date': game.game_date.isoformat() if game else None,
+                'stat_type': pred.stat_type,
+                'bet_type': pred.bet_type,
+                'line': round(line, 1),
+                'probability': round(probability, 3),
+                'confidence_level': pred.confidence_level,
+                'volatility_level': pred.volatility_level,
+                'score': score,
+                'reasoning': pred.reasoning
+            })
+        
+        # Sort by score (highest first)
+        scored_predictions.sort(key=lambda x: x['score'], reverse=True)
+        
+        return scored_predictions[:limit]
+    
+    def _calculate_bet_score(self, prediction: Prediction) -> float:
+        """
+        Calculate quality score for a bet.
+        
+        Higher score = better bet recommendation.
+        """
+        score = 0.0
+        
+        # Probability component (higher is better)
+        if prediction.bet_type == 'safe':
+            prob = prediction.safe_probability or 0
+            score += prob * 100  # Weight: 100 points max
+        elif prediction.bet_type == 'standard':
+            prob = prediction.standard_probability or 0
+            score += prob * 80  # Weight: 80 points max
+        else:  # long_shot
+            prob = prediction.long_shot_probability or 0
+            # For long shots, reward higher probabilities (8-20% range is ideal)
+            # But don't penalize too much for lower probabilities
+            if 0.10 <= prob <= 0.20:
+                score += prob * 80  # Good long shot range
+            elif 0.08 <= prob < 0.10 or 0.20 < prob <= 0.25:
+                score += prob * 60  # Acceptable range
+            else:
+                score += prob * 40  # Lower score for extreme probabilities
+        
+        # Confidence component
+        if prediction.confidence_level == 'HIGH':
+            score += 30
+        elif prediction.confidence_level == 'MEDIUM':
+            score += 15
+        elif prediction.confidence_level == 'LOW':
+            score += 5  # Small boost for low confidence (still better than nothing)
+        
+        # Volatility component (lower volatility = higher score)
+        if prediction.volatility_level == 'LOW':
+            score += 20
+        elif prediction.volatility_level == 'MEDIUM':
+            score += 10
+        
+        # Bonus for long shots (to ensure they appear in suggestions)
+        if prediction.bet_type == 'long_shot':
+            score += 10  # Small bonus to ensure variety
+        
+        # Penalize if there's a pass reason (shouldn't happen for suggested bets, but just in case)
+        if prediction.pass_reason:
+            score -= 50
+        
+        return score
+    
+    def get_suggested_parlays(
+        self,
+        game_date: Optional[date] = None,
+        limit: int = 5,
+        min_legs: int = 2,
+        max_legs: int = 4,
+        diversify_players: bool = True
+    ) -> List[Dict]:
+        """
+        Get suggested parlay combinations with player diversification.
+        
+        Args:
+            game_date: Date to get suggestions for (default: today)
+            limit: Maximum number of parlay suggestions
+            min_legs: Minimum number of legs in parlay
+            max_legs: Maximum number of legs in parlay
+            diversify_players: If True, ensure each player appears in only one parlay
+        
+        Returns:
+            List of suggested parlay dictionaries
+        """
+        if game_date is None:
+            game_date = date.today()
+        
+        # Get suggested bets first (include long shots for parlay variety)
+        suggested_bets = self.get_suggested_bets(game_date, limit=50, min_probability=0.60, include_long_shots=True)
+        
+        if len(suggested_bets) < min_legs:
+            return []
+        
+        # Generate parlay combinations
+        all_parlays = []
+        
+        # Try different leg counts (2, 3, 4)
+        # Ensure we support 2-4 leg parlays as requested
+        max_legs = min(max_legs, 4)  # Cap at 4 legs
+        for num_legs in range(min_legs, min(max_legs + 1, len(suggested_bets) + 1)):
+            # Generate combinations of bets
+            for combo in combinations(suggested_bets, num_legs):
+                # Filter out combinations with same player within parlay
+                player_ids = [bet['player_id'] for bet in combo]
+                if len(player_ids) != len(set(player_ids)):
+                    continue  # Skip if duplicate players within parlay
+                
+                # Calculate combined probability and odds
+                combined_prob = 1.0
+                for bet in combo:
+                    combined_prob *= bet['probability']
+                
+                # Convert to American odds
+                if combined_prob > 0:
+                    decimal_odds = 1.0 / combined_prob
+                    american_odds = (decimal_odds - 1) * 100
+                else:
+                    american_odds = None
+                
+                # Calculate parlay score (higher is better)
+                parlay_score = combined_prob * 1000  # Scale up for ranking
+                
+                # Prefer parlays with mix of stat types
+                stat_types = [bet['stat_type'] for bet in combo]
+                unique_stats = len(set(stat_types))
+                parlay_score += unique_stats * 50  # Bonus for diversity
+                
+                # Prefer parlays with mix of games (diversify risk)
+                game_ids = [bet['game_id'] for bet in combo]
+                unique_games = len(set(game_ids))
+                parlay_score += unique_games * 30  # Bonus for game diversity
+                
+                all_parlays.append({
+                    'legs': combo,
+                    'num_legs': num_legs,
+                    'combined_probability': round(combined_prob, 4),
+                    'combined_odds': round(american_odds, 0) if american_odds else None,
+                    'odds_display': f"+{int(american_odds)}" if american_odds and american_odds > 0 else f"{int(american_odds)}" if american_odds else "N/A",
+                    'score': parlay_score,
+                    'stat_diversity': unique_stats,
+                    'game_diversity': unique_games,
+                    'player_ids': set(player_ids)  # Store for diversification check
+                })
+        
+        # Sort by score (highest first)
+        all_parlays.sort(key=lambda x: x['score'], reverse=True)
+        
+        # If diversification is enabled, select parlays ensuring no player overlap
+        # But prioritize getting a mix of 2, 3, and 4 leg parlays
+        if diversify_players:
+            selected_parlays = []
+            used_players = set()
+            
+            # Group parlays by leg count
+            parlays_by_legs = {2: [], 3: [], 4: []}
+            for parlay in all_parlays:
+                num_legs = parlay['num_legs']
+                if num_legs in parlays_by_legs:
+                    parlays_by_legs[num_legs].append(parlay)
+            
+            # Try to get at least one of each leg count
+            target_counts = {2: limit // 3, 3: limit // 3, 4: limit // 3}
+            remaining = limit - sum(target_counts.values())
+            target_counts[2] += remaining  # Give remainder to 2-leg parlays
+            
+            for num_legs in [4, 3, 2]:  # Prioritize higher leg counts
+                for parlay in parlays_by_legs[num_legs]:
+                    if len(selected_parlays) >= limit:
+                        break
+                    
+                    # Check if this parlay uses any already-used players
+                    parlay_players = parlay['player_ids']
+                    if parlay_players.isdisjoint(used_players):
+                        # No overlap - add this parlay
+                        selected_parlays.append(parlay)
+                        used_players.update(parlay_players)
+                        
+                        # Remove player_ids from the dict before returning
+                        parlay.pop('player_ids', None)
+                        
+                        # Check if we've met the target for this leg count
+                        current_count = sum(1 for p in selected_parlays if p['num_legs'] == num_legs)
+                        if current_count >= target_counts[num_legs]:
+                            continue  # Move to next leg count
+            
+            # If we still have room, fill with any remaining parlays
+            for parlay in all_parlays:
+                if len(selected_parlays) >= limit:
+                    break
+                if parlay not in selected_parlays:
+                    parlay_players = parlay['player_ids']
+                    if parlay_players.isdisjoint(used_players):
+                        selected_parlays.append(parlay)
+                        used_players.update(parlay_players)
+                        parlay.pop('player_ids', None)
+            
+            return selected_parlays
+        else:
+            # Return top N without diversification
+            for parlay in all_parlays[:limit]:
+                parlay.pop('player_ids', None)  # Remove internal tracking field
+            return all_parlays[:limit]
+    
+    def get_suggested_parlays_by_stat_mix(
+        self,
+        game_date: Optional[date] = None,
+        limit: int = 5,
+        diversify_players: bool = True
+    ) -> List[Dict]:
+        """
+        Get suggested parlays with a mix of stat types (points, rebounds, assists).
+        
+        This ensures parlays have variety rather than all the same stat type.
+        Also ensures player diversification across all suggested parlays.
+        """
+        if game_date is None:
+            game_date = date.today()
+        
+        # Get suggested bets grouped by stat type
+        suggested_bets = self.get_suggested_bets(game_date, limit=30, min_probability=0.60)
+        
+        bets_by_stat = {
+            'points': [b for b in suggested_bets if b['stat_type'] == 'points'],
+            'rebounds': [b for b in suggested_bets if b['stat_type'] == 'rebounds'],
+            'assists': [b for b in suggested_bets if b['stat_type'] == 'assists']
+        }
+        
+        all_parlays = []
+        
+        # Create 3-leg parlays with one of each stat type
+        if (len(bets_by_stat['points']) > 0 and 
+            len(bets_by_stat['rebounds']) > 0 and 
+            len(bets_by_stat['assists']) > 0):
+            
+            # Take top bet from each stat type
+            for points_bet in bets_by_stat['points'][:5]:
+                for rebounds_bet in bets_by_stat['rebounds'][:5]:
+                    for assists_bet in bets_by_stat['assists'][:5]:
+                        # Ensure different players within parlay
+                        if (points_bet['player_id'] != rebounds_bet['player_id'] and
+                            points_bet['player_id'] != assists_bet['player_id'] and
+                            rebounds_bet['player_id'] != assists_bet['player_id']):
+                            
+                            combo = [points_bet, rebounds_bet, assists_bet]
+                            combined_prob = points_bet['probability'] * rebounds_bet['probability'] * assists_bet['probability']
+                            
+                            if combined_prob > 0:
+                                decimal_odds = 1.0 / combined_prob
+                                american_odds = (decimal_odds - 1) * 100
+                            else:
+                                american_odds = None
+                            
+                            all_parlays.append({
+                                'legs': combo,
+                                'num_legs': 3,
+                                'combined_probability': round(combined_prob, 4),
+                                'combined_odds': round(american_odds, 0) if american_odds else None,
+                                'odds_display': f"+{int(american_odds)}" if american_odds and american_odds > 0 else f"{int(american_odds)}" if american_odds else "N/A",
+                                'stat_diversity': 3,  # All three stat types
+                                'player_ids': {points_bet['player_id'], rebounds_bet['player_id'], assists_bet['player_id']}
+                            })
+        
+        # Create 4-leg parlays: one of each stat type + one extra (different player)
+        if (len(bets_by_stat['points']) > 0 and 
+            len(bets_by_stat['rebounds']) > 0 and 
+            len(bets_by_stat['assists']) > 0):
+            
+            for points_bet in bets_by_stat['points'][:3]:
+                for rebounds_bet in bets_by_stat['rebounds'][:3]:
+                    for assists_bet in bets_by_stat['assists'][:3]:
+                        # Add a 4th leg from any stat type (must be different player)
+                        for fourth_stat in ['points', 'rebounds', 'assists']:
+                            for fourth_bet in bets_by_stat[fourth_stat][:5]:
+                                player_ids = {points_bet['player_id'], rebounds_bet['player_id'], 
+                                            assists_bet['player_id'], fourth_bet['player_id']}
+                                if len(player_ids) == 4:  # All different players
+                                    combo = [points_bet, rebounds_bet, assists_bet, fourth_bet]
+                                    combined_prob = (points_bet['probability'] * rebounds_bet['probability'] * 
+                                                   assists_bet['probability'] * fourth_bet['probability'])
+                                    
+                                    if combined_prob > 0:
+                                        decimal_odds = 1.0 / combined_prob
+                                        american_odds = (decimal_odds - 1) * 100
+                                    else:
+                                        american_odds = None
+                                    
+                                    all_parlays.append({
+                                        'legs': combo,
+                                        'num_legs': 4,
+                                        'combined_probability': round(combined_prob, 4),
+                                        'combined_odds': round(american_odds, 0) if american_odds else None,
+                                        'odds_display': f"+{int(american_odds)}" if american_odds and american_odds > 0 else f"{int(american_odds)}" if american_odds else "N/A",
+                                        'stat_diversity': len(set([b['stat_type'] for b in combo])),
+                                        'player_ids': player_ids
+                                    })
+                                    break  # Only one 4-leg per combo
+                            break  # Only try one stat type for 4th leg
+        
+        # Also create 2-leg parlays with different stat types
+        for stat1, stat2 in [('points', 'rebounds'), ('points', 'assists'), ('rebounds', 'assists')]:
+            if len(bets_by_stat[stat1]) > 0 and len(bets_by_stat[stat2]) > 0:
+                for bet1 in bets_by_stat[stat1][:5]:
+                    for bet2 in bets_by_stat[stat2][:5]:
+                        if bet1['player_id'] != bet2['player_id']:
+                            combo = [bet1, bet2]
+                            combined_prob = bet1['probability'] * bet2['probability']
+                            
+                            if combined_prob > 0:
+                                decimal_odds = 1.0 / combined_prob
+                                american_odds = (decimal_odds - 1) * 100
+                            else:
+                                american_odds = None
+                            
+                            all_parlays.append({
+                                'legs': combo,
+                                'num_legs': 2,
+                                'combined_probability': round(combined_prob, 4),
+                                'combined_odds': round(american_odds, 0) if american_odds else None,
+                                'odds_display': f"+{int(american_odds)}" if american_odds and american_odds > 0 else f"{int(american_odds)}" if american_odds else "N/A",
+                                'stat_diversity': 2,
+                                'player_ids': {bet1['player_id'], bet2['player_id']}
+                            })
+        
+        # Sort by combined probability (highest first)
+        all_parlays.sort(key=lambda x: x['combined_probability'], reverse=True)
+        
+        # If diversification is enabled, select parlays ensuring no player overlap
+        # But prioritize getting a mix of 2, 3, and 4 leg parlays
+        if diversify_players:
+            selected_parlays = []
+            used_players = set()
+            
+            # Group parlays by leg count
+            parlays_by_legs = {2: [], 3: [], 4: []}
+            for parlay in all_parlays:
+                num_legs = parlay['num_legs']
+                if num_legs in parlays_by_legs:
+                    parlays_by_legs[num_legs].append(parlay)
+            
+            # Try to get at least one of each leg count
+            target_counts = {2: limit // 3, 3: limit // 3, 4: limit // 3}
+            remaining = limit - sum(target_counts.values())
+            target_counts[2] += remaining  # Give remainder to 2-leg parlays
+            
+            for num_legs in [4, 3, 2]:  # Prioritize higher leg counts
+                for parlay in parlays_by_legs[num_legs]:
+                    if len(selected_parlays) >= limit:
+                        break
+                    
+                    parlay_players = parlay['player_ids']
+                    if parlay_players.isdisjoint(used_players):
+                        selected_parlays.append(parlay)
+                        used_players.update(parlay_players)
+                        parlay.pop('player_ids', None)
+                        
+                        # Check if we've met the target for this leg count
+                        current_count = sum(1 for p in selected_parlays if p['num_legs'] == num_legs)
+                        if current_count >= target_counts[num_legs]:
+                            continue  # Move to next leg count
+            
+            # If we still have room, fill with any remaining parlays
+            for parlay in all_parlays:
+                if len(selected_parlays) >= limit:
+                    break
+                if parlay not in selected_parlays:
+                    parlay_players = parlay['player_ids']
+                    if parlay_players.isdisjoint(used_players):
+                        selected_parlays.append(parlay)
+                        used_players.update(parlay_players)
+                        parlay.pop('player_ids', None)
+            
+            return selected_parlays
+        else:
+            # Return top N without diversification
+            for parlay in all_parlays[:limit]:
+                parlay.pop('player_ids', None)
+            return all_parlays[:limit]
+    
+    def get_safe_long_parlays(
+        self,
+        game_date: Optional[date] = None,
+        limit: int = 3,
+        num_legs: int = 12,
+        min_leg_probability: float = 0.75,  # Each leg should be at least 75% likely (default, can be adjusted)
+        exclude_player_ids: Optional[List[int]] = None  # Player IDs to exclude from generation
+    ) -> List[Dict]:
+        """
+        Get long parlays (10-15 legs) made of very safe bets.
+        
+        The idea: Combine many high-probability bets to create a long shot parlay
+        with good odds, where each individual leg is very likely to hit.
+        
+        Args:
+            game_date: Date to get suggestions for (default: today)
+            limit: Maximum number of parlay suggestions
+            num_legs: Number of legs in the parlay (10-15)
+            min_leg_probability: Minimum probability for each leg (default: 0.80 = 80%)
+        
+        Returns:
+            List of safe long parlay dictionaries
+        """
+        if game_date is None:
+            game_date = date.today()
+        
+        # Get games for the date (include finished games for historical viewing)
+        games = self.db.query(Game).filter(
+            Game.game_date == game_date
+        ).all()
+        
+        if not games:
+            return []
+        
+        game_ids = [g.game_id for g in games]
+        
+        # Get predictions with very high safe probabilities (≥80%)
+        # Use safe_line but require higher probability threshold
+        predictions = self.db.query(Prediction).filter(
+            and_(
+                Prediction.game_id.in_(game_ids),
+                Prediction.bet_type == 'safe',  # Only safe bets
+                Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
+                Prediction.safe_probability >= min_leg_probability,  # Very safe threshold
+                Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
+            )
+        ).order_by(Prediction.safe_probability.desc()).all()
+        
+        # Filter out injured players
+        from app.services.injury_context import InjuryContext
+        injury_context = InjuryContext(self.db)
+        healthy_predictions = []
+        for pred in predictions:
+            injury_status = injury_context.get_player_injury_status(pred.player_id)
+            if injury_status and injury_status['status'] in ['Out', 'Doubtful', 'Questionable']:
+                continue  # Skip injured players
+            healthy_predictions.append(pred)
+        predictions = healthy_predictions
+        
+        if len(predictions) < num_legs:
+            return []  # Not enough safe bets available
+        
+        # Convert to bet format (optimized with batch queries)
+        player_ids = list(set([p.player_id for p in predictions]))
+        game_ids = list(set([p.game_id for p in predictions]))
+        
+        # Batch load all players, games, and teams
+        players_dict = {p.player_id: p for p in self.db.query(Player).filter(Player.player_id.in_(player_ids)).all()}
+        games_dict = {g.game_id: g for g in self.db.query(Game).filter(Game.game_id.in_(game_ids)).all()}
+        team_ids = list(set([p.current_team_id for p in players_dict.values() if p.current_team_id]))
+        teams_dict = {t.team_id: t for t in self.db.query(Team).filter(Team.team_id.in_(team_ids)).all()} if team_ids else {}
+        
+        safe_bets = []
+        for pred in predictions:
+            player = players_dict.get(pred.player_id)
+            game = games_dict.get(pred.game_id)
+            
+            if not player or not game:
+                continue
+            
+            # Get player's team
+            player_team = None
+            if player.current_team_id:
+                team = teams_dict.get(player.current_team_id)
+                player_team = team.abbreviation if team else None
+            
+            safe_bets.append({
+                'prediction_id': pred.prediction_id,
+                'player_id': pred.player_id,
+                'player_name': player.name,
+                'player_team': player_team,
+                'game_id': pred.game_id,
+                'stat_type': pred.stat_type,
+                'bet_type': 'safe',
+                'line': pred.safe_line,
+                'probability': pred.safe_probability,
+                'confidence_level': pred.confidence_level,
+                'volatility_level': pred.volatility_level
+            })
+        
+        # Use a smarter greedy algorithm instead of generating all combinations
+        # Generating C(38, 12) = billions of combinations is too slow!
+        # Instead, we'll use a greedy approach to build good parlays
+        
+        selected_parlays = []
+        used_players = set()
+        
+        # Group bets by game for better diversification
+        bets_by_game = {}
+        for bet in safe_bets:
+            game_id = bet['game_id']
+            if game_id not in bets_by_game:
+                bets_by_game[game_id] = []
+            bets_by_game[game_id].append(bet)
+        
+        # Try to build limit number of parlays
+        for parlay_idx in range(limit):
+            if len(used_players) >= len(safe_bets):
+                break  # No more unique players available
+            
+            # Build one parlay using greedy selection
+            parlay_legs = []
+            parlay_players = set()
+            parlay_games = set()
+            
+            # Start with highest probability bets, ensuring diversity
+            # Exclude players that were in previous parlays AND any explicitly excluded players
+            exclude_set = used_players.copy()
+            if exclude_player_ids:
+                exclude_set.update(exclude_player_ids)
+            available_bets = [b for b in safe_bets if b['player_id'] not in exclude_set]
+            
+            # Sort by probability (highest first) but also consider game diversity
+            available_bets.sort(key=lambda x: (
+                x['probability'],  # Higher probability is better
+                -len([b for b in available_bets if b['game_id'] == x['game_id']])  # Prefer games with fewer available bets
+            ), reverse=True)
+            
+            # Select num_legs bets, ensuring all different players
+            for bet in available_bets:
+                if len(parlay_legs) >= num_legs:
+                    break
+                
+                # Skip if we already have this player
+                if bet['player_id'] in parlay_players:
+                    continue
+                
+                parlay_legs.append(bet)
+                parlay_players.add(bet['player_id'])
+                parlay_games.add(bet['game_id'])
+            
+            # If we don't have enough legs, skip this parlay
+            if len(parlay_legs) < num_legs:
+                break
+            
+            # Calculate combined probability
+            combined_prob = 1.0
+            for bet in parlay_legs:
+                combined_prob *= bet['probability']
+            
+            # Convert to odds
+            if combined_prob > 0:
+                decimal_odds = 1.0 / combined_prob
+                american_odds = (decimal_odds - 1) * 100
+            else:
+                american_odds = None
+            
+            parlay = {
+                'legs': parlay_legs,
+                'num_legs': num_legs,
+                'combined_probability': round(combined_prob, 4),
+                'combined_odds': round(american_odds, 0) if american_odds else None,
+                'odds_display': f"+{int(american_odds)}" if american_odds and american_odds > 0 else f"{int(american_odds)}" if american_odds else "N/A",
+                'min_leg_probability': min(bet['probability'] for bet in parlay_legs),
+                'avg_leg_probability': sum(bet['probability'] for bet in parlay_legs) / len(parlay_legs),
+                'game_diversity': len(parlay_games),
+                'player_ids': parlay_players
+            }
+            
+            selected_parlays.append(parlay)
+            used_players.update(parlay_players)
+        
+        # Remove player_ids from response (internal tracking only)
+        for parlay in selected_parlays:
+            parlay.pop('player_ids', None)
+        
+        return selected_parlays
+    
+    def get_same_game_parlays(
+        self,
+        game_id: int,
+        limit: int = 5,
+        num_legs: int = 3,
+        min_leg_probability: float = 0.70
+    ) -> List[Dict]:
+        """
+        Get parlay suggestions for a specific game (all legs from same game).
+        
+        Args:
+            game_id: Game ID
+            limit: Maximum number of parlay suggestions
+            num_legs: Number of legs in parlay (2-4)
+            min_leg_probability: Minimum probability for each leg
+        
+        Returns:
+            List of same-game parlay dictionaries
+        """
+        # Verify game exists
+        game = self.db.query(Game).filter(Game.game_id == game_id).first()
+        if not game:
+            return []
+        
+        # Get predictions for this game with good probabilities
+        # Get all predictions (safe, standard, long_shot) and pick the best one per player-stat combo
+        all_predictions = self.db.query(Prediction).filter(
+            and_(
+                Prediction.game_id == game_id,
+                Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
+                Prediction.bet_type.in_(['safe', 'standard']),  # Only safe/standard for same-game parlays
+                Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
+            )
+        ).all()
+        
+        # Filter out injured/out players
+        from app.services.injury_context import InjuryContext
+        injury_context = InjuryContext(self.db)
+        
+        # Group by player_id + stat_type, keep the one with highest probability
+        best_predictions = {}
+        for pred in all_predictions:
+            # Check injury status
+            injury_status = injury_context.get_player_injury_status(pred.player_id)
+            if injury_status and injury_status['status'] in ['Out', 'Doubtful']:
+                continue  # Skip injured players
+            
+            # Determine which probability to use
+            if pred.bet_type == 'safe' and pred.safe_probability:
+                prob = pred.safe_probability
+            elif pred.bet_type == 'standard' and pred.standard_probability:
+                prob = pred.standard_probability
+            else:
+                continue  # No valid probability
+            
+            if prob < min_leg_probability:
+                continue  # Doesn't meet threshold
+            
+            # Keep the best prediction per player-stat combo
+            key = (pred.player_id, pred.stat_type)
+            if key not in best_predictions or prob > best_predictions[key][1]:
+                best_predictions[key] = (pred, prob)
+        
+        available_predictions = [pred for pred, _ in best_predictions.values()]
+        
+        if len(available_predictions) < num_legs:
+            return []
+        
+        # Convert to bet format
+        player_ids = list(set([p.player_id for p in available_predictions]))
+        players_dict = {p.player_id: p for p in self.db.query(Player).filter(Player.player_id.in_(player_ids)).all()}
+        team_ids = list(set([p.current_team_id for p in players_dict.values() if p.current_team_id]))
+        teams_dict = {t.team_id: t for t in self.db.query(Team).filter(Team.team_id.in_(team_ids)).all()} if team_ids else {}
+        
+        bets = []
+        for pred in available_predictions:
+            player = players_dict.get(pred.player_id)
+            if not player:
+                continue
+            
+            # Use safe or standard line/probability based on bet_type
+            # We already filtered by probability above, so just use the appropriate one
+            if pred.bet_type == 'safe' and pred.safe_probability:
+                line = pred.safe_line
+                probability = pred.safe_probability
+                bet_type = 'safe'
+            elif pred.bet_type == 'standard' and pred.standard_probability:
+                line = pred.standard_line
+                probability = pred.standard_probability
+                bet_type = 'standard'
+            else:
+                continue  # Shouldn't happen, but safety check
+            
+            team = teams_dict.get(player.current_team_id) if player.current_team_id else None
+            
+            bets.append({
+                'prediction_id': pred.prediction_id,
+                'player_id': pred.player_id,
+                'player_name': player.name,
+                'player_team': team.abbreviation if team else None,
+                'game_id': pred.game_id,
+                'stat_type': pred.stat_type,
+                'bet_type': bet_type,
+                'line': line,
+                'probability': probability,
+                'confidence_level': pred.confidence_level
+            })
+        
+        if len(bets) < num_legs:
+            return []
+        
+        # Generate same-game parlays using greedy algorithm
+        selected_parlays = []
+        used_players = set()
+        
+        # Group bets by stat type for diversity
+        bets_by_stat = {
+            'points': [b for b in bets if b['stat_type'] == 'points'],
+            'rebounds': [b for b in bets if b['stat_type'] == 'rebounds'],
+            'assists': [b for b in bets if b['stat_type'] == 'assists']
+        }
+        
+        # Try to build parlays with stat diversity
+        for parlay_idx in range(limit):
+            if len(used_players) >= len(bets):
+                break
+            
+            parlay_legs = []
+            parlay_players = set()
+            parlay_stats = set()
+            
+            # Prefer different stat types
+            available_bets = [b for b in bets if b['player_id'] not in used_players]
+            
+            # Sort to prioritize different stat types and higher probabilities
+            available_bets.sort(key=lambda x: (
+                len([b for b in parlay_legs if b['stat_type'] == x['stat_type']]),  # Prefer different stats
+                -x['probability']  # Then by probability
+            ))
+            
+            for bet in available_bets:
+                if len(parlay_legs) >= num_legs:
+                    break
+                
+                # Skip if we already have this player
+                if bet['player_id'] in parlay_players:
+                    continue
+                
+                parlay_legs.append(bet)
+                parlay_players.add(bet['player_id'])
+                parlay_stats.add(bet['stat_type'])
+            
+            if len(parlay_legs) < num_legs:
+                break
+            
+            # Calculate combined probability
+            combined_prob = 1.0
+            for bet in parlay_legs:
+                combined_prob *= bet['probability']
+            
+            # Convert to odds
+            if combined_prob > 0:
+                decimal_odds = 1.0 / combined_prob
+                american_odds = (decimal_odds - 1) * 100
+            else:
+                american_odds = None
+            
+            parlay = {
+                'legs': parlay_legs,
+                'num_legs': num_legs,
+                'combined_probability': round(combined_prob, 4),
+                'combined_odds': round(american_odds, 0) if american_odds else None,
+                'odds_display': f"+{int(american_odds)}" if american_odds and american_odds > 0 else f"{int(american_odds)}" if american_odds else "N/A",
+                'min_leg_probability': min(bet['probability'] for bet in parlay_legs),
+                'avg_leg_probability': sum(bet['probability'] for bet in parlay_legs) / len(parlay_legs),
+                'stat_diversity': len(parlay_stats),
+                'game_id': game_id
+            }
+            
+            selected_parlays.append(parlay)
+            used_players.update(parlay_players)
+        
+        return selected_parlays
+
