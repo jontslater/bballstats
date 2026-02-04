@@ -13,7 +13,7 @@ from .injury import Injury
 from .team_position_defense import TeamPositionDefense
 from .player_team_matchup import PlayerTeamMatchup
 from .injury_impact_history import InjuryImpactHistory
-from .prediction import Prediction
+from .prediction import Prediction, ValueLadder, HistoricalSuggestedBet, HistoricalParlay, HistoricalParlayLeg
 from .game_schedule import GameSchedule
 from .user_play import UserPlay
 from .lineup import Lineup
@@ -32,6 +32,10 @@ __all__ = [
     "PlayerTeamMatchup",
     "InjuryImpactHistory",
     "Prediction",
+    "ValueLadder",
+    "HistoricalSuggestedBet",
+    "HistoricalParlay",
+    "HistoricalParlayLeg",
     "GameSchedule",
     "UserPlay",
     "Lineup",

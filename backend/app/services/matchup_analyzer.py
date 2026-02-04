@@ -3,7 +3,7 @@ Player-Team Matchup Analyzer
 
 Analyzes historical performance of players against specific teams.
 """
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, desc
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from app.models.player_team_matchup import PlayerTeamMatchup

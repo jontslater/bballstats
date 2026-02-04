@@ -4,7 +4,7 @@ Prediction Evaluator Service
 Evaluates predictions after games finish to determine which bets hit.
 """
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func
+from sqlalchemy import and_, or_, func, desc
 from typing import Dict, List, Optional
 from datetime import date, timedelta
 from app.models.prediction import Prediction
@@ -72,6 +72,10 @@ class PredictionEvaluator:
             # Combo: rebounds + assists
             if stat.rebounds is not None and stat.assists is not None:
                 actual_value = stat.rebounds + stat.assists
+        elif prediction.stat_type == 'pts+ast+reb':
+            # PAR: points + assists + rebounds
+            if stat.points is not None and stat.assists is not None and stat.rebounds is not None:
+                actual_value = stat.points + stat.assists + stat.rebounds
         
         # Only skip if actual_value is None (not if it's 0, which is valid)
         if actual_value is None:
@@ -385,6 +389,10 @@ class PredictionEvaluator:
                             # Combo: rebounds + assists
                             if stat.rebounds is not None and stat.assists is not None:
                                 actual_result = stat.rebounds + stat.assists
+                        elif pred.stat_type == 'pts+ast+reb':
+                            # PAR: points + assists + rebounds
+                            if stat.points is not None and stat.assists is not None and stat.rebounds is not None:
+                                actual_result = stat.points + stat.assists + stat.rebounds
                 else:
                     # Player has stats but minutes_played is 0 or None - they didn't play
                     is_void = True

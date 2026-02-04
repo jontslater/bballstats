@@ -1,5 +1,5 @@
 """
-UserPlay model - User-created betting plays
+UserPlay model - User-created betting plays (NBA and NFL)
 """
 from sqlalchemy import Column, Integer, ForeignKey, String, Float, Text, DateTime
 from sqlalchemy.orm import relationship
@@ -11,9 +11,10 @@ class UserPlay(Base):
     __tablename__ = "user_plays"
 
     play_id = Column(Integer, primary_key=True, index=True)
+    sport = Column(String(10), nullable=False, default='NBA', index=True)  # 'NBA' or 'NFL'
     player_id = Column(Integer, ForeignKey("players.player_id"), nullable=False)
     game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False)
-    stat_type = Column(String(20), nullable=False)  # points, rebounds, assists, minutes
+    stat_type = Column(String(30), nullable=False)  # points, rebounds, assists (NBA) or passing_yards, etc. (NFL)
     
     # Bet details
     bet_line = Column(String(50))  # e.g., "Over 24.5", "Under 10.5"

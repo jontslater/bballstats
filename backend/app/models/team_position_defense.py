@@ -10,8 +10,9 @@ class TeamPositionDefense(Base):
     __tablename__ = "team_position_defense"
 
     id = Column(Integer, primary_key=True, index=True)
+    sport = Column(String(10), nullable=False, default='NBA', index=True)  # 'NBA' or 'NFL'
     team_id = Column(Integer, ForeignKey("teams.team_id"), nullable=False)
-    position = Column(String(10), nullable=False)  # PG, SG, SF, PF, C
+    position = Column(String(10), nullable=False)  # PG, SG, SF, PF, C (NBA) or QB, RB, WR, TE (NFL)
     season_id = Column(Integer, ForeignKey("seasons.season_id"), nullable=False)
     
     # Aggregated stats
@@ -33,10 +34,13 @@ class TeamPositionDefense(Base):
     
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    # Unique constraint - one record per team/position/season
-    __table_args__ = (UniqueConstraint('team_id', 'position', 'season_id', name='_team_pos_season_uc'),)
+    # Unique constraint - one record per team/position/season per sport
+    __table_args__ = (UniqueConstraint('sport', 'team_id', 'position', 'season_id', name='_sport_team_pos_season_uc'),)
 
     def __repr__(self):
         return f"<TeamPositionDefense {self.team_id} vs {self.position}: Rank {self.defensive_ranking}>"
+
+
+
 
 

@@ -3,6 +3,7 @@ import { format } from 'date-fns';
 import { Link } from 'react-router-dom';
 import apiService, { Prediction } from '../services/api';
 import { parseDateString } from '../utils/dateUtils';
+import Last3Games from '../components/Last3Games';
 
 interface ComboBet {
   player_id: number;
@@ -23,7 +24,14 @@ export default function AllPredictions() {
   const [predictions, setPredictions] = useState<Prediction[]>([]);
   const [comboBets, setComboBets] = useState<{ games: any[] } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [selectedDate, setSelectedDate] = useState(() => {
+    // Use a reliable date formatting method
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  });
   const [statFilter, setStatFilter] = useState<string>('all');
   const [betTypeFilter, setBetTypeFilter] = useState<string>('all');
   const [sortBy, setSortBy] = useState<string>('probability'); // probability, mean, player
@@ -220,8 +228,6 @@ export default function AllPredictions() {
 
       // Format each player's predictions
       Object.entries(byPlayer).forEach(([playerName, playerPreds]) => {
-        lines.push(`  ${playerName} (${playerPreds[0].player_team || 'N/A'})`);
-        
         playerPreds.forEach(pred => {
           const line = getLine(pred);
           const probability = getProbability(pred);
@@ -233,7 +239,7 @@ export default function AllPredictions() {
                          pred.bet_type === 'standard' ? 'STD' : 
                          'LONG';
           
-          lines.push(`    ${statType} Over ${line.toFixed(1)} - ${(probability * 100).toFixed(1)}% (${betType})`);
+          lines.push(`  ${playerName} (${pred.player_team || 'N/A'}) - ${statType} Over ${line.toFixed(1)} - ${(probability * 100).toFixed(1)}% (${betType})`);
         });
       });
       
@@ -318,8 +324,6 @@ export default function AllPredictions() {
       
       // Format each player's bets
       Object.entries(byPlayer).forEach(([playerName, playerBets]) => {
-        lines.push(`  ${playerName}`);
-        
         playerBets.forEach(bet => {
           let betLine = '';
           
@@ -343,7 +347,7 @@ export default function AllPredictions() {
           }
           
           if (betLine) {
-            lines.push(`    ${betLine}`);
+            lines.push(`  ${playerName} - ${betLine}`);
           }
         });
       });
@@ -504,6 +508,13 @@ export default function AllPredictions() {
                                 <div className="text-sm text-gray-600">
                                   {bet.display || `${bet.stat1?.toUpperCase()} + ${bet.stat2?.toUpperCase()} Over ${bet.line?.toFixed(1)}`}
                                 </div>
+                                {bet.last_3_games && bet.last_3_games.length > 0 && (
+                                  <Last3Games 
+                                    last3Games={bet.last_3_games} 
+                                    statType={`${bet.stat1}+${bet.stat2}`}
+                                    isCombo={true}
+                                  />
+                                )}
                               </div>
                               <div className="text-right ml-4">
                                 <div className="text-sm font-semibold text-blue-600">
@@ -531,6 +542,14 @@ export default function AllPredictions() {
                                 <div className="text-sm text-gray-600">
                                   {bet.display || bet.label || 'Double-Double'}
                                 </div>
+                                {bet.last_3_games && bet.last_3_games.length > 0 && (
+                                  <Last3Games 
+                                    last3Games={bet.last_3_games} 
+                                    statType="DD"
+                                    isCombo={false}
+                                    isMilestone={true}
+                                  />
+                                )}
                               </div>
                               <div className="text-right ml-4">
                                 <div className="text-sm font-semibold text-blue-600">
@@ -558,6 +577,14 @@ export default function AllPredictions() {
                                 <div className="text-sm text-gray-600">
                                   {bet.display || bet.label || 'Triple-Double'}
                                 </div>
+                                {bet.last_3_games && bet.last_3_games.length > 0 && (
+                                  <Last3Games 
+                                    last3Games={bet.last_3_games} 
+                                    statType="TD"
+                                    isCombo={false}
+                                    isMilestone={true}
+                                  />
+                                )}
                               </div>
                               <div className="text-right ml-4">
                                 <div className="text-sm font-semibold text-blue-600">
@@ -649,6 +676,9 @@ export default function AllPredictions() {
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Confidence
                         </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Last 3 Games
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
@@ -714,6 +744,9 @@ export default function AllPredictions() {
                               <div className="text-xs text-gray-500">
                                 {prediction.volatility_level || 'N/A'}
                               </div>
+                            </td>
+                            <td className="px-6 py-4">
+                              <Last3Games last3Games={prediction.last_3_games} statType={prediction.stat_type} />
                             </td>
                           </tr>
                         );

@@ -3,8 +3,8 @@ Prediction Adjustments
 
 Handles mean and variance adjustments for predictions based on contextual factors.
 """
-from typing import Dict, Optional
-from sqlalchemy import and_, or_
+from typing import Dict, Optional, List
+from sqlalchemy import and_, or_, desc
 from app.models.team_position_defense import TeamPositionDefense
 from app.models.player_team_matchup import PlayerTeamMatchup
 from app.services.pace_calculator import PaceCalculator
@@ -12,6 +12,12 @@ from app.services.injury_context import InjuryContext
 from app.services.league_averages import LeagueAverages
 from app.services.form_calculator import FormCalculator
 from app.services.player_matchup_service import PlayerMatchupService
+from app.services.teammate_chemistry_service import TeammateChemistryService
+from app.services.advanced_analytics_service import AdvancedAnalyticsService
+from app.services.situational_performance_service import SituationalPerformanceService
+from app.services.motivation_service import MotivationService
+from app.services.player_health_service import PlayerHealthService
+from app.services.ml_ensemble_service import MLEnsembleService
 from app.models.player_game_stat import PlayerGameStat
 from app.models.game import Game
 from app.models.team import Team
@@ -28,6 +34,12 @@ class PredictionAdjustments:
         self.league_avg = LeagueAverages(db_session)
         self.form_calc = FormCalculator(db_session)
         self.player_matchup = PlayerMatchupService(db_session)
+        self.teammate_chemistry = TeammateChemistryService(db_session)
+        self.advanced_analytics = AdvancedAnalyticsService(db_session)
+        self.situational_performance = SituationalPerformanceService(db_session)
+        self.motivation = MotivationService(db_session)
+        self.player_health = PlayerHealthService(db_session)
+        self.ml_ensemble = MLEnsembleService(db_session)
     
     def clamp(self, value: float, min_val: float, max_val: float) -> float:
         """Clamp a value between min and max."""
@@ -44,7 +56,10 @@ class PredictionAdjustments:
         player_position: Optional[str] = None,
         season_id: Optional[int] = None,
         usage_factor: Optional[float] = None,
-        stat_type: str = 'points'
+        stat_type: str = 'points',
+        game_id: Optional[int] = None,
+        game_context: Optional[Dict] = None,
+        is_promoted_bench_player: bool = False
     ) -> Dict[str, float]:
         """
         Calculate all mean adjustment factors.
@@ -137,8 +152,150 @@ class PredictionAdjustments:
                 if opponent_avg_allowed and league_avg_allowed and league_avg_allowed > 0:
                     # Higher opponent avg allowed = easier matchup = boost prediction
                     # Lower opponent avg allowed = tougher matchup = reduce prediction
-                    defense_factor = opponent_avg_allowed / league_avg_allowed
-                    defense_factor = self.clamp(defense_factor, 0.85, 1.20)
+                    base_defense_factor = opponent_avg_allowed / league_avg_allowed
+
+                    # ENHANCEMENT: Apply stat-specific defense weighting
+                    # Points most affected by defense, rebounds least affected
+                    if stat_type == 'points':
+                        defense_weight = 1.0  # Full weight for points
+                    elif stat_type == 'assists':
+                        defense_weight = 0.8  # Assists moderately affected by defense
+                    elif stat_type == 'rebounds':
+                        defense_weight = 0.6  # Rebounds less affected by defensive scheme
+                    elif stat_type == 'three_pointers_made':
+                        defense_weight = 0.9  # 3s heavily affected by perimeter defense
+                    else:
+                        defense_weight = 0.7  # Default moderate weight
+
+                    # Apply stat-specific weighting
+                    defense_factor = 1.0 + ((base_defense_factor - 1.0) * defense_weight)
+                    defense_factor = self.clamp(defense_factor, 0.80, 1.25)
+
+        # ENHANCEMENT: Offensive Context Factor
+        # Consider opponent's offensive efficiency and its impact on certain stats
+        offensive_context_factor = 1.0
+        if stat_type in ['rebounds', 'assists', 'three_pointers_made']:
+            opponent_recent_offense = self._calculate_team_recent_offense(opponent_team_id, season_id)
+            league_avg_offense = self._calculate_league_avg_offense(season_id)
+
+            if league_avg_offense > 0 and opponent_recent_offense > 0:
+                offense_strength = opponent_recent_offense / league_avg_offense
+
+                # Stat-specific offensive context effects:
+                if stat_type == 'rebounds':
+                    # Better offense = more misses = more rebounds available
+                    offensive_context_factor = 1.0 + ((offense_strength - 1.0) * 0.25)
+                elif stat_type == 'assists':
+                    # Better offense = more ball movement = more assists
+                    offensive_context_factor = 1.0 + ((offense_strength - 1.0) * 0.35)
+                elif stat_type == 'three_pointers_made':
+                    # Better offense = more spacing = more 3-point attempts
+                    offensive_context_factor = 1.0 + ((offense_strength - 1.0) * 0.20)
+
+                offensive_context_factor = self.clamp(offensive_context_factor, 0.90, 1.10)
+
+        # ENHANCEMENT: Lineup Context Factor
+        # Consider how lineup stability and changes affect performance
+        lineup_context_factor = 1.0
+
+        # Check for lineup changes that might affect this player
+        lineup_stability = self._calculate_lineup_stability_factor(
+            player_id, game_id, season_id, is_promoted_bench_player
+        )
+        lineup_context_factor = lineup_stability
+
+        # ENHANCEMENT: Teammate Chemistry Factor
+        # Consider how teammate performance affects individual player performance
+        teammate_chemistry_factor = 1.0
+
+        if game_id:
+            # Get current teammate performance projections for this game
+            teammate_performance = self._get_teammate_performance_projections(
+                player_id, game_id, season_id
+            )
+
+            if teammate_performance:
+                teammate_chemistry_factor = self.teammate_chemistry.get_teammate_performance_multiplier(
+                    player_id, teammate_performance, stat_type, season_id
+                )
+
+        # ENHANCEMENT: Advanced Analytics Factor
+        # Use sophisticated NBA metrics (PER, TS%, USG%, etc.) for better predictions
+        advanced_analytics_factor = self.advanced_analytics.get_advanced_performance_multiplier(
+            player_id, stat_type, season_id, recent_games=10
+        )
+
+        # ENHANCEMENT: Situational Performance Factor
+        # Consider how player performs in current game situation (clutch, blowout, pace, etc.)
+        situational_performance_factor = 1.0
+
+        if game_context:
+            # Extract situational context from game_context
+            situational_context = self._extract_situational_context(game_context)
+            situational_performance_factor = self.situational_performance.get_situational_performance_multiplier(
+                player_id, stat_type, situational_context, season_id
+            )
+
+        # ENHANCEMENT: Motivation Factor
+        # Consider psychological factors (playoffs, rivalries, revenge)
+        motivation_factor = 1.0
+
+        if game_id:
+            motivation_factor = self.motivation.calculate_motivation_multiplier(
+                player_id, game_id, season_id
+            )
+
+        # ENHANCEMENT: Player Health & Fatigue Factor
+        # Consider player's physical condition, fatigue, and load management
+        health_factor = 1.0
+
+        if game_id:
+            health_analysis = self.player_health.calculate_health_fatigue_factor(
+                player_id, game_id, season_id, projected_minutes
+            )
+            health_factor = health_analysis.get('overall_factor', 1.0)
+
+        # ENHANCEMENT: ML Ensemble Prediction Factor
+        # Use machine learning models for advanced prediction calibration
+        ml_factor = 1.0
+
+        if game_id:
+            try:
+                # Build feature vector for current game
+                feature_vector = self._build_ml_feature_vector(
+                    player_id, game_id, stat_type, season_id,
+                    projected_minutes, game_context
+                )
+
+                if feature_vector:
+                    # Get ML prediction
+                    ml_prediction = self.ml_ensemble.predict_with_ensemble(
+                        player_id, stat_type, feature_vector, season_id
+                    )
+
+                    if 'prediction' in ml_prediction and 'confidence' in ml_prediction:
+                        predicted_value = ml_prediction['prediction']
+                        confidence = ml_prediction['confidence']
+
+                        # Calculate adjustment factor based on ML prediction vs base prediction
+                        if base_mean > 0 and predicted_value > 0:
+                            ml_factor = predicted_value / base_mean
+
+                            # Weight by confidence (higher confidence = stronger adjustment)
+                            confidence_weight = 0.3 + (confidence * 0.4)  # 0.3 to 0.7
+                            ml_factor = 1.0 + ((ml_factor - 1.0) * confidence_weight)
+
+                            # Clamp to reasonable range
+                            ml_factor = max(0.75, min(1.35, ml_factor))
+                        else:
+                            ml_factor = 1.0
+                    else:
+                        ml_factor = 1.0
+                else:
+                    ml_factor = 1.0
+            except Exception:
+                # If ML fails, use traditional prediction
+                ml_factor = 1.0
         
         # Usage Factor (if teammate injured)
         if usage_factor is None:
@@ -160,18 +317,12 @@ class PredictionAdjustments:
         if team_matchup_factor is None:
             team_matchup_factor = 1.0
         
-        # Individual Player vs Player Matchup Factor - NEW IMPROVEMENT
-        player_matchup_factor = self.player_matchup.get_matchup_adjustment(
-            player_id, opponent_team_id, stat_type, season_id
+        # Comprehensive Matchup Analysis - ADVANCED IMPROVEMENT
+        # Combines multiple matchup factors for superior accuracy
+        comprehensive_matchup = self.player_matchup.get_comprehensive_matchup_analysis(
+            player_id, opponent_team_id, stat_type, game_id, season_id
         )
-        if player_matchup_factor is None:
-            player_matchup_factor = 1.0
-        
-        # Combine both matchup factors (weight team matchup more heavily)
-        # Ensure factors are not None before calculation
-        team_matchup_factor = team_matchup_factor if team_matchup_factor is not None else 1.0
-        player_matchup_factor = player_matchup_factor if player_matchup_factor is not None else 1.0
-        matchup_factor = (team_matchup_factor * 0.7) + (player_matchup_factor * 0.3)
+        matchup_factor = comprehensive_matchup.get('overall_matchup_factor', 1.0)
         
         # Form Trend Factor (Improving/Declining) - NEW IMPROVEMENT
         form_trend_factor = self._calculate_form_trend_factor(
@@ -180,8 +331,29 @@ class PredictionAdjustments:
         if form_trend_factor is None:
             form_trend_factor = 1.0
         
-        # Shooting Streak Factor (Hot/Cold) - NEW IMPROVEMENT
+        # Streak Continuation Factor - ADVANCED IMPROVEMENT
+        # Analyzes historical patterns to predict if current streaks will continue
+        # Applies to all stat types, not just points
+        streak_continuation_factor = 1.0
+
+        # Calculate current streak length for this stat
+        current_streak_info = self.form_calc.calculate_player_form(
+            player_id, season_id, last_n_games=15
+        )
+
+        if current_streak_info and 'streak_info' in current_streak_info:
+            streak_data = current_streak_info['streak_info']
+            streak_length = streak_data.get('current_streak_length', 0)
+
+            if abs(streak_length) >= 2:  # Only consider significant streaks
+                continuation_analysis = self.form_calc.calculate_streak_continuation_factor(
+                    player_id, stat_type, season_id, streak_length
+                )
+                streak_continuation_factor = continuation_analysis.get('continuation_factor', 1.0)
+
+        # Shooting Streak Factor (Hot/Cold) - ENHANCED IMPROVEMENT
         # Uses both traditional shooting % and True Shooting % for better accuracy
+        # Enhanced with streak continuation analysis
         # Only applies to points predictions
         shooting_factor = 1.0
         if stat_type == 'points':
@@ -191,17 +363,20 @@ class PredictionAdjustments:
             ts_streak = self.form_calc.calculate_true_shooting_percentage(
                 player_id, season_id, last_n_games=10
             )
-            
+
             # Combine both factors (weight TS% more heavily as it's more accurate)
             fg_factor = shooting_streak.get('shooting_factor', 1.0) if shooting_streak else 1.0
             ts_factor = ts_streak.get('ts_factor', 1.0) if ts_streak else 1.0
-            
+
             # Ensure factors are not None
             fg_factor = fg_factor if fg_factor is not None else 1.0
             ts_factor = ts_factor if ts_factor is not None else 1.0
-            
-            # Weighted average: 40% FG%, 60% TS%
-            shooting_factor = (fg_factor * 0.4) + (ts_factor * 0.6)
+
+            # Base shooting factor from percentages
+            base_shooting_factor = (fg_factor * 0.4) + (ts_factor * 0.6)
+
+            # Enhance with streak continuation if applicable
+            shooting_factor = base_shooting_factor * streak_continuation_factor
         
         # Final Adjusted Mean
         # TODO: Implement weighted combination instead of simple multiplication
@@ -213,23 +388,41 @@ class PredictionAdjustments:
         minutes_factor = minutes_factor if minutes_factor is not None else 1.0
         pace_factor = pace_factor if pace_factor is not None else 1.0
         defense_factor = defense_factor if defense_factor is not None else 1.0
+        offensive_context_factor = offensive_context_factor if offensive_context_factor is not None else 1.0
+        lineup_context_factor = lineup_context_factor if lineup_context_factor is not None else 1.0
+        teammate_chemistry_factor = teammate_chemistry_factor if teammate_chemistry_factor is not None else 1.0
+        advanced_analytics_factor = advanced_analytics_factor if advanced_analytics_factor is not None else 1.0
+        situational_performance_factor = situational_performance_factor if situational_performance_factor is not None else 1.0
+        motivation_factor = motivation_factor if motivation_factor is not None else 1.0
+        health_factor = health_factor if health_factor is not None else 1.0
+        ml_factor = ml_factor if ml_factor is not None else 1.0
         usage_factor = usage_factor if usage_factor is not None else 1.0
         home_factor = home_factor if home_factor is not None else 1.0
         rest_days_factor = rest_days_factor if rest_days_factor is not None else 1.0
         matchup_factor = matchup_factor if matchup_factor is not None else 1.0
         form_trend_factor = form_trend_factor if form_trend_factor is not None else 1.0
         shooting_factor = shooting_factor if shooting_factor is not None else 1.0
-        
-        adjusted_mean = (base_mean * 
-                        minutes_factor * 
-                        pace_factor * 
-                        defense_factor * 
-                        usage_factor * 
-                        home_factor * 
+        streak_continuation_factor = streak_continuation_factor if streak_continuation_factor is not None else 1.0
+
+        adjusted_mean = (base_mean *
+                        minutes_factor *
+                        pace_factor *
+                        defense_factor *
+                        offensive_context_factor *
+                        lineup_context_factor *
+                        teammate_chemistry_factor *
+                        advanced_analytics_factor *
+                        situational_performance_factor *
+                        motivation_factor *
+                        health_factor *
+                        ml_factor *
+                        usage_factor *
+                        home_factor *
                         rest_days_factor *
                         matchup_factor *
                         form_trend_factor *
-                        shooting_factor)
+                        shooting_factor *
+                        streak_continuation_factor)
         
         # Note: Research shows some factors should be weighted differently:
         # - Minutes factor: High weight (1.0-1.2) - most important
@@ -248,9 +441,16 @@ class PredictionAdjustments:
             'usage_factor': round(usage_factor, 3),
             'home_factor': round(home_factor, 3),
             'rest_days_factor': round(rest_days_factor, 3),
-            'team_matchup_factor': round(team_matchup_factor, 3),
-            'player_matchup_factor': round(player_matchup_factor, 3),
-            'matchup_factor': round(matchup_factor, 3),  # Combined
+            'matchup_factor': round(matchup_factor, 3),  # Comprehensive matchup analysis
+            'streak_continuation_factor': round(streak_continuation_factor, 3),
+            'offensive_context_factor': round(offensive_context_factor, 3),
+            'lineup_context_factor': round(lineup_context_factor, 3),
+            'teammate_chemistry_factor': round(teammate_chemistry_factor, 3),
+            'advanced_analytics_factor': round(advanced_analytics_factor, 3),
+            'situational_performance_factor': round(situational_performance_factor, 3),
+            'motivation_factor': round(motivation_factor, 3),
+            'health_factor': round(health_factor, 3),
+            'ml_factor': round(ml_factor, 3),
             'form_trend_factor': round(form_trend_factor, 3),
             'shooting_factor': round(shooting_factor, 3) if stat_type == 'points' else 1.0,
             'foul_trouble_factor': round(foul_trouble_factor, 3),  # Already applied to minutes_factor
@@ -749,6 +949,407 @@ class PredictionAdjustments:
         
         # Clamp final factor
         rebounding_factor = self.clamp(rebounding_factor, 0.90, 1.15)
-        
+
         return rebounding_factor
+
+    def _calculate_team_recent_offense(self, team_id: int, season_id: Optional[int] = None, last_n_games: int = 10) -> float:
+        """
+        Calculate a team's recent offensive efficiency (points per game).
+
+        Returns:
+            Average points scored per game in recent games, or 0 if no data
+        """
+        if season_id is None:
+            season = self.db.query(Season).filter(Season.is_current == True).first()
+            if not season:
+                return 0.0
+            season_id = season.season_id
+
+        # Get team's recent games
+        team_games = self.db.query(Game).filter(
+            and_(
+                or_(Game.home_team_id == team_id, Game.away_team_id == team_id),
+                Game.season_id == season_id,
+                Game.game_status == 'finished'
+            )
+        ).order_by(desc(Game.game_date)).limit(last_n_games).all()
+
+        if not team_games:
+            return 0.0
+
+        total_points = 0
+        for game in team_games:
+            # Get all player stats for this team in this game
+            game_stats = self.db.query(PlayerGameStat).filter(
+                and_(
+                    PlayerGameStat.game_id == game.game_id,
+                    PlayerGameStat.team_id == team_id
+                )
+            ).all()
+
+            game_points = sum(s.points or 0 for s in game_stats)
+            total_points += game_points
+
+        return total_points / len(team_games) if team_games else 0.0
+
+    def _calculate_league_avg_offense(self, season_id: Optional[int] = None) -> float:
+        """
+        Calculate league average offensive efficiency (points per game).
+
+        Returns:
+            League average points per game
+        """
+        if season_id is None:
+            season = self.db.query(Season).filter(Season.is_current == True).first()
+            if not season:
+                return 110.0  # NBA league average fallback
+            season_id = season.season_id
+
+        # Get all finished games this season
+        all_games = self.db.query(Game).filter(
+            and_(
+                Game.season_id == season_id,
+                Game.game_status == 'finished'
+            )
+        ).all()
+
+        if not all_games:
+            return 110.0  # NBA league average fallback
+
+        total_points = 0
+        game_count = 0
+
+        for game in all_games:
+            # Count points for both teams
+            home_stats = self.db.query(PlayerGameStat).filter(
+                and_(
+                    PlayerGameStat.game_id == game.game_id,
+                    PlayerGameStat.team_id == game.home_team_id
+                )
+            ).all()
+            away_stats = self.db.query(PlayerGameStat).filter(
+                and_(
+                    PlayerGameStat.game_id == game.game_id,
+                    PlayerGameStat.team_id == game.away_team_id
+                )
+            ).all()
+
+            home_points = sum(s.points or 0 for s in home_stats)
+            away_points = sum(s.points or 0 for s in away_stats)
+
+            total_points += home_points + away_points
+            game_count += 2  # Two teams per game
+
+        return total_points / game_count if game_count > 0 else 110.0
+
+    def _calculate_lineup_stability_factor(
+        self,
+        player_id: int,
+        game_id: int,
+        season_id: Optional[int] = None,
+        is_promoted_bench_player: bool = False
+    ) -> float:
+        """
+        Calculate how lineup stability affects player performance.
+
+        Args:
+            player_id: Player to analyze
+            game_id: Current game
+            season_id: Season for analysis
+            is_promoted_bench_player: Whether player was recently promoted to starter
+
+        Returns:
+            Adjustment factor based on lineup stability
+        """
+        from app.models.lineup import Lineup
+        from datetime import timedelta
+
+        if season_id is None:
+            season = self.db.query(Season).filter(Season.is_current == True).first()
+            if not season:
+                return 1.0
+            season_id = season.season_id
+
+        # Get current game
+        current_game = self.db.query(Game).filter(Game.game_id == game_id).first()
+        if not current_game:
+            return 1.0
+
+        # Check if this is a significant lineup change for the player
+        thirty_days_ago = current_game.game_date - timedelta(days=30)
+
+        # Get player's recent lineup history
+        recent_lineups = self.db.query(Lineup).join(Game).filter(
+            and_(
+                Lineup.player_id == player_id,
+                Game.season_id == season_id,
+                Game.game_date >= thirty_days_ago,
+                Game.game_date < current_game.game_date,
+                Game.game_status == 'finished'
+            )
+        ).order_by(Game.game_date).all()
+
+        if len(recent_lineups) < 5:  # Need some history
+            return 1.0
+
+        # Calculate starter consistency
+        starter_games = sum(1 for l in recent_lineups if l.is_starter)
+        starter_rate = starter_games / len(recent_lineups)
+
+        # Check current game lineup status
+        current_lineup = self.db.query(Lineup).filter(
+            and_(
+                Lineup.player_id == player_id,
+                Lineup.game_id == game_id
+            )
+        ).first()
+
+        is_currently_starting = current_lineup.is_starter if current_lineup else False
+
+        # Calculate lineup stability factor
+        stability_factor = 1.0
+
+        # Promoted bench players often perform better due to increased opportunity
+        if is_promoted_bench_player:
+            stability_factor *= 1.08  # 8% boost for promoted players
+        elif is_currently_starting and starter_rate < 0.3:
+            # Starting after being a bench player - positive change
+            stability_factor *= 1.05  # 5% boost for positive lineup change
+        elif not is_currently_starting and starter_rate > 0.7:
+            # Benched after being a starter - negative change
+            stability_factor *= 0.95  # 5% penalty for negative lineup change
+        elif abs(starter_rate - (1.0 if is_currently_starting else 0.0)) > 0.5:
+            # Significant lineup change from recent pattern
+            stability_factor *= 0.98  # Small penalty for lineup disruption
+
+        # Clamp to reasonable range
+        return self.clamp(stability_factor, 0.90, 1.15)
+
+    def _get_teammate_performance_projections(
+        self,
+        player_id: int,
+        game_id: int,
+        season_id: Optional[int] = None
+    ) -> Optional[Dict[int, Dict[str, float]]]:
+        """
+        Get projected performance for teammates in an upcoming game.
+
+        Returns:
+            Dict of teammate_id -> {stat_type: projected_value}
+        """
+        from app.models.lineup import Lineup
+        from app.models.game import Game
+
+        try:
+            # Get the game and player's team
+            game = self.db.query(Game).filter(Game.game_id == game_id).first()
+            if not game:
+                return None
+
+            # Find player's team
+            player_team_id = None
+            home_lineup = self.db.query(Lineup).filter(
+                and_(Lineup.game_id == game_id, Lineup.team_id == game.home_team_id)
+            ).first()
+            away_lineup = self.db.query(Lineup).filter(
+                and_(Lineup.game_id == game_id, Lineup.team_id == game.away_team_id)
+            ).first()
+
+            if home_lineup and player_id in [p.player_id for p in self.db.query(Lineup).filter(
+                and_(Lineup.game_id == game_id, Lineup.team_id == game.home_team_id)
+            ).all()]:
+                player_team_id = game.home_team_id
+            elif away_lineup and player_id in [p.player_id for p in self.db.query(Lineup).filter(
+                and_(Lineup.game_id == game_id, Lineup.team_id == game.away_team_id)
+            ).all()]:
+                player_team_id = game.away_team_id
+
+            if not player_team_id:
+                return None
+
+            # Get all teammates projected to play
+            teammates = self.db.query(Lineup).filter(
+                and_(
+                    Lineup.game_id == game_id,
+                    Lineup.team_id == player_team_id,
+                    Lineup.player_id != player_id
+                )
+            ).all()
+
+            if not teammates:
+                return None
+
+            teammate_projections = {}
+
+            for teammate in teammates:
+                # Get recent performance for this teammate (last 5 games)
+                recent_stats = self.db.query(PlayerGameStat).join(Game).filter(
+                    and_(
+                        PlayerGameStat.player_id == teammate.player_id,
+                        Game.season_id == season_id,
+                        Game.game_status == 'finished',
+                        PlayerGameStat.minutes_played > 0
+                    )
+                ).order_by(desc(Game.game_date)).limit(5).all()
+
+                if recent_stats:
+                    # Calculate recent averages
+                    total_points = sum(s.points or 0 for s in recent_stats)
+                    total_rebounds = sum(s.rebounds or 0 for s in recent_stats)
+                    total_assists = sum(s.assists or 0 for s in recent_stats)
+                    total_threes = sum(s.three_pointers_made or 0 for s in recent_stats)
+                    games_played = len(recent_stats)
+
+                    teammate_projections[teammate.player_id] = {
+                        'points': total_points / games_played,
+                        'rebounds': total_rebounds / games_played,
+                        'assists': total_assists / games_played,
+                        'three_pointers_made': total_threes / games_played
+                    }
+
+            return teammate_projections if teammate_projections else None
+
+        except Exception:
+            # If anything fails, return None to avoid breaking predictions
+            return None
+
+    def _extract_situational_context(self, game_context: Dict) -> Dict[str, any]:
+        """
+        Extract situational context information from game_context for situational performance analysis.
+
+        Args:
+            game_context: Game context dictionary from game context calculator
+
+        Returns:
+            Situational context dictionary for situational performance service
+        """
+        situational_context = {}
+
+        # Extract blowout information
+        blowout_info = game_context.get('blowout', {})
+        situational_context['is_blowout'] = blowout_info.get('blowout_risk_high', False)
+
+        # Extract score differential if available
+        team_performance = game_context.get('team_performance', {})
+        situational_context['final_margin'] = team_performance.get('margin', 0)
+
+        # Extract pace information
+        pace_info = game_context.get('pace', {})
+        current_pace = pace_info.get('current_pace', 100)
+        situational_context['is_fast_pace'] = current_pace >= 105
+        situational_context['is_slow_pace'] = current_pace <= 95
+
+        # Extract rest information
+        rest_info = game_context.get('rest', {})
+        situational_context['rest_days'] = rest_info.get('rest_days', 1)
+
+        # Extract back-to-back information
+        situational_context['is_back_to_back'] = rest_info.get('is_back_to_back', False)
+
+        # Extract clutch information (close game in late stages)
+        clutch_info = game_context.get('clutch', {})
+        situational_context['is_clutch'] = clutch_info.get('is_clutch_situation', False)
+
+        # Default values for missing information
+        situational_context.setdefault('is_blowout', False)
+        situational_context.setdefault('final_margin', 0)
+        situational_context.setdefault('is_fast_pace', False)
+        situational_context.setdefault('is_slow_pace', False)
+        situational_context.setdefault('rest_days', 1)
+        situational_context.setdefault('is_back_to_back', False)
+        situational_context.setdefault('is_clutch', False)
+
+        return situational_context
+
+    def _build_ml_feature_vector(
+        self,
+        player_id: int,
+        game_id: int,
+        stat_type: str,
+        season_id: int,
+        projected_minutes: float,
+        game_context: Optional[Dict] = None
+    ) -> Optional[Dict[str, float]]:
+        """
+        Build feature vector for ML prediction using current game context.
+        """
+        try:
+            # Get recent games for player
+            recent_games = self.db.query(PlayerGameStat, Game).join(
+                Game, PlayerGameStat.game_id == Game.game_id
+            ).filter(
+                and_(
+                    PlayerGameStat.player_id == player_id,
+                    Game.season_id == season_id,
+                    Game.game_date < Game.query.filter(Game.game_id == game_id).first().game_date,
+                    Game.game_status == 'finished',
+                    PlayerGameStat.minutes_played > 0
+                )
+            ).order_by(desc(Game.game_date)).limit(20).all()
+
+            if len(recent_games) < 5:
+                return None
+
+            # Build feature vector similar to training data
+            features = {}
+
+            # Recent performance features
+            recent_stats = [stat for stat, game in recent_games[:10]]
+            features.update(self._extract_recent_performance_features(recent_stats, stat_type))
+
+            # Current game context
+            current_game = self.db.query(Game).filter(Game.game_id == game_id).first()
+            if current_game:
+                # Opponent features
+                features['is_home'] = 1.0 if current_game.home_team_id else 0.0
+
+                # Day of week
+                features['is_weekend'] = 1.0 if current_game.game_date.weekday() >= 5 else 0.0
+
+                # Health features (simplified)
+                features['avg_minutes_recent'] = projected_minutes
+                features['high_minute_games'] = sum(1 for stat, game in recent_games[:5]
+                                                  if (stat.minutes_played or 0) >= 40)
+                features['rest_days'] = game_context.get('rest_days_factor', 1.0) if game_context else 3.0
+
+            return features
+
+        except Exception:
+            return None
+
+    def _extract_recent_performance_features(
+        self,
+        recent_stats: List[PlayerGameStat],
+        stat_type: str
+    ) -> Dict[str, float]:
+        """Extract recent performance features for ML."""
+        features = {}
+
+        # Recent averages
+        for period in [3, 5, 10]:
+            if len(recent_stats) >= period:
+                values = [self._extract_stat_value(stat, stat_type) for stat in recent_stats[-period:]]
+                features[f'avg_last_{period}'] = sum(values) / len(values)
+                features[f'std_last_{period}'] = statistics.stdev(values) if len(values) > 1 else 0
+
+        # Recent vs season comparison
+        if len(recent_stats) >= 5:
+            last_5_avg = sum(self._extract_stat_value(stat, stat_type) for stat in recent_stats[-5:]) / 5
+            season_avg = sum(self._extract_stat_value(stat, stat_type) for stat in recent_stats) / len(recent_stats)
+            features['recent_vs_season'] = last_5_avg / season_avg if season_avg > 0 else 1.0
+
+        return features
+
+    def _extract_stat_value(self, player_stat: PlayerGameStat, stat_type: str) -> float:
+        """Extract stat value (local helper method)."""
+        if stat_type == 'points':
+            return player_stat.points or 0
+        elif stat_type == 'rebounds':
+            return (player_stat.offensive_rebounds or 0) + (player_stat.defensive_rebounds or 0)
+        elif stat_type == 'assists':
+            return player_stat.assists or 0
+        elif stat_type == 'three_pointers_made':
+            return player_stat.three_pointers_made or 0
+        else:
+            return 0
 

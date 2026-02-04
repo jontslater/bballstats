@@ -18,13 +18,19 @@ from app.models.game import Game
 from app.models.player import Player
 from app.models.team import Team
 from app.models.player_game_stat import PlayerGameStat
+from app.services.prediction_history_helper import (
+    get_last_n_games_for_combo_stat,
+    get_last_n_games_for_milestone,
+    get_last_n_team_totals_for_stat
+)
+from app.services.base_sport_service import BaseSportService
 
 
-class AdvancedBetGenerator:
+class AdvancedBetGenerator(BaseSportService):
     """Generate advanced bet types."""
-    
-    def __init__(self, db: Session):
-        self.db = db
+
+    def __init__(self, db: Session, sport: str = 'NBA'):
+        super().__init__(db, sport)
     
     def generate_combo_props(
         self,
@@ -88,6 +94,17 @@ class AdvancedBetGenerator:
         # Generate bet lines
         combo_bets = []
         
+        # Get last 3 games for this combo stat (used for all bet types)
+        last_3_games = get_last_n_games_for_combo_stat(
+            db=self.db,
+            player_id=player_id,
+            stat1=stat1,
+            stat2=stat2,
+            sport='NBA',  # TODO: Support NFL when added
+            n_games=3,
+            exclude_game_id=game_id
+        )
+        
         # Safe combo (25th percentile)
         safe_line = combined_mean * 0.90  # Conservative
         safe_prob = float(1.0 - dist.cdf(safe_line))
@@ -101,7 +118,8 @@ class AdvancedBetGenerator:
                 'line': round(safe_line, 1),
                 'probability': round(safe_prob, 3),
                 'bet_type': 'safe',
-                'display': f"{player_name}: {stat1.capitalize()} + {stat2.capitalize()} Over {safe_line:.1f}"
+                'display': f"{player_name}: {stat1.capitalize()} + {stat2.capitalize()} Over {safe_line:.1f}",
+                'last_3_games': last_3_games
             })
         
         # Standard combo (50th percentile)
@@ -117,7 +135,8 @@ class AdvancedBetGenerator:
                 'line': round(standard_line, 1),
                 'probability': round(standard_prob, 3),
                 'bet_type': 'standard',
-                'display': f"{player_name}: {stat1.capitalize()} + {stat2.capitalize()} Over {standard_line:.1f}"
+                'display': f"{player_name}: {stat1.capitalize()} + {stat2.capitalize()} Over {standard_line:.1f}",
+                'last_3_games': last_3_games
             })
         
         # Long shot combo (85th percentile)
@@ -133,7 +152,8 @@ class AdvancedBetGenerator:
                 'line': round(long_shot_line, 1),
                 'probability': round(long_shot_prob, 3),
                 'bet_type': 'long_shot',
-                'display': f"{player_name}: {stat1.capitalize()} + {stat2.capitalize()} Over {long_shot_line:.1f}"
+                'display': f"{player_name}: {stat1.capitalize()} + {stat2.capitalize()} Over {long_shot_line:.1f}",
+                'last_3_games': last_3_games
             })
         
         return combo_bets
@@ -186,6 +206,18 @@ class AdvancedBetGenerator:
             for threshold, label in milestones:
                 prob = float(1.0 - dist.cdf(threshold))
                 if 0.20 <= prob <= 0.80:  # Reasonable probability range
+                    # Get last 3 games for this milestone
+                    last_3_games = get_last_n_games_for_milestone(
+                        db=self.db,
+                        player_id=player_id,
+                        milestone_type='points_milestone',
+                        stat_type='points',
+                        threshold=threshold,
+                        sport='NBA',  # TODO: Support NFL when added
+                        n_games=3,
+                        exclude_game_id=game_id
+                    )
+                    
                     milestone_bets.append({
                         'player_id': player_id,
                         'player_name': player_name,
@@ -194,7 +226,8 @@ class AdvancedBetGenerator:
                         'label': label,
                         'probability': round(prob, 3),
                         'bet_type': 'milestone',
-                        'display': f"{player_name}: {label}"
+                        'display': f"{player_name}: {label}",
+                        'last_3_games': last_3_games
                     })
         
         # Rebounds milestones
@@ -212,6 +245,18 @@ class AdvancedBetGenerator:
             for threshold, label in milestones:
                 prob = float(1.0 - dist.cdf(threshold))
                 if 0.20 <= prob <= 0.80:
+                    # Get last 3 games for this milestone
+                    last_3_games = get_last_n_games_for_milestone(
+                        db=self.db,
+                        player_id=player_id,
+                        milestone_type='rebounds_milestone',
+                        stat_type='rebounds',
+                        threshold=threshold,
+                        sport='NBA',
+                        n_games=3,
+                        exclude_game_id=game_id
+                    )
+                    
                     milestone_bets.append({
                         'player_id': player_id,
                         'player_name': player_name,
@@ -220,7 +265,8 @@ class AdvancedBetGenerator:
                         'label': label,
                         'probability': round(prob, 3),
                         'bet_type': 'milestone',
-                        'display': f"{player_name}: {label}"
+                        'display': f"{player_name}: {label}",
+                        'last_3_games': last_3_games
                     })
         
         # Assists milestones
@@ -237,6 +283,18 @@ class AdvancedBetGenerator:
             for threshold, label in milestones:
                 prob = float(1.0 - dist.cdf(threshold))
                 if 0.20 <= prob <= 0.80:
+                    # Get last 3 games for this milestone
+                    last_3_games = get_last_n_games_for_milestone(
+                        db=self.db,
+                        player_id=player_id,
+                        milestone_type='assists_milestone',
+                        stat_type='assists',
+                        threshold=threshold,
+                        sport='NBA',
+                        n_games=3,
+                        exclude_game_id=game_id
+                    )
+                    
                     milestone_bets.append({
                         'player_id': player_id,
                         'player_name': player_name,
@@ -245,7 +303,8 @@ class AdvancedBetGenerator:
                         'label': label,
                         'probability': round(prob, 3),
                         'bet_type': 'milestone',
-                        'display': f"{player_name}: {label}"
+                        'display': f"{player_name}: {label}",
+                        'last_3_games': last_3_games
                     })
         
         # Double-double (10+ in two categories)
@@ -254,6 +313,16 @@ class AdvancedBetGenerator:
                 pred_dict['points'], pred_dict['rebounds']
             )
             if dd_prob >= 0.15:  # At least 15% chance
+                # Get last 3 games for double-double
+                last_3_games = get_last_n_games_for_milestone(
+                    db=self.db,
+                    player_id=player_id,
+                    milestone_type='double_double',
+                    sport='NBA',
+                    n_games=3,
+                    exclude_game_id=game_id
+                )
+                
                 milestone_bets.append({
                     'player_id': player_id,
                     'player_name': player_name,
@@ -261,7 +330,8 @@ class AdvancedBetGenerator:
                     'label': "Double-Double (10+ Points & 10+ Rebounds)",
                     'probability': round(dd_prob, 3),
                     'bet_type': 'milestone',
-                    'display': f"{player_name}: Double-Double"
+                    'display': f"{player_name}: Double-Double",
+                    'last_3_games': last_3_games
                 })
         
         # Triple-double (10+ in three categories)
@@ -270,6 +340,16 @@ class AdvancedBetGenerator:
                 pred_dict['points'], pred_dict['rebounds'], pred_dict['assists']
             )
             if td_prob >= 0.05:  # At least 5% chance
+                # Get last 3 games for triple-double
+                last_3_games = get_last_n_games_for_milestone(
+                    db=self.db,
+                    player_id=player_id,
+                    milestone_type='triple_double',
+                    sport='NBA',
+                    n_games=3,
+                    exclude_game_id=game_id
+                )
+                
                 milestone_bets.append({
                     'player_id': player_id,
                     'player_name': player_name,
@@ -277,7 +357,8 @@ class AdvancedBetGenerator:
                     'label': "Triple-Double (10+ Points, 10+ Rebounds, 10+ Assists)",
                     'probability': round(td_prob, 3),
                     'bet_type': 'milestone',
-                    'display': f"{player_name}: Triple-Double"
+                    'display': f"{player_name}: Triple-Double",
+                    'last_3_games': last_3_games
                 })
         
         return milestone_bets
@@ -597,13 +678,24 @@ class AdvancedBetGenerator:
                     'under_odds': self._probability_to_odds(prob_under)
                 })
         
+        # Get last 3 team totals for this stat
+        last_3_games = get_last_n_team_totals_for_stat(
+            db=self.db,
+            team_id=team_id,
+            stat_type=stat_type,
+            sport='NBA',  # TODO: Support NFL when added
+            n_games=3,
+            exclude_game_id=game_id
+        )
+        
         return {
             'team_id': team_id,
             'team_name': team.name if team else f"Team {team_id}",
             'stat_type': stat_type,
             'expected_total': round(team_mean, 1),
             'lines': lines,
-            'display': f"{team.name if team else f'Team {team_id}'} Total {stat_type.capitalize()}"
+            'display': f"{team.name if team else f'Team {team_id}'} Total {stat_type.capitalize()}",
+            'last_3_games': last_3_games
         }
     
     def get_all_advanced_bets_for_game(

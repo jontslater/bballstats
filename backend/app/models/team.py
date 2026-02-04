@@ -1,7 +1,7 @@
 """
-Team model - NBA teams
+Team model - NBA and NFL teams
 """
-from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy import Column, Integer, String, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -11,11 +11,15 @@ class Team(Base):
     __tablename__ = "teams"
 
     team_id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)  # "Los Angeles Lakers"
-    abbreviation = Column(String(10), nullable=False, unique=True)  # "LAL"
-    conference = Column(String(10))  # "West" or "East"
+    sport = Column(String(10), nullable=False, default='NBA', index=True)  # 'NBA' or 'NFL'
+    name = Column(String, nullable=False)  # "Los Angeles Lakers" or "Kansas City Chiefs"
+    abbreviation = Column(String(10), nullable=False)  # "LAL" or "KC"
+    conference = Column(String(10))  # "West" or "East" (NBA) or "AFC" or "NFC" (NFL)
     division = Column(String(50))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Unique constraint: abbreviation must be unique per sport
+    __table_args__ = (UniqueConstraint('sport', 'abbreviation', name='_sport_abbreviation_uc'),)
 
     # Relationships
     home_games = relationship("Game", foreign_keys="Game.home_team_id", back_populates="home_team")
@@ -24,5 +28,8 @@ class Team(Base):
 
     def __repr__(self):
         return f"<Team {self.abbreviation}: {self.name}>"
+
+
+
 
 

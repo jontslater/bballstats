@@ -205,3 +205,6 @@ Methods:
    - Asked each time?
    - Inferred from their betting history?
 
+
+
+

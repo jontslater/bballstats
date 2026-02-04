@@ -1,5 +1,5 @@
 """
-Poor Man's Bet Challenge models.
+Poor Man's Bet Challenge models (NBA and NFL).
 """
 from sqlalchemy import Column, Integer, ForeignKey, String, Float, Text, Date, DateTime, DECIMAL
 from sqlalchemy.orm import relationship
@@ -12,6 +12,9 @@ class PoorMansBetChallenge(Base):
     __tablename__ = "poor_mans_bet_challenges"
 
     challenge_id = Column(Integer, primary_key=True, index=True)
+    
+    # Sport
+    sport = Column(String(10), nullable=False, default='NBA', index=True)  # 'NBA' or 'NFL'
     
     # Challenge details
     name = Column(String(200), nullable=True)
@@ -85,4 +88,7 @@ class PoorMansBetDay(Base):
     
     def __repr__(self):
         return f"<PoorMansBetDay {self.day_id}: Day {self.day_number} - ${self.bet_amount:.2f} - {self.status}>"
+
+
+
 

@@ -3,8 +3,10 @@ import { Link } from 'react-router-dom';
 import { format } from 'date-fns';
 import apiService, { Game } from '../services/api';
 import { parseDateString } from '../utils/dateUtils';
+import { useSport } from '../contexts/SportContext';
 
 export default function GamesList() {
+  const { sport } = useSport();
   const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
@@ -12,13 +14,13 @@ export default function GamesList() {
 
   useEffect(() => {
     loadGames();
-  }, [selectedDate, filter]);
+  }, [selectedDate, filter, sport]);
 
   const loadGames = async () => {
     setLoading(true);
     try {
       const status = filter === 'all' ? undefined : filter;
-      const gamesData = await apiService.getGames(selectedDate, status);
+      const gamesData = await apiService.getGames(selectedDate, status, sport);
       setGames(gamesData);
     } catch (error) {
       console.error('Error loading games:', error);

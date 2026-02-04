@@ -148,3 +148,6 @@ Bet = min(
 
 This logic is now locked in and ready for implementation. The math is sound, the strategy is safe but aggressive enough to reach the goal, and the failure handling is clear (zero tolerance = one loss ends it).
 
+
+
+

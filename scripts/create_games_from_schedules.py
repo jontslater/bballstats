@@ -16,7 +16,7 @@ sys.path.insert(0, str(project_root / "backend"))
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from app.database import SessionLocal
-from app.models import GameSchedule, Game
+from app.models import GameSchedule, Game, Season
 
 
 def create_games_from_schedules(days_ahead: int = 7):
@@ -52,6 +52,7 @@ def create_games_from_schedules(days_ahead: int = 7):
             # Check if Game already exists for this schedule
             existing_game = db.query(Game).filter(
                 and_(
+                    Game.sport == schedule.sport,
                     Game.game_date == schedule.game_date,
                     Game.home_team_id == schedule.home_team_id,
                     Game.away_team_id == schedule.away_team_id
@@ -63,8 +64,12 @@ def create_games_from_schedules(days_ahead: int = 7):
                 schedule.game_id = existing_game.game_id
                 updated += 1
             else:
-                # Create new Game record
+                # Create new Game record (inherit sport from season)
+                season = db.query(Season).filter(Season.season_id == schedule.season_id).first()
+                sport = season.sport if season else schedule.sport
+                
                 game = Game(
+                    sport=sport,
                     game_date=schedule.game_date,
                     season_id=schedule.season_id,
                     home_team_id=schedule.home_team_id,
@@ -113,5 +118,8 @@ if __name__ == "__main__":
     
     create_games_from_schedules(days_ahead=args.days)
     print("\n✅ Done!")
+
+
+
 
 

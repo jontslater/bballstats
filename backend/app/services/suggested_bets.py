@@ -11,14 +11,16 @@ from app.models.prediction import Prediction
 from app.models.game import Game
 from app.models.player import Player
 from app.models.team import Team
+from app.services.prediction_history_helper import get_last_n_games_for_stat
+from app.services.base_sport_service import BaseSportService
 from itertools import combinations
 
 
-class SuggestedBetsService:
+class SuggestedBetsService(BaseSportService):
     """Generate suggested bets and parlays."""
-    
-    def __init__(self, db: Session):
-        self.db = db
+
+    def __init__(self, db: Session, sport: str = 'NBA'):
+        super().__init__(db, sport)
     
     def get_suggested_bets(
         self,
@@ -40,37 +42,80 @@ class SuggestedBetsService:
         """
         if game_date is None:
             game_date = date.today()
-        
+            print(f"No date provided, using today: {game_date}")
+
         # Get predictions for the date that are recommended (not 'pass')
         # Include finished games for historical viewing
         games = self.db.query(Game).filter(
-            Game.game_date == game_date
+            Game.game_date == game_date,
+            Game.sport == self.sport
         ).all()
-        
+
+        # If no games found for exact date, try a broader search (last 7 days)
         if not games:
+            print(f"No games found for {game_date}, trying broader search")
+            start_date = game_date - timedelta(days=7)
+            end_date = game_date + timedelta(days=7)
+            games = self.db.query(Game).filter(
+                Game.game_date >= start_date,
+                Game.game_date <= end_date,
+                Game.sport == self.sport
+            ).order_by(Game.game_date.desc()).limit(20).all()
+            print(f"Broader search found {len(games)} games")
+
+        if not games:
+            print(f"No games found for {game_date} even with broader search")
             return []
-        
+
         game_ids = [g.game_id for g in games]
+        print(f"Found {len(games)} games for {game_date}: {[g.game_id for g in games]}")
         
         # Get predictions with high confidence and good probabilities
         # Include all bet types: safe, standard, and long_shot
+        # Use sport-appropriate bettable stat types (excludes minutes, snaps, etc.)
+        from app.config.sport_config import get_bettable_stat_types
+        bettable_stat_types = get_bettable_stat_types(self.sport)
+        
+        # For suggested bets, focus on primary bettable stats
+        if self.sport == 'NFL':
+            primary_stats = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']]
+        else:  # NBA
+            # Include all bettable stats: points, rebounds, assists, three_pointers_made, pts+ast+reb
+            primary_stats = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
+
+        # For NFL, be more lenient with confidence levels and bet types since they tend to be lower
+        allowed_confidence = ['HIGH', 'MEDIUM', 'LOW'] if self.sport == 'NFL' else ['HIGH', 'MEDIUM', 'LOW']  # Include LOW for NBA too
+        # Include all bet types for both sports to get more suggestions
+        allowed_bet_types = ['safe', 'standard', 'long_shot']
+
         predictions = self.db.query(Prediction).filter(
             and_(
                 Prediction.game_id.in_(game_ids),
-                Prediction.bet_type.in_(['safe', 'standard', 'long_shot']),
-                Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
-                Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
+                Prediction.sport == self.sport,  # CRITICAL: Filter by sport
+                Prediction.bet_type.in_(allowed_bet_types),
+                Prediction.stat_type.in_(primary_stats),
+                Prediction.confidence_level.in_(allowed_confidence)
             )
         ).all()
+
+        print(f"Found {len(predictions)} predictions matching criteria (bet_types: {allowed_bet_types}, confidence: {allowed_confidence})")
         
         # If we don't have enough long shots, lower the confidence requirement for them
         long_shot_count = sum(1 for p in predictions if p.bet_type == 'long_shot')
         if long_shot_count < 5:  # Want at least 5 long shots for variety
+            # Use sport-appropriate bettable stat types
+            if self.sport == 'NFL':
+                long_shot_stats = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions', 'passing_tds', 'rushing_tds', 'receiving_tds']]
+            else:  # NBA
+                # Include all bettable stats for long shots
+                long_shot_stats = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
+            
             additional_long_shots = self.db.query(Prediction).filter(
                 and_(
                     Prediction.game_id.in_(game_ids),
                     Prediction.bet_type == 'long_shot',
-                    Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
+                    Prediction.stat_type.in_(long_shot_stats),
+                    Prediction.sport == self.sport,  # Ensure sport matches
                     Prediction.confidence_level == 'LOW'  # Include low confidence long shots
                 )
             ).limit(10).all()
@@ -91,7 +136,7 @@ class SuggestedBetsService:
             # Calculate quality score
             score = self._calculate_bet_score(pred)
             
-            # Get probability based on bet type
+            # Get probability based on bet type with fallbacks
             if pred.bet_type == 'safe':
                 probability = pred.safe_probability
                 line = pred.safe_line
@@ -101,6 +146,48 @@ class SuggestedBetsService:
             else:  # long_shot
                 probability = pred.long_shot_probability
                 line = pred.long_shot_line
+
+            # Calculate fallbacks if values are missing
+            if probability is None:
+                if pred.bet_type == 'safe':
+                    probability = 0.75
+                elif pred.bet_type == 'standard':
+                    probability = 0.60
+                else:  # long_shot
+                    probability = 0.25
+
+            if line is None:
+                # Use distribution_mean as base, or reasonable defaults based on sport
+                if self.sport == 'NFL':
+                    # NFL defaults by stat type
+                    nfl_defaults = {
+                        'passing_yards': 200.0,
+                        'rushing_yards': 50.0,
+                        'receiving_yards': 40.0,
+                        'receptions': 4.0,
+                        'passing_tds': 1.5,
+                        'rushing_tds': 0.5,
+                        'receiving_tds': 0.5
+                    }
+                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else nfl_defaults.get(pred.stat_type, 10.0)
+                else:  # NBA
+                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else 10.0
+
+                if pred.bet_type == 'safe':
+                    line = base_value * 1.2  # 20% above mean
+                elif pred.bet_type == 'standard':
+                    line = base_value  # at mean
+                else:  # long_shot
+                    line = max(base_value * 0.8, 0.5)  # 20% below mean, but ensure minimum 0.5
+
+                # Ensure line is always positive
+                line = max(abs(line), 0.5)
+
+                # Round appropriately for stat type
+                if pred.stat_type in ['points', 'rebounds', 'assists', 'passing_yards', 'rushing_yards', 'receiving_yards']:
+                    line = round(line, 1)
+                else:
+                    line = round(line, 2)
             
             # Only include if meets minimum probability (for safe/standard bets)
             # Long shots have lower probability threshold
@@ -124,27 +211,48 @@ class SuggestedBetsService:
             if player.current_team_id:
                 team = self.db.query(Team).filter(Team.team_id == player.current_team_id).first()
                 player_team = team.abbreviation if team else None
+
+            # Get last 3 games for this stat type
+            historical_data = get_last_n_games_for_stat(
+                db=self.db,
+                player_id=pred.player_id,
+                stat_type=pred.stat_type,
+                sport=self.sport,  # Use the correct sport
+                n_games=3,
+                exclude_game_id=pred.game_id,
+                include_lineup_analysis=True,
+                current_game_id=pred.game_id
+            )
+            last_3_games = historical_data['games']
+            lineup_context = historical_data['lineup_context']
+            
+            # Ensure line is positive and reasonable
+            final_line = round(float(line) if line is not None and line > 0 else 10.0, 1)
+            if final_line <= 0:
+                final_line = 10.0  # Fallback to reasonable default
             
             scored_predictions.append({
                 'prediction_id': pred.prediction_id,
                 'player_id': pred.player_id,
                 'player_name': player.name,
-                'player_team': player_team,
+                'player_team': player_team or 'UNK',  # Ensure we always have a team value
                 'game_id': pred.game_id,
                 'game_date': game.game_date.isoformat() if game else None,
                 'stat_type': pred.stat_type,
                 'bet_type': pred.bet_type,
-                'line': round(line, 1),
-                'probability': round(probability, 3),
+                'line': final_line,
+                'probability': round(float(probability) if probability is not None else 0.5, 3),
                 'confidence_level': pred.confidence_level,
                 'volatility_level': pred.volatility_level,
                 'score': score,
-                'reasoning': pred.reasoning
+                'reasoning': pred.reasoning,
+                'last_3_games': last_3_games
             })
         
         # Sort by score (highest first)
         scored_predictions.sort(key=lambda x: x['score'], reverse=True)
-        
+
+        print(f"Returning {min(len(scored_predictions), limit)} suggested bets out of {len(scored_predictions)} scored predictions")
         return scored_predictions[:limit]
     
     def _calculate_bet_score(self, prediction: Prediction) -> float:
@@ -222,7 +330,9 @@ class SuggestedBetsService:
             game_date = date.today()
         
         # Get suggested bets first (include long shots for parlay variety)
-        suggested_bets = self.get_suggested_bets(game_date, limit=50, min_probability=0.60, include_long_shots=True)
+        # Use lower threshold for NFL since predictions tend to be less confident
+        min_prob_threshold = 0.50 if self.sport == 'NFL' else 0.60
+        suggested_bets = self.get_suggested_bets(game_date, limit=50, min_probability=min_prob_threshold, include_long_shots=True)
         
         if len(suggested_bets) < min_legs:
             return []
@@ -240,6 +350,10 @@ class SuggestedBetsService:
                 player_ids = [bet['player_id'] for bet in combo]
                 if len(player_ids) != len(set(player_ids)):
                     continue  # Skip if duplicate players within parlay
+                
+                # Filter out bets with invalid lines (negative or zero)
+                if any(bet.get('line', 0) <= 0 for bet in combo):
+                    continue  # Skip parlays with invalid lines
                 
                 # Calculate combined probability and odds
                 combined_prob = 1.0
@@ -336,7 +450,81 @@ class SuggestedBetsService:
             for parlay in all_parlays[:limit]:
                 parlay.pop('player_ids', None)  # Remove internal tracking field
             return all_parlays[:limit]
-    
+
+    def get_matchup_advantage_parlays(
+        self,
+        game_date: Optional[date] = None,
+        limit: int = 3,
+        min_legs: int = 2,
+        max_legs: int = 4
+    ) -> List[Dict]:
+        """
+        TEMPORARILY DISABLED: This endpoint was causing timeouts due to complex combination generation.
+        Return empty list for now to prevent dashboard timeouts.
+
+        TODO: Re-implement with optimized algorithm or simplify to pre-built parlays.
+        """
+        # Temporarily return empty list to prevent timeouts
+        # This will be re-implemented with a more efficient approach
+        return []
+
+        # Add leg details
+        games_in_parlay = set()
+        for bet in combo:
+            games_in_parlay.add(bet['game_id'])
+
+            leg = {
+                'prediction_id': bet['prediction_id'],
+                'player_id': bet['player_id'],
+                'player_name': bet['player_name'],
+                'player_team': bet['player_team'],
+                'stat_type': bet['stat_type'],
+                'line': bet['line'],
+                'bet_type': bet['bet_type'],
+                'probability': bet['probability'],
+                'confidence_level': bet.get('confidence_level', 'medium'),
+                'volatility_level': bet.get('volatility_level', 'medium'),
+                'reasoning': bet.get('reasoning', ''),
+                'last_3_games': bet.get('last_3_games', []),
+                'game_id': bet.get('game_id'),
+                'opponent_team_abbreviation': bet.get('opponent_team_abbreviation', '')
+            }
+            parlay['legs'].append(leg)
+
+        # Calculate diversification score (higher is better)
+        parlay['game_diversity'] = len(games_in_parlay)
+
+        # Prefer parlays with more diverse games
+        diversification_score = len(games_in_parlay) * 10
+
+        # Prefer higher combined probability
+        diversification_score += combined_prob * 5
+
+        parlay['diversification_score'] = diversification_score
+
+        all_parlays.append(parlay)
+
+        # Sort by diversification score (higher is better)
+        all_parlays.sort(key=lambda x: x['diversification_score'], reverse=True)
+
+        return all_parlays[:limit]
+
+    def get_matchup_advantage_bets(
+        self,
+        game_date: Optional[date] = None,
+        limit: int = 10,
+        only_hot: bool = True
+    ) -> List[Dict]:
+        """
+        TEMPORARILY DISABLED: This endpoint was causing timeouts due to calling get_suggested_bets with large limits.
+        Return empty list for now to prevent dashboard timeouts.
+
+        TODO: Re-implement with direct database queries instead of calling get_suggested_bets.
+        """
+        # Temporarily return empty list to prevent timeouts
+        # This will be re-implemented with a more direct approach
+        return []
+
     def get_suggested_parlays_by_stat_mix(
         self,
         game_date: Optional[date] = None,
@@ -353,32 +541,42 @@ class SuggestedBetsService:
             game_date = date.today()
         
         # Get suggested bets grouped by stat type
-        suggested_bets = self.get_suggested_bets(game_date, limit=30, min_probability=0.60)
+        # Use lower threshold for NFL since predictions tend to be less confident
+        min_prob_threshold = 0.50 if self.sport == 'NFL' else 0.60
+        suggested_bets = self.get_suggested_bets(game_date, limit=30, min_probability=min_prob_threshold)
         
-        bets_by_stat = {
-            'points': [b for b in suggested_bets if b['stat_type'] == 'points'],
-            'rebounds': [b for b in suggested_bets if b['stat_type'] == 'rebounds'],
-            'assists': [b for b in suggested_bets if b['stat_type'] == 'assists']
-        }
-        
+        # Use sport-appropriate stat types
+        if self.sport == 'NFL':
+            stat_categories = {
+                'passing': [b for b in suggested_bets if 'passing' in b['stat_type']],
+                'rushing': [b for b in suggested_bets if 'rushing' in b['stat_type']],
+                'receiving': [b for b in suggested_bets if 'receiving' in b['stat_type']]
+            }
+            required_stats = ['passing', 'rushing', 'receiving']
+        else:  # NBA
+            stat_categories = {
+                'points': [b for b in suggested_bets if b['stat_type'] == 'points'],
+                'rebounds': [b for b in suggested_bets if b['stat_type'] == 'rebounds'],
+                'assists': [b for b in suggested_bets if b['stat_type'] == 'assists']
+            }
+            required_stats = ['points', 'rebounds', 'assists']
+
         all_parlays = []
-        
+
         # Create 3-leg parlays with one of each stat type
-        if (len(bets_by_stat['points']) > 0 and 
-            len(bets_by_stat['rebounds']) > 0 and 
-            len(bets_by_stat['assists']) > 0):
-            
+        if all(len(stat_categories[stat]) > 0 for stat in required_stats):
+
             # Take top bet from each stat type
-            for points_bet in bets_by_stat['points'][:5]:
-                for rebounds_bet in bets_by_stat['rebounds'][:5]:
-                    for assists_bet in bets_by_stat['assists'][:5]:
+            for stat1_bet in stat_categories[required_stats[0]][:3]:
+                for stat2_bet in stat_categories[required_stats[1]][:3]:
+                    for stat3_bet in stat_categories[required_stats[2]][:3]:
                         # Ensure different players within parlay
-                        if (points_bet['player_id'] != rebounds_bet['player_id'] and
-                            points_bet['player_id'] != assists_bet['player_id'] and
-                            rebounds_bet['player_id'] != assists_bet['player_id']):
-                            
-                            combo = [points_bet, rebounds_bet, assists_bet]
-                            combined_prob = points_bet['probability'] * rebounds_bet['probability'] * assists_bet['probability']
+                        if (stat1_bet['player_id'] != stat2_bet['player_id'] and
+                            stat1_bet['player_id'] != stat3_bet['player_id'] and
+                            stat2_bet['player_id'] != stat3_bet['player_id']):
+
+                            combo = [stat1_bet, stat2_bet, stat3_bet]
+                            combined_prob = stat1_bet['probability'] * stat2_bet['probability'] * stat3_bet['probability']
                             
                             if combined_prob > 0:
                                 decimal_odds = 1.0 / combined_prob
@@ -393,33 +591,31 @@ class SuggestedBetsService:
                                 'combined_odds': round(american_odds, 0) if american_odds else None,
                                 'odds_display': f"+{int(american_odds)}" if american_odds and american_odds > 0 else f"{int(american_odds)}" if american_odds else "N/A",
                                 'stat_diversity': 3,  # All three stat types
-                                'player_ids': {points_bet['player_id'], rebounds_bet['player_id'], assists_bet['player_id']}
+                                'player_ids': {stat1_bet['player_id'], stat2_bet['player_id'], stat3_bet['player_id']}
                             })
         
         # Create 4-leg parlays: one of each stat type + one extra (different player)
-        if (len(bets_by_stat['points']) > 0 and 
-            len(bets_by_stat['rebounds']) > 0 and 
-            len(bets_by_stat['assists']) > 0):
-            
-            for points_bet in bets_by_stat['points'][:3]:
-                for rebounds_bet in bets_by_stat['rebounds'][:3]:
-                    for assists_bet in bets_by_stat['assists'][:3]:
+        if all(len(stat_categories[stat]) > 0 for stat in required_stats):
+
+            for stat1_bet in stat_categories[required_stats[0]][:3]:
+                for stat2_bet in stat_categories[required_stats[1]][:3]:
+                    for stat3_bet in stat_categories[required_stats[2]][:3]:
                         # Add a 4th leg from any stat type (must be different player)
-                        for fourth_stat in ['points', 'rebounds', 'assists']:
-                            for fourth_bet in bets_by_stat[fourth_stat][:5]:
-                                player_ids = {points_bet['player_id'], rebounds_bet['player_id'], 
-                                            assists_bet['player_id'], fourth_bet['player_id']}
+                        for fourth_stat in required_stats:
+                            for fourth_bet in stat_categories[fourth_stat][:5]:
+                                player_ids = {stat1_bet['player_id'], stat2_bet['player_id'],
+                                            stat3_bet['player_id'], fourth_bet['player_id']}
                                 if len(player_ids) == 4:  # All different players
-                                    combo = [points_bet, rebounds_bet, assists_bet, fourth_bet]
-                                    combined_prob = (points_bet['probability'] * rebounds_bet['probability'] * 
-                                                   assists_bet['probability'] * fourth_bet['probability'])
-                                    
+                                    combo = [stat1_bet, stat2_bet, stat3_bet, fourth_bet]
+                                    combined_prob = (stat1_bet['probability'] * stat2_bet['probability'] *
+                                                   stat3_bet['probability'] * fourth_bet['probability'])
+
                                     if combined_prob > 0:
                                         decimal_odds = 1.0 / combined_prob
                                         american_odds = (decimal_odds - 1) * 100
                                     else:
                                         american_odds = None
-                                    
+
                                     all_parlays.append({
                                         'legs': combo,
                                         'num_legs': 4,
@@ -433,20 +629,25 @@ class SuggestedBetsService:
                             break  # Only try one stat type for 4th leg
         
         # Also create 2-leg parlays with different stat types
-        for stat1, stat2 in [('points', 'rebounds'), ('points', 'assists'), ('rebounds', 'assists')]:
-            if len(bets_by_stat[stat1]) > 0 and len(bets_by_stat[stat2]) > 0:
-                for bet1 in bets_by_stat[stat1][:5]:
-                    for bet2 in bets_by_stat[stat2][:5]:
+        if self.sport == 'NFL':
+            stat_pairs = [('passing', 'rushing'), ('passing', 'receiving'), ('rushing', 'receiving')]
+        else:
+            stat_pairs = [('points', 'rebounds'), ('points', 'assists'), ('rebounds', 'assists')]
+
+        for stat1, stat2 in stat_pairs:
+            if len(stat_categories[stat1]) > 0 and len(stat_categories[stat2]) > 0:
+                for bet1 in stat_categories[stat1][:5]:
+                    for bet2 in stat_categories[stat2][:5]:
                         if bet1['player_id'] != bet2['player_id']:
                             combo = [bet1, bet2]
                             combined_prob = bet1['probability'] * bet2['probability']
-                            
+
                             if combined_prob > 0:
                                 decimal_odds = 1.0 / combined_prob
                                 american_odds = (decimal_odds - 1) * 100
                             else:
                                 american_odds = None
-                            
+
                             all_parlays.append({
                                 'legs': combo,
                                 'num_legs': 2,
@@ -540,7 +741,10 @@ class SuggestedBetsService:
         
         # Get games for the date (include finished games for historical viewing)
         games = self.db.query(Game).filter(
-            Game.game_date == game_date
+            and_(
+                Game.game_date == game_date,
+                Game.sport == self.sport  # Filter by sport
+            )
         ).all()
         
         if not games:
@@ -548,13 +752,25 @@ class SuggestedBetsService:
         
         game_ids = [g.game_id for g in games]
         
-        # Get predictions with very high safe probabilities (≥80%)
+        # Get sport-appropriate bettable stat types (excludes minutes, snaps, etc.)
+        from app.config.sport_config import get_bettable_stat_types
+        bettable_stat_types = get_bettable_stat_types(self.sport)
+        
+        # For safe long parlays, use bettable stats only
+        if self.sport == 'NFL':
+            safe_stat_types = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']]
+        else:  # NBA
+            # Include points, rebounds, assists, three_pointers_made, and pts+ast+reb
+            safe_stat_types = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
+        
+        # Get predictions with very high safe probabilities (≥75% default)
         # Use safe_line but require higher probability threshold
         predictions = self.db.query(Prediction).filter(
             and_(
                 Prediction.game_id.in_(game_ids),
+                Prediction.sport == self.sport,  # CRITICAL: Filter by sport
                 Prediction.bet_type == 'safe',  # Only safe bets
-                Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
+                Prediction.stat_type.in_(safe_stat_types),
                 Prediction.safe_probability >= min_leg_probability,  # Very safe threshold
                 Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
             )
@@ -597,19 +813,39 @@ class SuggestedBetsService:
             if player.current_team_id:
                 team = teams_dict.get(player.current_team_id)
                 player_team = team.abbreviation if team else None
+
+            # Get last 3 games for this stat type
+            historical_data = get_last_n_games_for_stat(
+                db=self.db,
+                player_id=pred.player_id,
+                stat_type=pred.stat_type,
+                sport=self.sport,  # Use the correct sport
+                n_games=3,
+                exclude_game_id=pred.game_id,
+                include_lineup_analysis=True,
+                current_game_id=pred.game_id
+            )
+            last_3_games = historical_data['games']
+            lineup_context = historical_data['lineup_context']
+            
+            # Ensure line is valid (positive and not None)
+            safe_line = pred.safe_line
+            if safe_line is None or safe_line <= 0:
+                continue  # Skip bets with invalid lines
             
             safe_bets.append({
                 'prediction_id': pred.prediction_id,
                 'player_id': pred.player_id,
                 'player_name': player.name,
-                'player_team': player_team,
+                'player_team': player_team or 'UNK',  # Ensure we always have a team value
                 'game_id': pred.game_id,
                 'stat_type': pred.stat_type,
                 'bet_type': 'safe',
-                'line': pred.safe_line,
-                'probability': pred.safe_probability,
-                'confidence_level': pred.confidence_level,
-                'volatility_level': pred.volatility_level
+                'line': safe_line,
+                'probability': pred.safe_probability or 0.75,  # Ensure probability exists
+                'confidence_level': pred.confidence_level or 'MEDIUM',
+                'volatility_level': pred.volatility_level or 'MEDIUM',
+                'last_3_games': last_3_games
             })
         
         # Use a smarter greedy algorithm instead of generating all combinations
@@ -726,10 +962,20 @@ class SuggestedBetsService:
         
         # Get predictions for this game with good probabilities
         # Get all predictions (safe, standard, long_shot) and pick the best one per player-stat combo
+        # Only include bettable stat types (excludes minutes)
+        from app.config.sport_config import get_bettable_stat_types
+        bettable_stat_types = get_bettable_stat_types(self.sport)
+        
+        # For NBA same-game parlays, use bettable stats: points, rebounds, assists, three_pointers_made, pts+ast+reb
+        if self.sport == 'NBA':
+            sgp_stat_types = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
+        else:  # NFL
+            sgp_stat_types = bettable_stat_types
+        
         all_predictions = self.db.query(Prediction).filter(
             and_(
                 Prediction.game_id == game_id,
-                Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
+                Prediction.stat_type.in_(sgp_stat_types),
                 Prediction.bet_type.in_(['safe', 'standard']),  # Only safe/standard for same-game parlays
                 Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
             )
@@ -794,6 +1040,20 @@ class SuggestedBetsService:
                 continue  # Shouldn't happen, but safety check
             
             team = teams_dict.get(player.current_team_id) if player.current_team_id else None
+
+            # Get last 3 games for this stat type
+            historical_data = get_last_n_games_for_stat(
+                db=self.db,
+                player_id=pred.player_id,
+                stat_type=pred.stat_type,
+                sport=self.sport,  # Use the correct sport
+                n_games=3,
+                exclude_game_id=pred.game_id,
+                include_lineup_analysis=True,
+                current_game_id=pred.game_id
+            )
+            last_3_games = historical_data['games']
+            lineup_context = historical_data['lineup_context']
             
             bets.append({
                 'prediction_id': pred.prediction_id,
@@ -805,7 +1065,8 @@ class SuggestedBetsService:
                 'bet_type': bet_type,
                 'line': line,
                 'probability': probability,
-                'confidence_level': pred.confidence_level
+                'confidence_level': pred.confidence_level,
+                'last_3_games': last_3_games
             })
         
         if len(bets) < num_legs:
@@ -815,12 +1076,10 @@ class SuggestedBetsService:
         selected_parlays = []
         used_players = set()
         
-        # Group bets by stat type for diversity
-        bets_by_stat = {
-            'points': [b for b in bets if b['stat_type'] == 'points'],
-            'rebounds': [b for b in bets if b['stat_type'] == 'rebounds'],
-            'assists': [b for b in bets if b['stat_type'] == 'assists']
-        }
+        # Group bets by stat type for diversity (only bettable stats)
+        bets_by_stat = {}
+        for stat_type in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']:
+            bets_by_stat[stat_type] = [b for b in bets if b['stat_type'] == stat_type]
         
         # Try to build parlays with stat diversity
         for parlay_idx in range(limit):

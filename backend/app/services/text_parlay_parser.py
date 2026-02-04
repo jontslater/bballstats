@@ -7,7 +7,7 @@ Example: "LeBron Over 25 points, AD Over 10 rebounds, Curry Over 30 points"
 import re
 from typing import List, Dict, Optional, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, desc
 from app.models.player import Player
 from app.models.prediction import Prediction
 from app.models.game import Game

@@ -110,3 +110,6 @@ The service has bet suggestion logic, but we still need:
 - `backend/app/database.py` - Added models to init_db
 - `backend/app/main.py` - Added poor_mans_bet router
 
+
+
+

@@ -4,14 +4,14 @@
  */
 import axios from 'axios';
 
-const API_BASE_URL = (import.meta.env?.VITE_API_URL as string) || 'http://localhost:8000';
+const API_BASE_URL = (import.meta.env?.VITE_API_URL as string) || '';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 10000, // 10 second timeout for all requests
+  timeout: 30000, // 30 second timeout for all requests
 });
 
 // Request interceptor for logging
@@ -25,11 +25,20 @@ api.interceptors.request.use(
   }
 );
 
-// Response interceptor for error handling
+// Response interceptor for error handling and logging
 api.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    console.log(`API Response: ${response.status} ${response.config.method?.toUpperCase()} ${response.config.url}`, response.data);
+    return response;
+  },
   (error) => {
     console.error('API Error:', error.response?.data || error.message);
+    console.error('API Error Details:', {
+      status: error.response?.status,
+      url: error.config?.url,
+      method: error.config?.method,
+      data: error.response?.data
+    });
     return Promise.reject(error);
   }
 );
@@ -64,6 +73,13 @@ export interface Game {
   };
 }
 
+export interface Last3Game {
+  game_date: string;
+  opponent: string;
+  value: number;
+  game_id: number;
+}
+
 export interface Prediction {
   prediction_id: number;
   player_id: number;
@@ -87,6 +103,7 @@ export interface Prediction {
   percentile_25?: number;
   percentile_50?: number;
   percentile_85?: number;
+  last_3_games?: Last3Game[];
 }
 
 export interface Play {
@@ -114,51 +131,57 @@ export const apiService = {
   },
 
   // Games
-  getGames: async (gameDate?: string, status?: string) => {
-    const params: any = {};
+  getGames: async (gameDate?: string, status?: string, sport: string = 'NBA') => {
+    const params: any = { sport };
     if (gameDate) params.game_date = gameDate;
     if (status) params.status = status;
     const response = await api.get('/api/games', { params });
     return response.data;
   },
 
-  getGame: async (gameId: number) => {
-    const response = await api.get(`/api/games/${gameId}`);
+  getGame: async (gameId: number, sport: string = 'NBA') => {
+    const response = await api.get(`/api/games/${gameId}`, { params: { sport } });
     return response.data;
   },
 
-  getUpcomingGames: async (daysAhead: number = 7) => {
+  getUpcomingGames: async (daysAhead: number = 7, sport: string = 'NBA') => {
     const response = await api.get('/api/games/upcoming/list', {
-      params: { days_ahead: daysAhead },
+      params: { days_ahead: daysAhead, sport },
     });
     return response.data;
   },
 
   // Predictions
-  getPredictionsForGame: async (gameId: number, statType?: string, betType?: string) => {
-    const params: any = {};
+  getPredictionsForGame: async (gameId: number, statType?: string, betType?: string, sport: string = 'NBA') => {
+    const params: any = { sport };
     if (statType) params.stat_type = statType;
     if (betType) params.bet_type = betType;
     const response = await api.get(`/api/predictions/game/${gameId}`, { params });
     return response.data;
   },
 
-  getSafeBets: async (gameDate?: string, limit: number = 50) => {
-    const params: any = { limit };
+  getSafeBets: async (gameDate?: string, limit: number = 50, sport: string = 'NBA') => {
+    const params: any = { limit, sport };
     if (gameDate) params.game_date = gameDate;
+    console.log('🔍 Fetching safe bets with params:', params);
     const response = await api.get('/api/predictions/safe-bets', { params });
+    console.log(`📊 Safe bets result: ${response.data.length} items`);
+    console.log('💡 Safe bets show predictions for past games that met criteria');
     return response.data;
   },
 
-  getLongShots: async (gameDate?: string, limit: number = 50) => {
-    const params: any = { limit };
+  getLongShots: async (gameDate?: string, limit: number = 50, sport: string = 'NBA') => {
+    const params: any = { limit, sport };
     if (gameDate) params.game_date = gameDate;
+    console.log('🔍 Fetching long shots with params:', params);
     const response = await api.get('/api/predictions/long-shots', { params });
+    console.log(`📊 Long shots result: ${response.data.length} items`);
+    console.log('💡 Long shots show predictions for past games that met criteria');
     return response.data;
   },
 
-  getUpcomingPredictions: async (daysAhead: number = 1, statType?: string, betType?: string) => {
-    const params: any = { days_ahead: daysAhead };
+  getUpcomingPredictions: async (daysAhead: number = 1, statType?: string, betType?: string, sport: string = 'NBA') => {
+    const params: any = { days_ahead: daysAhead, sport };
     if (statType) params.stat_type = statType;
     if (betType) params.bet_type = betType;
     const response = await api.get('/api/predictions/upcoming', { params });
@@ -173,9 +196,10 @@ export const apiService = {
   },
 
   generatePredictions: async (
-    gameId?: number, 
-    daysAhead: number = 1, 
+    gameId?: number,
+    daysAhead: number = 1,
     statTypes: string[] = ['points', 'rebounds', 'assists'],
+    sport: string = 'NBA',
     onProgress?: (progress: any) => void
   ) => {
     const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/predictions/generate`, {
@@ -187,6 +211,7 @@ export const apiService = {
         game_id: gameId,
         days_ahead: daysAhead,
         stat_types: statTypes,
+        sport: sport,
       }),
     });
 
@@ -370,36 +395,63 @@ export const apiService = {
     return response.data;
   },
 
-  // Suggested Bets
-  getSuggestedBets: async (gameDate?: string, limit: number = 10) => {
-    const params: any = { limit };
+  collectLineups: async (gameDate?: string, daysAhead: number = 1) => {
+    const params: any = { days_ahead: daysAhead };
     if (gameDate) params.game_date = gameDate;
-    const response = await api.get('/api/suggested-bets/bets', { params });
+    const response = await api.post('/api/lineups/collect', null, { 
+      params,
+      timeout: 120000 // 2 minutes timeout for lineup collection (scraping can take time)
+    });
     return response.data;
   },
 
-  getSuggestedParlays: async (gameDate?: string, limit: number = 5, mixStats: boolean = true) => {
-    const params: any = { limit, mix_stats: mixStats };
+  // Suggested Bets
+  getSuggestedBets: async (gameDate?: string, limit: number = 10, sport: string = 'NBA') => {
+    const params: any = { limit, sport };
+    if (gameDate) params.game_date = gameDate;
+    console.log(`🔍 Fetching ${sport} suggested bets with params:`, params);
+    const response = await api.get('/api/suggested-bets/bets', { params });
+    console.log(`📊 ${sport} suggested bets result: ${response.data.length} items`);
+    console.log('⚠️ If empty array, likely no upcoming games with predictions');
+    return response.data;
+  },
+
+  getSuggestedParlays: async (gameDate?: string, limit: number = 5, mixStats: boolean = true, sport: string = 'NBA') => {
+    const params: any = { limit, mix_stats: mixStats, sport };
     if (gameDate) params.game_date = gameDate;
     const response = await api.get('/api/suggested-bets/parlays', { params });
     return response.data;
   },
 
-  getSafeLongParlays: async (gameDate?: string, limit: number = 3, numLegs: number = 12, minLegProbability: number = 0.75) => {
-    const params: any = { limit, num_legs: numLegs, min_leg_probability: minLegProbability };
+  getMatchupAdvantageParlays: async (gameDate?: string, limit: number = 3, sport: string = 'NBA') => {
+    const params: any = { limit, sport };
+    if (gameDate) params.game_date = gameDate;
+    const response = await api.get('/api/suggested-bets/matchup-advantage-parlays', { params });
+    return response.data;
+  },
+
+  getMatchupAdvantageBets: async (gameDate?: string, limit: number = 10, onlyHot: boolean = true, sport: string = 'NBA') => {
+    const params: any = { limit, only_hot: onlyHot, sport };
+    if (gameDate) params.game_date = gameDate;
+    const response = await api.get('/api/suggested-bets/matchup-advantage-bets', { params });
+    return response.data;
+  },
+
+  getSafeLongParlays: async (gameDate?: string, limit: number = 3, numLegs: number = 12, minLegProbability: number = 0.75, sport: string = 'NBA') => {
+    const params: any = { limit, num_legs: numLegs, min_leg_probability: minLegProbability, sport };
     if (gameDate) params.game_date = gameDate;
     const response = await api.get('/api/suggested-bets/safe-long-parlays', { params });
     return response.data;
   },
 
-  getSameGameParlays: async (gameId: number, limit: number = 5, numLegs: number = 3, minLegProbability: number = 0.70) => {
-    const params: any = { limit, num_legs: numLegs, min_leg_probability: minLegProbability };
+  getSameGameParlays: async (gameId: number, limit: number = 5, numLegs: number = 3, minLegProbability: number = 0.70, sport: string = 'NBA') => {
+    const params: any = { limit, num_legs: numLegs, min_leg_probability: minLegProbability, sport };
     const response = await api.get(`/api/suggested-bets/same-game-parlays/${gameId}`, { params });
     return response.data;
   },
 
-  getBuilderPlays: async (gameDate?: string, limit: number = 5, numLegs: number = 2) => {
-    const params: any = { limit, num_legs: numLegs };
+  getBuilderPlays: async (gameDate?: string, limit: number = 5, numLegs: number = 2, sport: string = 'NBA') => {
+    const params: any = { limit, num_legs: numLegs, sport };
     if (gameDate) params.game_date = gameDate;
     const response = await api.get('/api/suggested-bets/builder-plays', { params });
     return response.data;
@@ -425,8 +477,8 @@ export const apiService = {
   },
 
   // Advanced Bets
-  getAdvancedBetsForGame: async (gameId: number, limitPerType: number = 5) => {
-    const response = await api.get(`/api/advanced-bets/game/${gameId}`, { params: { limit_per_type: limitPerType } });
+  getAdvancedBetsForGame: async (gameId: number, limitPerType: number = 5, sport: string = 'NBA') => {
+    const response = await api.get(`/api/advanced-bets/game/${gameId}`, { params: { limit_per_type: limitPerType, sport } });
     return response.data;
   },
 
@@ -586,8 +638,8 @@ export const apiService = {
   },
 
   // Updates
-  runFullUpdate: async (onProgress?: (progress: any) => void) => {
-    const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/updates/run-full-update`, {
+  runFullUpdate: async (sport: string = 'NBA', onProgress?: (progress: any) => void) => {
+    const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/updates/run-full-update?sport=${sport}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -752,6 +804,13 @@ export const apiService = {
     return response.data;
   },
 
+  getPoorMansBetEligiblePlays: async (challengeId: number, gameDate?: string) => {
+    const params: any = {};
+    if (gameDate) params.game_date = gameDate;
+    const response = await api.get(`/api/poor-mans-bet/challenges/${challengeId}/eligible-plays`, { params });
+    return response.data;
+  },
+
   placePoorMansBet: async (data: {
     challenge_id: number;
     prediction_ids: number[];
@@ -775,6 +834,15 @@ export const apiService = {
     return response.data;
   },
 
+  advancePoorMansBetDay: async (challengeId: number, finalBankroll?: number) => {
+    const params: any = {};
+    if (finalBankroll !== undefined) {
+      params.final_bankroll = finalBankroll;
+    }
+    const response = await api.post(`/api/poor-mans-bet/challenges/${challengeId}/next-day`, null, { params });
+    return response.data;
+  },
+
   deletePoorMansBetChallenge: async (challengeId: number) => {
     const response = await api.delete(`/api/poor-mans-bet/challenges/${challengeId}`);
     return response.data;
@@ -788,6 +856,137 @@ export const apiService = {
     risk_tolerance: 'conservative' | 'moderate' | 'aggressive';
   }) => {
     const response = await api.post('/api/bankroll-recommendations', data);
+    return response.data;
+  },
+
+  // Prediction Management
+  updatePredictionResults: async (gameDate?: string) => {
+    const params: any = {};
+    if (gameDate) params.game_date = gameDate;
+    const response = await api.post('/api/prediction-management/update-results', null, { params });
+    return response.data;
+  },
+
+  getCalibrationStats: async () => {
+    const response = await api.get('/api/prediction-management/calibration-stats');
+    return response.data;
+  },
+
+  getCalibrationCurves: async () => {
+    const response = await api.get('/api/prediction-management/calibration-curves');
+    return response.data;
+  },
+
+  // Updates
+  collectPlayers: async (
+    sport: string = 'NBA',
+    useEspn: boolean = true,
+    onProgress?: (progress: any) => void
+  ) => {
+    // Explicitly pass use_espn parameter to ensure ESPN scraping is used
+    const useEspnParam = useEspn !== false ? 'true' : 'false';
+    const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/updates/collect-players?sport=${sport}&use_espn=${useEspnParam}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to collect players: ${response.statusText}`);
+    }
+
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    if (!reader) {
+      throw new Error('No response body reader available');
+    }
+
+    let finalResult: any = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            
+            if (onProgress) {
+              onProgress(data);
+            }
+
+            if (data.complete) {
+              finalResult = data;
+            }
+          } catch (e) {
+            console.error('Error parsing SSE data:', e);
+          }
+        }
+      }
+    }
+
+    if (!finalResult) {
+      throw new Error('No result received from player collection');
+    }
+
+    return finalResult;
+  },
+
+  // Value Ladders
+  getValueLadderRecommendations: async (sport: string = 'NBA', daysAhead: number = 7, minSteps: number = 3) => {
+    const response = await api.get('/api/value-ladders/recommendations', {
+      params: { sport, days_ahead: daysAhead, min_steps: minSteps }
+    });
+    return response.data;
+  },
+
+  // Historical Results
+  saveSuggestedBets: async (bets: any[], dateFilter: string) => {
+    const response = await api.post('/api/historical-results/save-suggested-bets', {
+      bets: bets,
+      date_filter: dateFilter
+    });
+    return response.data;
+  },
+
+  saveParlay: async (parlayData: any, legs: any[], parlayType: string) => {
+    const requestData = {
+      parlay_data: parlayData,
+      legs: legs,
+      parlay_type: parlayType
+    };
+    console.log('📤 Sending parlay data:', requestData);
+    const response = await api.post('/api/historical-results/save-parlay', requestData);
+    return response.data;
+  },
+
+  getHistoricalPerformance: async (daysBack: number = 30) => {
+    const response = await api.get('/api/historical-results/performance', {
+      params: { days_back: daysBack }
+    });
+    return response.data;
+  },
+
+  getRecentHistoricalResults: async (limit: number = 50) => {
+    const response = await api.get('/api/historical-results/recent-results', {
+      params: { limit }
+    });
+    return response.data;
+  },
+
+  updateHistoricalResults: async (gameDate?: string) => {
+    const params: any = {};
+    if (gameDate) params.game_date = gameDate;
+    const response = await api.post('/api/historical-results/update-results', {}, { params });
     return response.data;
   },
 };

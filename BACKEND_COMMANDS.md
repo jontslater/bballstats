@@ -15,8 +15,8 @@ uvicorn app.main:app --reload
 ```
 
 ### One-Liner (Full Path)
-```bash
-cd /Users/lisaannparr/bballstats/backend && source venv/bin/activate && uvicorn app.main:app --reload
+```bashcd /Users/lisaannparr/bballstats/backend && source venv/bin/activate && uvicorn app.main:app --reload
+
 ```
 
 ## What Each Part Does
@@ -73,5 +73,8 @@ cd frontend && npm run dev
 **Port already in use**
 - Another instance might be running
 - Kill the process or use a different port: `uvicorn app.main:app --reload --port 8001`
+
+
+
 
 

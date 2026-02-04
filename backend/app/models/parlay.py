@@ -20,6 +20,9 @@ class Parlay(Base):
 
     parlay_id = Column(Integer, primary_key=True, index=True)
     
+    # Sport
+    sport = Column(String(10), nullable=False, default='NBA', index=True)  # 'NBA' or 'NFL'
+    
     # Parlay details
     name = Column(String(200), nullable=True)  # Optional name for the parlay
     total_odds = Column(Float, nullable=True)  # Combined odds (e.g., +500)
@@ -42,5 +45,8 @@ class Parlay(Base):
 
     def __repr__(self):
         return f"<Parlay {self.parlay_id} - {self.total_legs} legs - {self.status}>"
+
+
+
 
 

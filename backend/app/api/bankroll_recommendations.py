@@ -106,3 +106,6 @@ async def test_recommendations(
     finally:
         db.close()
 
+
+
+

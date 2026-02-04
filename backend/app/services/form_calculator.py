@@ -258,7 +258,150 @@ class FormCalculator:
             'weighted_diff': round(weighted_diff, 3),
             'shooting_factor': shooting_factor
         }
-    
+
+    def calculate_streak_continuation_factor(
+        self,
+        player_id: int,
+        stat_type: str,
+        season_id: Optional[int] = None,
+        current_streak_length: int = 3
+    ) -> Dict:
+        """
+        Calculate likelihood of streak continuation based on historical patterns.
+
+        Analyzes how often similar streaks continued in the player's past.
+
+        Args:
+            player_id: Player to analyze
+            stat_type: Type of stat (points, rebounds, assists, three_pointers_made)
+            season_id: Season to analyze
+            current_streak_length: Length of current streak (positive for hot, negative for cold)
+
+        Returns:
+            Dict with continuation probability and adjustment factor
+        """
+        if season_id is None:
+            season = self.db.query(Season).filter(
+                Season.is_current == True
+            ).first()
+            if not season:
+                return {'continuation_factor': 1.0, 'probability': 0.5}
+            season_id = season.season_id
+
+        # Get all games for this player this season
+        all_stats = self.db.query(PlayerGameStat).join(
+            Game, PlayerGameStat.game_id == Game.game_id
+        ).filter(
+            and_(
+                PlayerGameStat.player_id == player_id,
+                Game.season_id == season_id,
+                Game.game_status == 'finished',
+                PlayerGameStat.minutes_played > 0
+            )
+        ).order_by(Game.game_date).all()
+
+        if len(all_stats) < 10:  # Need sufficient history
+            return {'continuation_factor': 1.0, 'probability': 0.5}
+
+        # Extract stat values based on type
+        stat_values = []
+        for stat in all_stats:
+            if stat_type == 'points':
+                value = stat.points or 0
+            elif stat_type == 'rebounds':
+                value = stat.rebounds or 0
+            elif stat_type == 'assists':
+                value = stat.assists or 0
+            elif stat_type == 'three_pointers_made':
+                value = stat.three_pointers_made or 0
+            else:
+                value = 0
+            stat_values.append(value)
+
+        if not stat_values:
+            return {'continuation_factor': 1.0, 'probability': 0.5}
+
+        # Calculate season average
+        season_avg = sum(stat_values) / len(stat_values)
+
+        # Identify hot/cold streaks
+        streak_patterns = []
+        current_streak = 0
+        streak_type = None
+
+        for i in range(len(stat_values)):
+            is_above_avg = stat_values[i] > season_avg
+
+            if current_streak == 0:
+                # Start new streak
+                current_streak = 1 if is_above_avg else -1
+                streak_type = 'hot' if is_above_avg else 'cold'
+            elif (streak_type == 'hot' and is_above_avg) or (streak_type == 'cold' and not is_above_avg):
+                # Continue streak
+                current_streak = current_streak + 1 if current_streak > 0 else current_streak - 1
+            else:
+                # Streak broken, record it and start new
+                streak_patterns.append({
+                    'type': streak_type,
+                    'length': abs(current_streak),
+                    'continued': i < len(stat_values) - 1  # Did it have a next game?
+                })
+                current_streak = 1 if is_above_avg else -1
+                streak_type = 'hot' if is_above_avg else 'cold'
+
+        # Record final streak
+        if current_streak != 0:
+            streak_patterns.append({
+                'type': streak_type,
+                'length': abs(current_streak),
+                'continued': False  # Last streak, no continuation to analyze
+            })
+
+        # Analyze continuation patterns
+        continuation_stats = {'hot': {}, 'cold': {}}
+
+        for streak in streak_patterns:
+            stype = streak['type']
+            length = streak['length']
+
+            if length not in continuation_stats[stype]:
+                continuation_stats[stype][length] = {'continued': 0, 'total': 0}
+
+            continuation_stats[stype][length]['total'] += 1
+            if streak['continued']:
+                continuation_stats[stype][length]['continued'] += 1
+
+        # Calculate continuation probability for current streak
+        is_hot_streak = current_streak_length > 0
+        streak_type = 'hot' if is_hot_streak else 'cold'
+        streak_length = abs(current_streak_length)
+
+        if streak_length in continuation_stats[streak_type]:
+            stats = continuation_stats[streak_type][streak_length]
+            if stats['total'] >= 3:  # Need at least 3 similar streaks
+                continuation_prob = stats['continued'] / stats['total']
+
+                # Convert to adjustment factor
+                # Higher continuation probability = stronger adjustment
+                if continuation_prob >= 0.7:  # 70%+ continuation rate
+                    continuation_factor = 1.03 if is_hot_streak else 0.97
+                elif continuation_prob >= 0.5:  # 50-70% continuation rate
+                    continuation_factor = 1.02 if is_hot_streak else 0.98
+                elif continuation_prob <= 0.3:  # 30% or less continuation rate
+                    continuation_factor = 0.97 if is_hot_streak else 1.03
+                else:  # 30-50% continuation rate
+                    continuation_factor = 1.01 if is_hot_streak else 0.99
+
+                return {
+                    'continuation_factor': continuation_factor,
+                    'probability': continuation_prob,
+                    'streak_type': streak_type,
+                    'streak_length': streak_length
+                }
+
+        # No sufficient historical data
+        return {'continuation_factor': 1.0, 'probability': 0.5}
+
     def calculate_true_shooting_percentage(
         self,
         player_id: int,

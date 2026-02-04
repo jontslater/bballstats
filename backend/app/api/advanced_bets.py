@@ -15,12 +15,13 @@ router = APIRouter(prefix="/api/advanced-bets", tags=["advanced-bets"])
 @router.get("/game/{game_id}")
 async def get_advanced_bets_for_game(
     game_id: int,
-    limit_per_type: int = Query(5, description="Maximum bets per type")
+    limit_per_type: int = Query(5, description="Maximum bets per type"),
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)")
 ):
     """Get all advanced bet types for a game."""
     db = SessionLocal()
     try:
-        generator = AdvancedBetGenerator(db)
+        generator = AdvancedBetGenerator(db, sport)
         bets = generator.get_all_advanced_bets_for_game(game_id, limit_per_type)
         return bets
     except Exception as e:

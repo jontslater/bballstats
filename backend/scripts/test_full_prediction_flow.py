@@ -241,7 +241,7 @@ def test_prediction_generation(db, game_date: date):
                 print(f"\n  Generating predictions for Game {game.game_id}...")
                 predictions = prediction_service.generate_predictions_for_game(
                     game.game_id,
-                    stat_types=['points', 'rebounds', 'assists']
+                    stat_types=['points', 'rebounds', 'assists', 'three_pointers_made']
                 )
                 
                 db.commit()

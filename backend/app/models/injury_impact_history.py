@@ -33,3 +33,6 @@ class InjuryImpactHistory(Base):
         return f"<InjuryImpactHistory {self.beneficiary_player_id} got +{self.minutes_increase} min when {self.injured_player_id} was out>"
 
 
+
+
+

@@ -163,6 +163,9 @@ class InjuryScraper:
                 status_text = None
                 status_elem = None
                 
+                # Get all cells in the row
+                cells = row.find_all('td')
+                
                 for cell in cells:
                     cell_text = cell.get_text(strip=True).upper()
                     # Check for status keywords

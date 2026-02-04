@@ -76,3 +76,6 @@ python scripts/generate_predictions.py --days 1
 4. **Regenerate predictions** without minutes: `python scripts/generate_predictions.py --days 1`
 
 
+
+
+

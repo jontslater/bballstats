@@ -4,7 +4,7 @@ FastAPI main application file.
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import engine, init_db
-from app.api import predictions, games, players, plays, analytics, export, lineups, parlays, suggested_bets, historical_results, game_results, betting_lines, advanced_bets, analyze, ml_training, updates, poor_mans_bet, bankroll_recommendations
+from app.api import predictions, games, players, plays, analytics, export, lineups, parlays, suggested_bets, historical_results, game_results, betting_lines, advanced_bets, analyze, ml_training, updates, poor_mans_bet, bankroll_recommendations, prediction_management, value_ladders
 
 # Create FastAPI app
 app = FastAPI(
@@ -38,8 +38,9 @@ async def health_check():
     """Detailed health check."""
     try:
         # Test database connection
+        from sqlalchemy import text
         with engine.connect() as conn:
-            conn.execute("SELECT 1")
+            conn.execute(text("SELECT 1"))
         return {
             "status": "healthy",
             "database": "connected"
@@ -71,6 +72,9 @@ app.include_router(ml_training.router)
 app.include_router(updates.router)
 app.include_router(poor_mans_bet.router)
 app.include_router(bankroll_recommendations.router)
+app.include_router(prediction_management.router)
+# Value Ladders API
+app.include_router(value_ladders.router)
 
 # Initialize database on startup
 @app.on_event("startup")

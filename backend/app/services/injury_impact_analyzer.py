@@ -3,7 +3,7 @@ Injury Impact Analyzer
 
 Analyzes historical patterns of how injuries affect player minutes and stats.
 """
-from sqlalchemy import and_, or_, func
+from sqlalchemy import and_, or_, func, desc
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict
 from datetime import date, timedelta

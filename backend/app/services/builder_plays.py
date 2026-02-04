@@ -12,15 +12,17 @@ from app.models.prediction import Prediction
 from app.models.game import Game
 from app.models.player import Player
 from app.models.team import Team
+from app.services.prediction_history_helper import get_last_n_games_for_stat
+from app.services.base_sport_service import BaseSportService
 from itertools import combinations
 import random
 
 
-class BuilderPlaysService:
+class BuilderPlaysService(BaseSportService):
     """Generate builder plays - safe parlays to double money."""
-    
-    def __init__(self, db: Session):
-        self.db = db
+
+    def __init__(self, db: Session, sport: str = 'NBA'):
+        super().__init__(db, sport)
     
     def get_builder_plays(
         self,
@@ -46,10 +48,16 @@ class BuilderPlaysService:
         """
         if game_date is None:
             game_date = date.today()
+
+        # Builder plays require very high confidence predictions (75%+)
+        # NFL predictions are generally less confident, so return empty for NFL
+        if self.sport == 'NFL':
+            return []
         
         # Get games for the date (include finished games for historical viewing)
         games = self.db.query(Game).filter(
-            Game.game_date == game_date
+            Game.game_date == game_date,
+            Game.sport == self.sport
         ).all()
         
         if not games:
@@ -58,18 +66,28 @@ class BuilderPlaysService:
         game_ids = [g.game_id for g in games]
         
         # Get very safe predictions (75%+ probability)
-        # Use safe_line with safe_probability >= min_leg_probability
+        # Use appropriate bet type for the sport
         # Try with 75% first, but if not enough, lower to 70%
+        bet_type_for_sport = 'safe' if self.sport == 'NBA' else 'standard'
+        from app.config.sport_config import get_bettable_stat_types
+        # Only include bettable stat types (excludes minutes, snaps, etc.)
+        bettable_stat_types = get_bettable_stat_types(self.sport)
+        prob_field = Prediction.safe_probability if self.sport == 'NBA' else Prediction.standard_probability
+        line_field = Prediction.safe_line if self.sport == 'NBA' else Prediction.standard_line
+
+        # Use lower probability threshold for NFL since predictions are less confident
+        actual_min_probability = min_leg_probability if self.sport == 'NBA' else max(0.65, min_leg_probability * 0.8)
+
         predictions = self.db.query(Prediction).filter(
             and_(
                 Prediction.game_id.in_(game_ids),
-                Prediction.bet_type == 'safe',
-                Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
-                Prediction.safe_probability >= min_leg_probability,
-                Prediction.confidence_level.in_(['HIGH', 'MEDIUM']),
+                Prediction.bet_type == bet_type_for_sport,
+                Prediction.stat_type.in_(bettable_stat_types),
+                prob_field >= actual_min_probability,
+                Prediction.confidence_level.in_(['HIGH', 'MEDIUM', 'LOW'] if self.sport == 'NFL' else ['HIGH', 'MEDIUM']),
                 Prediction.pass_reason.is_(None)  # Only valid predictions
             )
-        ).order_by(desc(Prediction.safe_probability)).all()
+        ).order_by(desc(prob_field)).all()
         
         # Filter out injured players
         from app.services.injury_context import InjuryContext
@@ -91,13 +109,13 @@ class BuilderPlaysService:
             predictions = self.db.query(Prediction).filter(
                 and_(
                     Prediction.game_id.in_(game_ids),
-                    Prediction.bet_type == 'safe',
-                    Prediction.stat_type.in_(['points', 'rebounds', 'assists']),
-                    Prediction.safe_probability >= 0.70,  # Lower threshold
-                    Prediction.confidence_level.in_(['HIGH', 'MEDIUM']),
+                    Prediction.bet_type == bet_type_for_sport,
+                    Prediction.stat_type.in_(bettable_stat_types),
+                    prob_field >= 0.65,  # Lower threshold for NFL
+                    Prediction.confidence_level.in_(['HIGH', 'MEDIUM', 'LOW'] if self.sport == 'NFL' else ['HIGH', 'MEDIUM']),
                     Prediction.pass_reason.is_(None)
                 )
-            ).order_by(desc(Prediction.safe_probability)).all()
+            ).order_by(desc(prob_field)).all()
             
             # Filter out injured players again
             healthy_predictions = []
@@ -186,7 +204,7 @@ class BuilderPlaysService:
                 if not player or not game:
                     continue
                 
-                prob = pred.safe_probability
+                prob = getattr(pred, f"{bet_type_for_sport}_probability")
                 combined_prob *= prob
                 
                 # Get player's team
@@ -203,6 +221,18 @@ class BuilderPlaysService:
                 
                 opponent = opponent_team.abbreviation if opponent_team else "Unknown"
                 
+                # Get last 3 games for this stat type
+                historical_data = get_last_n_games_for_stat(
+                    db=self.db,
+                    player_id=pred.player_id,
+                    stat_type=pred.stat_type,
+                    sport='NBA',  # TODO: Support NFL when added
+                    n_games=3,
+                    exclude_game_id=pred.game_id,
+                    include_lineup_analysis=False  # Not needed for builder plays
+                )
+                last_3_games = historical_data['games']
+                
                 legs_data.append({
                     "prediction_id": pred.prediction_id,
                     "player_id": pred.player_id,
@@ -211,9 +241,10 @@ class BuilderPlaysService:
                     "game_id": pred.game_id,
                     "opponent": opponent,
                     "stat_type": pred.stat_type,
-                    "bet_line": f"Over {pred.safe_line:.1f}",
+                    "bet_line": f"Over {getattr(pred, f'{bet_type_for_sport}_line'):.1f}",
                     "probability": round(prob, 3),
-                    "line": round(pred.safe_line, 1)
+                    "line": round(getattr(pred, f'{bet_type_for_sport}_line'), 1),
+                    "last_3_games": last_3_games
                 })
             
             if len(legs_data) < num_legs:

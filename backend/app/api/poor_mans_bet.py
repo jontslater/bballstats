@@ -122,6 +122,45 @@ async def get_challenge(challenge_id: int):
         db.close()
 
 
+@router.get("/challenges/{challenge_id}/eligible-plays")
+async def get_eligible_plays(
+    challenge_id: int,
+    game_date: Optional[str] = Query(None, description="Game date (YYYY-MM-DD), defaults to challenge day")
+):
+    """Get all eligible plays for a challenge day (all safe bets that meet Poor Man's Bet criteria)."""
+    db = SessionLocal()
+    try:
+        service = PoorMansBetService(db)
+        
+        # Get challenge to determine current day and calculate date
+        challenge = db.query(PoorMansBetChallenge).filter(
+            PoorMansBetChallenge.challenge_id == challenge_id
+        ).first()
+        
+        if not challenge:
+            raise HTTPException(status_code=404, detail="Challenge not found")
+        
+        parsed_date = None
+        if game_date:
+            try:
+                parsed_date = datetime.strptime(game_date, '%Y-%m-%d').date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Get all eligible plays for the date
+        eligible_plays = service.get_all_eligible_plays(challenge_id, parsed_date)
+        
+        return {
+            "challenge_id": challenge_id,
+            "current_day": challenge.current_day,
+            "game_date": eligible_plays['game_date'],
+            "plays": eligible_plays['plays'],
+            "total_count": len(eligible_plays['plays'])
+        }
+    finally:
+        db.close()
+
+
 @router.post("/challenges/{challenge_id}/suggest-bet")
 async def suggest_bet(
     challenge_id: int,
@@ -261,6 +300,64 @@ async def get_challenge_history(challenge_id: int):
                 for day in days
             ]
         }
+    finally:
+        db.close()
+
+
+@router.put("/challenges/{challenge_id}/resolve-bet/{day_id}")
+async def resolve_bet_manually(challenge_id: int, day_id: int, request: ResolveBetRequest):
+    """Manually resolve a bet day (mark as hit or miss)."""
+    db = SessionLocal()
+    try:
+        service = PoorMansBetService(db)
+        result = service.manual_resolve_bet(
+            challenge_id=challenge_id,
+            day_id=day_id,
+            status=request.status,
+            actual_return=Decimal(str(request.actual_return)) if request.actual_return else None
+        )
+        
+        return {
+            "message": f"Bet marked as {request.status}",
+            "challenge_id": challenge_id,
+            "day_id": day_id,
+            "status": request.status,
+            "updated_bankroll": float(result['updated_bankroll']),
+            "challenge_status": result['challenge_status']
+        }
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error resolving bet: {str(e)}")
+    finally:
+        db.close()
+
+
+@router.post("/challenges/{challenge_id}/next-day")
+async def advance_to_next_day(
+    challenge_id: int,
+    final_bankroll: Optional[float] = Query(None, description="Optional final bankroll amount to set before advancing")
+):
+    """Manually advance challenge to the next day, optionally updating final bankroll."""
+    db = SessionLocal()
+    try:
+        service = PoorMansBetService(db)
+        result = service.advance_to_next_day(challenge_id, final_bankroll)
+        
+        return {
+            "message": "Challenge advanced to next day",
+            "challenge_id": challenge_id,
+            "new_day": result['new_day'],
+            "current_bankroll": float(result['current_bankroll'])
+        }
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error advancing challenge: {str(e)}")
     finally:
         db.close()
 

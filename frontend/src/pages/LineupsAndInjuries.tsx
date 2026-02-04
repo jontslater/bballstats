@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import apiService from '../services/api';
 import { Game } from '../services/api';
+import { useSport } from '../contexts/SportContext';
+import { parseDateString } from '../utils/dateUtils';
 
 interface Injury {
   injury_id: number;
@@ -34,16 +36,19 @@ interface Lineup {
 }
 
 export default function LineupsAndInjuries() {
+  const { sport } = useSport();
   const [injuries, setInjuries] = useState<Injury[]>([]);
   const [games, setGames] = useState<Game[]>([]);
   const [lineups, setLineups] = useState<Record<number, Record<number, Lineup>>>({});
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
+  const [collectingLineups, setCollectingLineups] = useState(false);
+  const [lineupCollectionStatus, setLineupCollectionStatus] = useState<string>('');
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [sport]);
 
   useEffect(() => {
     if (selectedGameId) {
@@ -68,7 +73,7 @@ export default function LineupsAndInjuries() {
       // Load today's games - use the exact same method as Dashboard
       // Use date-fns format to avoid timezone issues (toISOString can cause date shifts)
       const todayDate = format(new Date(), 'yyyy-MM-dd');
-      const gamesData = await apiService.getGames(todayDate);
+      const gamesData = await apiService.getGames(todayDate, undefined, sport);
       
       // Filter to only scheduled and in_progress games (exclude finished)
       const activeGames = gamesData.filter(game => 
@@ -105,6 +110,42 @@ export default function LineupsAndInjuries() {
         ...prev,
         [gameId]: {}
       }));
+    }
+  };
+
+  const handleCollectLineups = async () => {
+    if (!confirm(`Collect lineups for today's ${sport} games? This will scrape lineups from ESPN.`)) {
+      return;
+    }
+    
+    setCollectingLineups(true);
+    setLineupCollectionStatus('Collecting lineups...');
+    
+    try {
+      const todayDate = format(new Date(), 'yyyy-MM-dd');
+      const result = await apiService.collectLineups(todayDate, 1); // Today and tomorrow
+      
+      setLineupCollectionStatus(`✅ Collected ${result.total_collected || 0} lineups`);
+      
+      // Reload lineups for selected game after collection
+      if (selectedGameId) {
+        setTimeout(() => {
+          loadLineups(selectedGameId);
+          loadData(); // Reload games too in case new data is available
+        }, 1000);
+      }
+      
+      setTimeout(() => {
+        setLineupCollectionStatus('');
+      }, 3000);
+    } catch (error: any) {
+      console.error('Error collecting lineups:', error);
+      setLineupCollectionStatus(`❌ Error: ${error.message || 'Failed to collect lineups'}`);
+      setTimeout(() => {
+        setLineupCollectionStatus('');
+      }, 5000);
+    } finally {
+      setCollectingLineups(false);
     }
   };
 
@@ -165,12 +206,21 @@ export default function LineupsAndInjuries() {
             Showing games for {format(new Date(), 'MMMM d, yyyy')}
           </p>
         </div>
-        <button
-          onClick={loadData}
-          className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
-        >
-          Refresh
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={handleCollectLineups}
+            disabled={collectingLineups}
+            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {collectingLineups ? 'Collecting...' : 'Collect Lineups'}
+          </button>
+          <button
+            onClick={loadData}
+            className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -232,6 +282,18 @@ export default function LineupsAndInjuries() {
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="text-2xl font-bold text-gray-900 mb-4">Lineups</h2>
 
+          {lineupCollectionStatus && (
+            <div className={`mb-4 p-3 rounded-md ${
+              lineupCollectionStatus.includes('✅') 
+                ? 'bg-green-50 text-green-800 border border-green-200' 
+                : lineupCollectionStatus.includes('❌')
+                ? 'bg-red-50 text-red-800 border border-red-200'
+                : 'bg-blue-50 text-blue-800 border border-blue-200'
+            }`}>
+              {lineupCollectionStatus}
+            </div>
+          )}
+
           {games.length === 0 ? (
             <div className="text-gray-500 text-center py-8">
               <div>No games found for today</div>
@@ -251,7 +313,7 @@ export default function LineupsAndInjuries() {
                 >
                   {games.map(game => (
                     <option key={game.game_id} value={game.game_id}>
-                      {game.away_team_abbreviation || game.away_team_name} @ {game.home_team_abbreviation || game.home_team_name} - {new Date(game.game_date).toLocaleDateString()}
+                      {game.away_team_abbreviation || game.away_team_name} @ {game.home_team_abbreviation || game.home_team_name} - {format(parseDateString(game.game_date), 'MMM d, yyyy')}
                     </option>
                   ))}
                 </select>

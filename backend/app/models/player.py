@@ -1,5 +1,5 @@
 """
-Player model - NBA players
+Player model - NBA and NFL players
 """
 from sqlalchemy import Column, Integer, String, Date, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
@@ -11,8 +11,9 @@ class Player(Base):
     __tablename__ = "players"
 
     player_id = Column(Integer, primary_key=True, index=True)
+    sport = Column(String(10), nullable=False, default='NBA', index=True)  # 'NBA' or 'NFL'
     name = Column(String, nullable=False, index=True)
-    position = Column(String(10))  # PG, SG, SF, PF, C
+    position = Column(String(10))  # PG, SG, SF, PF, C (NBA) or QB, RB, WR, TE, K, DEF (NFL)
     height = Column(Integer)  # inches
     weight = Column(Integer)  # pounds
     birth_date = Column(Date)
@@ -30,5 +31,8 @@ class Player(Base):
 
     def __repr__(self):
         return f"<Player {self.name} ({self.position})>"
+
+
+
 
 

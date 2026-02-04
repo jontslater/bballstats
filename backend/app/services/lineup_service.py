@@ -253,7 +253,7 @@ class LineupService:
         Infer starting lineup from game stats (for completed games).
         
         This looks at minutes played and assumes the 5 players with most minutes
-        at each position were starters.
+        were starters (regardless of position).
         
         Returns:
             Dict mapping team_id to list of Lineup objects
@@ -267,7 +267,7 @@ class LineupService:
         result = {}
         
         for team_id in [game.home_team_id, game.away_team_id]:
-            # Get player stats for this team in this game
+            # Get player stats for this team in this game, ordered by minutes (descending)
             stats = self.db.query(PlayerGameStat).filter(
                 and_(
                     PlayerGameStat.game_id == game_id,
@@ -276,19 +276,23 @@ class LineupService:
                 )
             ).order_by(PlayerGameStat.minutes_played.desc()).all()
             
-            # Group by position and get top player per position
-            position_players = {}
-            for stat in stats:
-                player = self.db.query(Player).filter(Player.player_id == stat.player_id).first()
-                if not player or not player.position:
-                    continue
-                
-                if player.position not in position_players:
-                    position_players[player.position] = stat
+            if not stats:
+                continue
+            
+            # Take top 5 players by minutes played as starters
+            # (In NBA, starters typically play the most minutes)
+            top_5_stats = stats[:5]
             
             # Create lineup entries
             lineups = []
-            for position, stat in position_players.items():
+            for stat in top_5_stats:
+                player = self.db.query(Player).filter(Player.player_id == stat.player_id).first()
+                if not player:
+                    continue
+                
+                # Use player's position if available, otherwise use None
+                position = player.position if player.position else None
+                
                 lineup = Lineup(
                     game_id=game_id,
                     team_id=team_id,
@@ -299,7 +303,8 @@ class LineupService:
                 )
                 lineups.append(lineup)
             
-            if lineups:
+            # Only add if we found at least 3 starters (minimum for a valid lineup)
+            if len(lineups) >= 3:
                 result[team_id] = lineups
         
         return result

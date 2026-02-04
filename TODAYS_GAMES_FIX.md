@@ -57,3 +57,6 @@ For now, games will show but times may be inaccurate. The important thing is tha
 3. **Check API directly**: `http://localhost:8000/api/games?game_date=2025-12-28`
 
 
+
+
+

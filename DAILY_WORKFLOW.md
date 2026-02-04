@@ -102,3 +102,6 @@ We could add a button to the frontend to collect game results, but for now:
 - The frontend button handles predictions (which is what you need most often)
 
 
+
+
+

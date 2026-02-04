@@ -5,9 +5,130 @@ import apiService, { Game, Prediction } from '../services/api';
 import CreatePlayModal from '../components/CreatePlayModal';
 import GenerationProgress from '../components/GenerationProgress';
 import ParlayBuilder from '../components/ParlayBuilder';
+import Last3Games from '../components/Last3Games';
 import { parseDateString } from '../utils/dateUtils';
+import { useSport } from '../contexts/SportContext';
+
+// Helper function to extract hot/cold streak info
+const getStreakInfo = (reasoning: string) => {
+  if (!reasoning) return null;
+
+  const parts = reasoning.split(' | ');
+  for (const part of parts) {
+    if (part.includes('Hot streak')) {
+      return { type: 'hot', text: part };
+    }
+    if (part.includes('Cold streak')) {
+      return { type: 'cold', text: part };
+    }
+  }
+  return null;
+};
+
+// Helper function to render reasoning with highlights
+const renderReasoningWithHighlights = (reasoning: string) => {
+  if (!reasoning) return null;
+
+  return (
+    <div className="text-xs text-gray-500 mt-1">
+      {reasoning.split(' | ').map((part, idx) => {
+        const isMatchupAdvantage = part.includes('Strong history vs opponent');
+        const isMatchupDisadvantage = part.includes('Weak history vs opponent');
+        const isHotStreak = part.includes('Hot streak');
+        const isColdStreak = part.includes('Cold streak');
+
+        return (
+          <span key={idx}>
+            {idx > 0 && ' | '}
+            {isMatchupAdvantage && (
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-800 mr-1 border border-green-200">
+                🔥 Hot vs Opp
+              </span>
+            )}
+            {isMatchupDisadvantage && (
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-800 mr-1 border border-red-200">
+                ❄️ Cold vs Opp
+              </span>
+            )}
+            {isHotStreak && (
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-semibold bg-orange-100 text-orange-800 mr-1 border border-orange-200">
+                🔥 HOT STREAK
+              </span>
+            )}
+            {isColdStreak && (
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-semibold bg-blue-100 text-blue-800 mr-1 border border-blue-200">
+                ❄️ COLD STREAK
+              </span>
+            )}
+            {part}
+          </span>
+        );
+      })}
+    </div>
+  );
+};
+
+// Helper function to render over/under options
+const renderOverUnderOptions = (prediction: any, betType: string) => {
+  if (!prediction) return null;
+
+  const line = betType === 'safe' ? prediction.safe_line :
+              betType === 'standard' ? prediction.standard_line :
+              prediction.long_shot_line;
+
+  const overProb = betType === 'safe' ? prediction.safe_probability :
+                  betType === 'standard' ? prediction.standard_probability :
+                  prediction.long_shot_probability;
+
+  const underProb = betType === 'safe' ? prediction.safe_under_probability :
+                  betType === 'standard' ? prediction.standard_under_probability :
+                  prediction.long_shot_under_probability;
+
+  if (!line || overProb === undefined) return null;
+
+  // If under probability is not available, show the over option only
+  if (underProb === undefined || underProb === null) {
+    return (
+      <div className="space-y-1">
+        <div className="flex justify-between items-center p-1 rounded text-xs bg-gray-50">
+          <span className="font-medium">Over {line.toFixed(1)}</span>
+          <span className="font-semibold text-gray-600">
+            {(overProb * 100).toFixed(0)}%
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  const overBetter = overProb > underProb;
+  const underBetter = underProb > overProb;
+
+  return (
+    <div className="space-y-1">
+      <div className={`flex justify-between items-center p-1 rounded text-xs ${
+        overBetter ? 'bg-green-100 border border-green-200' : 'bg-gray-50'
+      }`}>
+        <span className="font-medium">Over {line.toFixed(1)}</span>
+        <span className={`font-semibold ${overBetter ? 'text-green-700' : 'text-gray-600'}`}>
+          {overProb ? (overProb * 100).toFixed(0) : 'N/A'}%
+          {overBetter && <span className="ml-1 text-green-600">★</span>}
+        </span>
+      </div>
+      <div className={`flex justify-between items-center p-1 rounded text-xs ${
+        underBetter ? 'bg-blue-100 border border-blue-200' : 'bg-gray-50'
+      }`}>
+        <span className="font-medium">Under {line.toFixed(1)}</span>
+        <span className={`font-semibold ${underBetter ? 'text-blue-700' : 'text-gray-600'}`}>
+          {underProb ? (underProb * 100).toFixed(0) : 'N/A'}%
+          {underBetter && <span className="ml-1 text-blue-600">★</span>}
+        </span>
+      </div>
+    </div>
+  );
+};
 
 export default function GameDetail() {
+  const { sport } = useSport();
   const { gameId } = useParams<{ gameId: string }>();
   const [game, setGame] = useState<Game | null>(null);
   const [safeBets, setSafeBets] = useState<Prediction[]>([]);
@@ -37,9 +158,9 @@ export default function GameDetail() {
     setLoading(true);
     try {
       const [gameData, predictionsData, sameGameParlaysData, advancedBetsData] = await Promise.allSettled([
-        apiService.getGame(Number(gameId)),
-        apiService.getPredictionsForGame(Number(gameId), statFilter === 'all' ? undefined : statFilter),
-        apiService.getSameGameParlays(Number(gameId), 5, 3, 0.70),
+        apiService.getGame(Number(gameId), sport),
+        apiService.getPredictionsForGame(Number(gameId), statFilter === 'all' ? undefined : statFilter, undefined, sport),
+        apiService.getSameGameParlays(Number(gameId), 5, 3, 0.70, sport),
         apiService.getAdvancedBetsForGame(Number(gameId), 5),
       ]);
       
@@ -50,67 +171,85 @@ export default function GameDetail() {
       if (predictionsData.status === 'fulfilled') {
         const preds = predictionsData.value;
         
-        // Group predictions by player_id + game_id (all stat types together)
-        // Structure: Map<player_id-game_id, Map<stat_type, { safe?, standard? }>>
-        const playerGroups = new Map<string, Map<string, { safe?: Prediction; standard?: Prediction }>>();
-        
+        // Group predictions by player_id + game_id (all stat types and bet types together)
+        // Structure: Map<player_id-game_id, { player_info, stats: Map<stat_type, { safe?, standard?, long_shot? }> }>
+        const playerGroups = new Map<string, { player_info: any, stats: Map<string, { safe?: Prediction; standard?: Prediction; long_shot?: Prediction }> }>();
+
         preds.forEach((p: Prediction) => {
-          if (p.bet_type === 'safe' || p.bet_type === 'standard') {
-            const playerKey = `${p.player_id}-${p.game_id}`;
-            if (!playerGroups.has(playerKey)) {
-              playerGroups.set(playerKey, new Map());
-            }
-            const statMap = playerGroups.get(playerKey)!;
-            
-            if (!statMap.has(p.stat_type)) {
-              statMap.set(p.stat_type, {});
-            }
-            const statGroup = statMap.get(p.stat_type)!;
-            
-            if (p.bet_type === 'safe') {
-              statGroup.safe = p;
-            } else {
-              statGroup.standard = p;
-            }
+          const playerKey = `${p.player_id}-${p.game_id}`;
+          if (!playerGroups.has(playerKey)) {
+            playerGroups.set(playerKey, {
+              player_info: {
+                player_id: p.player_id,
+                player_name: p.player_name,
+                player_team: p.player_team,
+                game_id: p.game_id,
+                game_date: p.game_date,
+                opponent_team_abbreviation: p.opponent_team_abbreviation
+              },
+              stats: new Map()
+            });
+          }
+
+          const playerGroup = playerGroups.get(playerKey)!;
+          const statMap = playerGroup.stats;
+
+          if (!statMap.has(p.stat_type)) {
+            statMap.set(p.stat_type, {});
+          }
+          const statGroup = statMap.get(p.stat_type)!;
+
+          if (p.bet_type === 'safe') {
+            statGroup.safe = p;
+          } else if (p.bet_type === 'standard') {
+            statGroup.standard = p;
+          } else if (p.bet_type === 'long_shot') {
+            statGroup.long_shot = p;
           }
         });
         
-        // Convert to array of player prediction objects
-        const combinedBets: any[] = Array.from(playerGroups.entries()).map(([playerKey, statMap]) => {
-          // Get first prediction as base (for player info)
-          const firstPred = Array.from(statMap.values())[0]?.safe || Array.from(statMap.values())[0]?.standard;
-          if (!firstPred) return null;
-          
-          // Build stats object
+        // Convert to array of player prediction objects (including all bet types)
+        const allPlayerBets: any[] = Array.from(playerGroups.entries()).map(([playerKey, playerData]) => {
+          const { player_info, stats: statMap } = playerData;
+
+          // Build stats object with all bet types
           const stats: any = {};
           statMap.forEach((group, statType) => {
             stats[statType] = {
               hasSafe: !!group.safe,
               hasStandard: !!group.standard,
+              hasLongShot: !!group.long_shot,
               safePrediction: group.safe,
               standardPrediction: group.standard,
+              longShotPrediction: group.long_shot,
             };
           });
-          
-          // Get reasoning from any prediction (they should all have the same reasoning)
-          const reasoning = firstPred.reasoning || 
-            (statMap.get('points')?.safe?.reasoning) || 
+
+          // Get reasoning from any prediction
+          const reasoning = (statMap.get('points')?.safe?.reasoning) ||
             (statMap.get('points')?.standard?.reasoning) ||
+            (statMap.get('points')?.long_shot?.reasoning) ||
             (statMap.get('rebounds')?.safe?.reasoning) ||
             (statMap.get('rebounds')?.standard?.reasoning) ||
             (statMap.get('assists')?.safe?.reasoning) ||
             (statMap.get('assists')?.standard?.reasoning);
-          
+
           return {
-            ...firstPred,
+            ...player_info,
             playerKey,
             stats, // Object with stat_type as keys
             reasoning, // Include reasoning in the grouped object
           };
         }).filter(Boolean);
-        
-        setSafeBets(combinedBets);
-        setLongShots(preds.filter((p: Prediction) => p.bet_type === 'long_shot'));
+
+        setSafeBets(allPlayerBets);
+
+        // Filter long shots to only show those not already included in player cards
+        const playerIdsWithCards = new Set(allPlayerBets.map(p => p.player_id));
+        const additionalLongShots = preds.filter((p: Prediction) =>
+          p.bet_type === 'long_shot' && !playerIdsWithCards.has(p.player_id)
+        );
+        setLongShots(additionalLongShots);
       }
       
       if (sameGameParlaysData.status === 'fulfilled') {
@@ -276,6 +415,58 @@ export default function GameDetail() {
     setSelectedPrediction(null);
   };
 
+  const copySameGameParlaysToClipboard = () => {
+    if (sameGameParlays.length === 0) {
+      alert('No same-game parlays to copy');
+      return;
+    }
+
+    const lines: string[] = [];
+    lines.push(`🎯 Same Game Parlays - ${format(parseDateString(game?.game_date || format(new Date(), 'yyyy-MM-dd')), 'MMM d, yyyy')}`);
+    lines.push('');
+
+    sameGameParlays.forEach((parlay, idx) => {
+      lines.push(`${idx + 1}. ${parlay.num_legs}-Leg Same Game Parlay (${parlay.odds_display})`);
+      lines.push(`   Combined Probability: ${(parlay.combined_probability * 100).toFixed(2)}%`);
+      lines.push(`   Game Diversity: ${parlay.game_diversity || 'N/A'} matchups`);
+      lines.push('');
+
+      parlay.legs.forEach((leg: any, legIdx: number) => {
+        const statDisplay = getStatTypeDisplay(leg.stat_type);
+        const lineText = leg.line !== null && leg.line !== undefined
+          ? `${leg.line > 0 ? 'Over' : 'Under'} ${Math.abs(leg.line)}`
+          : 'Line TBD';
+        const probText = leg.probability
+          ? `${(leg.probability * 100).toFixed(1)}%`
+          : 'Prob TBD';
+
+        lines.push(`   ${legIdx + 1}. ${leg.player_name}${leg.player_team ? ` (${leg.player_team})` : ''}: ${statDisplay} ${lineText} (${probText})`);
+      });
+
+      lines.push('');
+    });
+
+    const text = lines.join('\n');
+    navigator.clipboard.writeText(text).then(() => {
+      alert('Same game parlays copied to clipboard!');
+    }).catch(err => {
+      console.error('Failed to copy same game parlays:', err);
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        alert('Same game parlays copied to clipboard!');
+      } catch (fallbackErr) {
+        console.error('Fallback copy failed:', fallbackErr);
+        alert('Failed to copy. Please try selecting and copying manually.');
+      } finally {
+        document.body.removeChild(textArea);
+      }
+    });
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center items-center h-64">
@@ -344,9 +535,18 @@ export default function GameDetail() {
       {/* Same Game Parlays */}
       {sameGameParlays.length > 0 && (
         <div>
-          <h2 className="text-2xl font-semibold text-gray-900 mb-4">
-            🎯 Same Game Parlays ({sameGameParlays.length})
-          </h2>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-2xl font-semibold text-gray-900">
+          🎯 Same Game Parlays ({sameGameParlays.length})
+        </h2>
+        <button
+          onClick={copySameGameParlaysToClipboard}
+          className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg flex items-center space-x-1"
+        >
+          <span>📋</span>
+          <span>Copy All</span>
+        </button>
+      </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {sameGameParlays.map((parlay, idx) => (
               <div
@@ -388,6 +588,7 @@ export default function GameDetail() {
                           {(leg.probability * 100).toFixed(0)}%
                         </span>
                       </div>
+                      <Last3Games last3Games={leg.last_3_games} statType={leg.stat_type} />
                     </div>
                   ))}
                 </div>
@@ -430,6 +631,13 @@ export default function GameDetail() {
                     <div className="text-sm text-gray-600 mt-1">
                       Probability: {(bet.probability * 100).toFixed(1)}%
                     </div>
+                    {bet.last_3_games && bet.last_3_games.length > 0 && (
+                      <Last3Games 
+                        last3Games={bet.last_3_games} 
+                        statType={`${bet.stat1}+${bet.stat2}`}
+                        isCombo={true}
+                      />
+                    )}
                     <div className={`text-xs mt-1 px-2 py-1 rounded inline-block ${
                       bet.bet_type === 'safe' ? 'bg-green-100 text-green-800' :
                       bet.bet_type === 'standard' ? 'bg-blue-100 text-blue-800' :
@@ -463,6 +671,14 @@ export default function GameDetail() {
                     <div className="text-sm text-gray-600 mt-1">
                       Double-Double: {(bet.probability * 100).toFixed(1)}% likely
                     </div>
+                    {bet.last_3_games && bet.last_3_games.length > 0 && (
+                      <Last3Games 
+                        last3Games={bet.last_3_games} 
+                        statType="DD"
+                        isCombo={false}
+                        isMilestone={true}
+                      />
+                    )}
                     <div className="text-xs text-gray-500 mt-1">{bet.label}</div>
                   </div>
                 ))}
@@ -490,6 +706,14 @@ export default function GameDetail() {
                     <div className="text-sm text-gray-600 mt-1">
                       Triple-Double: {(bet.probability * 100).toFixed(1)}% likely
                     </div>
+                    {bet.last_3_games && bet.last_3_games.length > 0 && (
+                      <Last3Games 
+                        last3Games={bet.last_3_games} 
+                        statType="TD"
+                        isCombo={false}
+                        isMilestone={true}
+                      />
+                    )}
                     <div className="text-xs text-gray-500 mt-1">{bet.label}</div>
                   </div>
                 ))}
@@ -517,6 +741,15 @@ export default function GameDetail() {
                     <div className="text-sm text-gray-600 mt-1">
                       {(bet.probability * 100).toFixed(1)}% likely
                     </div>
+                    {bet.last_3_games && bet.last_3_games.length > 0 && (
+                      <Last3Games 
+                        last3Games={bet.last_3_games} 
+                        statType={bet.type === 'points_milestone' ? 'points' : bet.type === 'rebounds_milestone' ? 'rebounds' : 'assists'}
+                        isCombo={false}
+                        isMilestone={true}
+                        threshold={bet.milestone}
+                      />
+                    )}
                   </div>
                 ))}
               </div>
@@ -570,6 +803,14 @@ export default function GameDetail() {
                     <div className="text-sm text-gray-600 mt-2">
                       Expected: {team.expected_total.toFixed(1)}
                     </div>
+                    {team.last_3_games && team.last_3_games.length > 0 && (
+                      <Last3Games 
+                        last3Games={team.last_3_games} 
+                        statType={team.stat_type}
+                        isCombo={false}
+                        isTeamTotal={true}
+                      />
+                    )}
                     <div className="mt-3 space-y-2">
                       {team.lines.slice(0, 5).map((line: any, lineIdx: number) => (
                         <div key={lineIdx} className="flex justify-between items-center text-sm">
@@ -652,8 +893,10 @@ export default function GameDetail() {
                       const statData = playerCard.stats[statType];
                       const safePred = statData.safePrediction;
                       const standardPred = statData.standardPrediction;
+                      const longShotPred = statData.longShotPrediction;
                       const hasSafe = statData.hasSafe;
                       const hasStandard = statData.hasStandard;
+                      const hasLongShot = statData.hasLongShot;
                       
                       return (
                         <div key={statType} className="border rounded-lg p-3 bg-gray-50">
@@ -663,32 +906,80 @@ export default function GameDetail() {
                           <div className="space-y-2">
                             {hasSafe && safePred && (
                               <div className="border-l-4 border-green-500 pl-2 py-1.5 bg-green-50 rounded">
-                                <div className="flex justify-between items-center">
-                                  <div>
-                                    <span className="text-xs font-medium text-green-700">SAFE</span>
-                                    <div className="text-sm font-semibold text-gray-900">
-                                      Over {safePred.safe_line?.toFixed(1)}
-                                    </div>
+                                <div className="flex justify-between items-center mb-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-medium text-green-700">SAFE BET</span>
+                                    {(() => {
+                                      const streakInfo = getStreakInfo(safePred.reasoning);
+                                      if (streakInfo) {
+                                        return (
+                                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${
+                                            streakInfo.type === 'hot'
+                                              ? 'bg-green-200 text-green-900'
+                                              : 'bg-red-200 text-red-900'
+                                          }`} title={`${streakInfo.type === 'hot' ? 'Hot' : 'Cold'} streak: Player performing ${streakInfo.type === 'hot' ? 'above' : 'below'} average recently`}>
+                                            {streakInfo.type === 'hot' ? '🔥' : '❄️'} {streakInfo.type === 'hot' ? 'Hot' : 'Cold'}
+                                          </span>
+                                        );
+                                      }
+                                      return null;
+                                    })()}
                                   </div>
-                                  <span className="text-xs font-semibold text-green-600">
-                                    {(safePred.safe_probability * 100).toFixed(0)}%
-                                  </span>
                                 </div>
+                                {renderOverUnderOptions(safePred, 'safe')}
+                                <Last3Games last3Games={safePred.last_3_games} statType={statType} />
                               </div>
                             )}
                             {hasStandard && standardPred && (
                               <div className="border-l-4 border-blue-500 pl-2 py-1.5 bg-blue-50 rounded">
-                                <div className="flex justify-between items-center">
-                                  <div>
-                                    <span className="text-xs font-medium text-blue-700">STANDARD</span>
-                                    <div className="text-sm font-semibold text-gray-900">
-                                      Over {standardPred.standard_line?.toFixed(1)}
-                                    </div>
+                                <div className="flex justify-between items-center mb-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-medium text-blue-700">STANDARD BET</span>
+                                    {(() => {
+                                      const streakInfo = getStreakInfo(standardPred.reasoning);
+                                      if (streakInfo) {
+                                        return (
+                                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${
+                                            streakInfo.type === 'hot'
+                                              ? 'bg-blue-200 text-blue-900'
+                                              : 'bg-red-200 text-red-900'
+                                          }`} title={`${streakInfo.type === 'hot' ? 'Hot' : 'Cold'} streak: Player performing ${streakInfo.type === 'hot' ? 'above' : 'below'} average recently`}>
+                                            {streakInfo.type === 'hot' ? '🔥' : '❄️'} {streakInfo.type === 'hot' ? 'Hot' : 'Cold'}
+                                          </span>
+                                        );
+                                      }
+                                      return null;
+                                    })()}
                                   </div>
-                                  <span className="text-xs font-semibold text-blue-600">
-                                    {(standardPred.standard_probability * 100).toFixed(0)}%
-                                  </span>
                                 </div>
+                                {renderOverUnderOptions(standardPred, 'standard')}
+                                <Last3Games last3Games={standardPred.last_3_games} statType={statType} />
+                              </div>
+                            )}
+                            {hasLongShot && longShotPred && (
+                              <div className="border-l-4 border-orange-500 pl-2 py-1.5 bg-orange-50 rounded">
+                                <div className="flex justify-between items-center mb-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-medium text-orange-700">LONG SHOT</span>
+                                    {(() => {
+                                      const streakInfo = getStreakInfo(longShotPred.reasoning);
+                                      if (streakInfo) {
+                                        return (
+                                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${
+                                            streakInfo.type === 'hot'
+                                              ? 'bg-orange-200 text-orange-900'
+                                              : 'bg-red-200 text-red-900'
+                                          }`} title={`${streakInfo.type === 'hot' ? 'Hot' : 'Cold'} streak: Player performing ${streakInfo.type === 'hot' ? 'above' : 'below'} average recently`}>
+                                            {streakInfo.type === 'hot' ? '🔥' : '❄️'} {streakInfo.type === 'hot' ? 'Hot' : 'Cold'}
+                                          </span>
+                                        );
+                                      }
+                                      return null;
+                                    })()}
+                                  </div>
+                                </div>
+                                {renderOverUnderOptions(longShotPred, 'long_shot')}
+                                <Last3Games last3Games={longShotPred.last_3_games} statType={statType} />
                               </div>
                             )}
                           </div>
@@ -701,9 +992,7 @@ export default function GameDetail() {
                   {(playerCard.reasoning || safePred?.reasoning || standardPred?.reasoning) && (
                     <div className="mt-4 pt-4 border-t">
                       <div className="text-xs text-gray-600 font-medium mb-1">Why this prediction:</div>
-                      <div className="text-xs text-gray-500 leading-relaxed">
-                        {playerCard.reasoning || safePred?.reasoning || standardPred?.reasoning}
-                      </div>
+                      {renderReasoningWithHighlights(playerCard.reasoning || safePred?.reasoning || standardPred?.reasoning)}
                     </div>
                   )}
                   
@@ -745,21 +1034,35 @@ export default function GameDetail() {
                     Long Shot
                   </span>
                 </div>
-                <div className="space-y-2 mb-4">
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Line:</span>
-                    <span className="font-semibold text-orange-600">Over {prediction.long_shot_line.toFixed(1)}</span>
+                <div className="mb-4">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-medium text-orange-700">LONG SHOT BET</span>
+                    {(() => {
+                      const streakInfo = getStreakInfo(prediction.reasoning);
+                      if (streakInfo) {
+                        return (
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${
+                            streakInfo.type === 'hot'
+                              ? 'bg-orange-200 text-orange-900'
+                              : 'bg-red-200 text-red-900'
+                          }`} title={`${streakInfo.type === 'hot' ? 'Hot' : 'Cold'} streak: Player performing ${streakInfo.type === 'hot' ? 'above' : 'below'} average recently`}>
+                            {streakInfo.type === 'hot' ? '🔥' : '❄️'} {streakInfo.type === 'hot' ? 'Hot' : 'Cold'}
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Probability:</span>
-                    <span className="font-semibold">{(prediction.long_shot_probability * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Mean:</span>
+                  {renderOverUnderOptions(prediction, 'long_shot')}
+                  <div className="flex justify-between text-xs mt-2">
+                    <span className="text-gray-600">Expected:</span>
                     <span>{prediction.distribution_mean.toFixed(1)}</span>
                   </div>
+                  <Last3Games last3Games={prediction.last_3_games} statType={prediction.stat_type} />
                   {prediction.reasoning && (
-                    <div className="text-xs text-gray-500 mt-2">{prediction.reasoning}</div>
+                    <div className="mt-2">
+                      {renderReasoningWithHighlights(prediction.reasoning)}
+                    </div>
                   )}
                 </div>
                 <button

@@ -8,12 +8,16 @@ from typing import List, Optional
 from datetime import date
 import json
 import asyncio
+import logging
 from app.database import SessionLocal
 from app.models.prediction import Prediction
 from app.models.game import Game
 from app.models.player import Player
 from app.services.prediction_service import PredictionService
+from app.services.prediction_history_helper import get_last_n_games_for_stat
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/predictions", tags=["predictions"])
 
@@ -46,19 +50,36 @@ class GeneratePredictionsRequest(BaseModel):
     """Request to generate predictions."""
     game_id: Optional[int] = None
     days_ahead: int = 1
-    stat_types: List[str] = ["points", "rebounds", "assists"]
+    stat_types: List[str] = ["points", "rebounds", "assists", "three_pointers_made"]
+    sport: str = "NBA"  # Sport type (NBA or NFL)
 
 
 @router.get("/game/{game_id}")
 async def get_predictions_for_game(
     game_id: int,
     stat_type: Optional[str] = Query(None, description="Filter by stat type"),
-    bet_type: Optional[str] = Query(None, description="Filter by bet type (safe, standard, long_shot)")
+    bet_type: Optional[str] = Query(None, description="Filter by bet type (safe, standard, long_shot)"),
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)")
 ):
     """Get all predictions for a specific game."""
     db = SessionLocal()
     try:
-        query = db.query(Prediction).filter(Prediction.game_id == game_id)
+        # Validate sport
+        if sport not in ['NBA', 'NFL']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        
+        # Verify game exists and matches sport
+        game = db.query(Game).filter(
+            Game.game_id == game_id,
+            Game.sport == sport
+        ).first()
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        
+        query = db.query(Prediction).filter(
+            Prediction.game_id == game_id,
+            Prediction.sport == sport
+        )
         
         if stat_type:
             query = query.filter(Prediction.stat_type == stat_type)
@@ -109,12 +130,26 @@ async def get_predictions_for_game(
                 from app.models import GameSchedule
                 schedule = db.query(GameSchedule).filter(GameSchedule.game_id == game.game_id).first()
                 game_time = schedule.game_time if schedule else None
+
+            # Get last 3 games for this stat type
+            historical_data = get_last_n_games_for_stat(
+                db=db,
+                player_id=pred.player_id,
+                stat_type=pred.stat_type,
+                sport=sport,
+                n_games=3,
+                exclude_game_id=pred.game_id,
+                include_lineup_analysis=True,
+                current_game_id=pred.game_id
+            )
+            last_3_games = historical_data['games']
             
             result.append({
                 **pred.__dict__,
                 "player_name": player.name if player else f"Player {pred.player_id}",
                 "player_team": player_team,
-                "game_time": game_time.isoformat() if game_time else None
+                "game_time": game_time.isoformat() if game_time else None,
+                "last_3_games": last_3_games
             })
         
         return result
@@ -126,25 +161,48 @@ async def get_predictions_for_game(
 async def get_player_prediction(
     player_id: int,
     game_id: int,
-    stat_type: str = Query("points", description="Stat type")
+    stat_type: str = Query("points", description="Stat type"),
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)")
 ):
     """Get prediction for a specific player in a game."""
     db = SessionLocal()
     try:
+        # Validate sport
+        if sport not in ['NBA', 'NFL']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        
         prediction = db.query(Prediction).filter(
             Prediction.player_id == player_id,
             Prediction.game_id == game_id,
-            Prediction.stat_type == stat_type
+            Prediction.stat_type == stat_type,
+            Prediction.sport == sport
         ).first()
         
         if not prediction:
             raise HTTPException(status_code=404, detail="Prediction not found")
         
-        player = db.query(Player).filter(Player.player_id == player_id).first()
+        player = db.query(Player).filter(
+            Player.player_id == player_id,
+            Player.sport == sport
+        ).first()
+
+        # Get last 3 games for this stat type
+        historical_data = get_last_n_games_for_stat(
+            db=db,
+            player_id=player_id,
+            stat_type=stat_type,
+            sport=sport,
+            n_games=3,
+            exclude_game_id=game_id,
+            analyze_lineup_context=True,
+            current_game_id=game_id
+        )
+        last_3_games = historical_data['games']
         
         return {
             **prediction.__dict__,
-            "player_name": player.name if player else f"Player {player_id}"
+            "player_name": player.name if player else f"Player {player_id}",
+            "last_3_games": last_3_games
         }
     finally:
         db.close()
@@ -153,19 +211,30 @@ async def get_player_prediction(
 @router.get("/safe-bets")
 async def get_safe_bets(
     game_date: Optional[str] = Query(None, description="Filter by game date (YYYY-MM-DD)"),
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)"),
     limit: int = Query(50, description="Maximum number of results")
 ):
     """Get all safe bet predictions."""
     db = SessionLocal()
     try:
-        query = db.query(Prediction).filter(Prediction.bet_type == "safe")
+        # Validate sport
+        if sport not in ['NBA', 'NFL']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        
+        query = db.query(Prediction).filter(
+            Prediction.bet_type == "safe",
+            Prediction.sport == sport
+        )
         
         if game_date:
             # Parse date string (YYYY-MM-DD) to date object
             try:
                 from datetime import datetime
                 parsed_date = datetime.strptime(game_date, '%Y-%m-%d').date()
-                games = db.query(Game).filter(Game.game_date == parsed_date).all()
+                games = db.query(Game).filter(
+                    Game.game_date == parsed_date,
+                    Game.sport == sport
+                ).all()
                 game_ids = [g.game_id for g in games]
                 query = query.filter(Prediction.game_id.in_(game_ids))
             except ValueError:
@@ -175,29 +244,57 @@ async def get_safe_bets(
         predictions = query.limit(limit).all()
         
         # Filter out predictions for players who didn't play (for finished games)
-        # AND filter out injured players (for upcoming games)
+        # AND filter out injured players (for upcoming games) - OPTIMIZED with batch queries
         from app.models.player_game_stat import PlayerGameStat
         from app.services.injury_context import InjuryContext
-        injury_context = InjuryContext(db)
-        
+
+        # Get all unique game_ids and player_ids for batch queries
+        game_ids = list(set([p.game_id for p in predictions]))
+        player_ids = list(set([p.player_id for p in predictions]))
+
+        # Batch load all games and player stats
+        games = {g.game_id: g for g in db.query(Game).filter(Game.game_id.in_(game_ids)).all()}
+        player_stats = {(s.player_id, s.game_id): s for s in db.query(PlayerGameStat).filter(
+            PlayerGameStat.player_id.in_(player_ids),
+            PlayerGameStat.game_id.in_(game_ids),
+            PlayerGameStat.minutes_played > 0
+        ).all()}
+
+        # Batch load injury statuses for all players
+        from app.models.injury import Injury
+        injuries = db.query(Injury).filter(
+            Injury.player_id.in_(player_ids),
+            Injury.status.in_(['Out', 'Doubtful', 'Questionable', 'Probable']),
+            Injury.actual_return_date.is_(None)
+        ).all()
+
+        # Create injury status map
+        injury_statuses = {}
+        for injury in injuries:
+            injury_statuses[injury.player_id] = {
+                "player_id": injury.player_id,
+                "status": injury.status,
+                "injury_type": injury.injury_type,
+                "injury_date": injury.injury_date.isoformat() if injury.injury_date else None,
+                "expected_return_date": injury.expected_return_date.isoformat() if injury.expected_return_date else None,
+                "description": injury.description
+            }
+
         filtered_predictions = []
         for pred in predictions:
-            game = db.query(Game).filter(Game.game_id == pred.game_id).first()
+            game = games.get(pred.game_id)
             if game and game.game_status == 'finished':
-                stat = db.query(PlayerGameStat).filter(
-                    PlayerGameStat.player_id == pred.player_id,
-                    PlayerGameStat.game_id == pred.game_id,
-                    PlayerGameStat.minutes_played > 0
-                ).first()
-                if not stat:
+                # Check if player actually played in finished game
+                stat_key = (pred.player_id, pred.game_id)
+                if stat_key not in player_stats:
                     continue
             elif game and game.game_status in ['scheduled', 'in_progress']:
                 # For upcoming games, check injury status
-                injury_status = injury_context.get_player_injury_status(pred.player_id)
+                injury_status = injury_statuses.get(pred.player_id)
                 if injury_status and injury_status['status'] in ['Out', 'Doubtful', 'Questionable']:
                     continue  # Skip injured players
             filtered_predictions.append(pred)
-        
+
         predictions = filtered_predictions
         
         # Enrich with player and game info (optimized with batch queries)
@@ -232,13 +329,27 @@ async def get_safe_bets(
             schedule = schedules.get(pred.game_id)
             if schedule:
                 game_time = schedule.game_time
+
+            # Get last 3 games for this stat type
+            historical_data = get_last_n_games_for_stat(
+                db=db,
+                player_id=pred.player_id,
+                stat_type=pred.stat_type,
+                sport=sport,
+                n_games=3,
+                exclude_game_id=pred.game_id,
+                include_lineup_analysis=True,
+                current_game_id=pred.game_id
+            )
+            last_3_games = historical_data['games']
             
             result.append({
                 **pred.__dict__,
                 "player_name": player.name if player else f"Player {pred.player_id}",
                 "player_team": player_team,
                 "game_date": game.game_date if game else None,
-                "game_time": game_time.isoformat() if game_time else None
+                "game_time": game_time.isoformat() if game_time else None,
+                "last_3_games": last_3_games
             })
         
         return result
@@ -249,19 +360,30 @@ async def get_safe_bets(
 @router.get("/long-shots")
 async def get_long_shots(
     game_date: Optional[str] = Query(None, description="Filter by game date (YYYY-MM-DD)"),
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)"),
     limit: int = Query(50, description="Maximum number of results")
 ):
     """Get all long shot predictions."""
     db = SessionLocal()
     try:
-        query = db.query(Prediction).filter(Prediction.bet_type == "long_shot")
+        # Validate sport
+        if sport not in ['NBA', 'NFL']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        
+        query = db.query(Prediction).filter(
+            Prediction.bet_type == "long_shot",
+            Prediction.sport == sport
+        )
         
         if game_date:
             # Parse date string (YYYY-MM-DD) to date object
             try:
                 from datetime import datetime
                 parsed_date = datetime.strptime(game_date, '%Y-%m-%d').date()
-                games = db.query(Game).filter(Game.game_date == parsed_date).all()
+                games = db.query(Game).filter(
+                    Game.game_date == parsed_date,
+                    Game.sport == sport
+                ).all()
                 game_ids = [g.game_id for g in games]
                 query = query.filter(Prediction.game_id.in_(game_ids))
             except ValueError:
@@ -271,44 +393,63 @@ async def get_long_shots(
         predictions = query.limit(limit).all()
         
         # Filter out predictions for players who didn't play (for finished games)
-        # AND filter out players who are injured/not playing (for upcoming games)
+        # AND filter out players who are injured/not playing (for upcoming games) - OPTIMIZED
         from app.models.player_game_stat import PlayerGameStat
         from app.services.injury_context import InjuryContext
-        
-        injury_context = InjuryContext(db)
-        
+
+        # Get all unique game_ids and player_ids for batch queries
+        game_ids = list(set([p.game_id for p in predictions]))
+        player_ids = list(set([p.player_id for p in predictions]))
+
+        # Batch load all games and player stats
+        games = {g.game_id: g for g in db.query(Game).filter(Game.game_id.in_(game_ids)).all()}
+        player_stats = {(s.player_id, s.game_id): s for s in db.query(PlayerGameStat).filter(
+            PlayerGameStat.player_id.in_(player_ids),
+            PlayerGameStat.game_id.in_(game_ids),
+            PlayerGameStat.minutes_played > 0
+        ).all()}
+
+        # Batch load injury statuses for all players
+        from app.models.injury import Injury
+        injuries = db.query(Injury).filter(
+            Injury.player_id.in_(player_ids),
+            Injury.status.in_(['Out', 'Doubtful', 'Questionable', 'Probable']),
+            Injury.actual_return_date.is_(None)
+        ).all()
+
+        # Create injury status map
+        injury_statuses = {}
+        for injury in injuries:
+            injury_statuses[injury.player_id] = {
+                "player_id": injury.player_id,
+                "status": injury.status,
+                "injury_type": injury.injury_type,
+                "injury_date": injury.injury_date.isoformat() if injury.injury_date else None,
+                "expected_return_date": injury.expected_return_date.isoformat() if injury.expected_return_date else None,
+                "description": injury.description
+            }
+
         filtered_predictions = []
         for pred in predictions:
-            game = db.query(Game).filter(Game.game_id == pred.game_id).first()
+            game = games.get(pred.game_id)
             if not game:
                 continue
-            
+
             # For finished games, check if player actually played
             if game.game_status == 'finished':
-                stat = db.query(PlayerGameStat).filter(
-                    PlayerGameStat.player_id == pred.player_id,
-                    PlayerGameStat.game_id == pred.game_id,
-                    PlayerGameStat.minutes_played > 0
-                ).first()
-                if not stat:
+                stat_key = (pred.player_id, pred.game_id)
+                if stat_key not in player_stats:
                     continue  # Player didn't play, skip
-            
+
             # For upcoming games, check if player is injured or not playing
             elif game.game_status in ['scheduled', 'in_progress']:
                 # Check injury status
-                injury_status = injury_context.get_player_injury_status(pred.player_id)
-                if injury_status:
-                    # If player is "Out" or "Doubtful", skip them
-                    if injury_status['status'] in ['Out', 'Doubtful']:
-                        continue  # Player is out, skip prediction
-                
+                injury_status = injury_statuses.get(pred.player_id)
+                if injury_status and injury_status['status'] in ['Out', 'Doubtful']:
+                    continue  # Player is out, skip prediction
+
                 # Additional filter: Skip predictions with very low projected stats
-                # Sportsbooks typically only offer lines for players expected to play 15+ minutes
-                # We check the distribution mean as a proxy for whether betting lines exist
                 if pred.distribution_mean:
-                    # For points: if mean < 8, likely a deep bench player
-                    # For rebounds: if mean < 4, likely a deep bench player  
-                    # For assists: if mean < 3, likely a deep bench player
                     min_thresholds = {
                         'points': 8.0,
                         'rebounds': 4.0,
@@ -317,9 +458,9 @@ async def get_long_shots(
                     threshold = min_thresholds.get(pred.stat_type, 5.0)
                     if pred.distribution_mean < threshold:
                         continue  # Too low, unlikely to have betting lines
-            
+
             filtered_predictions.append(pred)
-        
+
         predictions = filtered_predictions
         
         # Enrich with player and game info (optimized with batch queries)
@@ -380,7 +521,37 @@ async def generate_predictions(request: GeneratePredictionsRequest):
             progress_queue.append(update)
         
         try:
-            service = PredictionService(db)
+            # Validate sport
+            if request.sport not in ['NBA', 'NFL']:
+                yield f"data: {json.dumps({'error': f'Invalid sport: {request.sport}. Must be NBA or NFL'})}\n\n"
+                return
+            
+            # Collect lineups for upcoming games before generating predictions
+            # This ensures we have accurate starter information
+            from datetime import date, timedelta
+            from app.scrapers.lineup_scraper import LineupScraper
+            
+            if not request.game_id:  # Only collect for upcoming games (not single game)
+                try:
+                    today = date.today()
+                    days_to_check = request.days_ahead if hasattr(request, 'days_ahead') else 2
+                    end_date = today + timedelta(days=days_to_check)
+                    
+                    # Collect lineups for today and tomorrow, filtered by sport
+                    lineup_scraper = LineupScraper(db_session=db)
+                    for check_date in [today, today + timedelta(days=1)]:
+                        if check_date <= end_date:
+                            try:
+                                lineup_scraper.collect_lineups_for_date(check_date, sport=request.sport)
+                                db.commit()
+                            except Exception as e:
+                                logger.warning(f"Could not collect lineups for {check_date}: {e}")
+                                db.rollback()
+                except Exception as e:
+                    logger.warning(f"Could not collect lineups before prediction generation: {e}")
+                    # Continue anyway - predictions can still be generated
+            
+            service = PredictionService(db, sport=request.sport)
             
             if request.game_id:
                 # Run in thread to avoid blocking
@@ -450,17 +621,23 @@ async def generate_predictions(request: GeneratePredictionsRequest):
 async def get_upcoming_predictions(
     days_ahead: int = Query(1, description="Days ahead to look"),
     stat_type: Optional[str] = Query(None, description="Filter by stat type"),
-    bet_type: Optional[str] = Query(None, description="Filter by bet type")
+    bet_type: Optional[str] = Query(None, description="Filter by bet type"),
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)")
 ):
     """Get predictions for upcoming games."""
     db = SessionLocal()
     try:
+        # Validate sport
+        if sport not in ['NBA', 'NFL']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        
         from datetime import timedelta
         
         today = date.today()
         end_date = today + timedelta(days=days_ahead)
         
         games = db.query(Game).filter(
+            Game.sport == sport,
             Game.game_date >= today,
             Game.game_date <= end_date,
             Game.game_status.in_(['scheduled', 'in_progress'])
@@ -468,7 +645,10 @@ async def get_upcoming_predictions(
         
         game_ids = [g.game_id for g in games]
         
-        query = db.query(Prediction).filter(Prediction.game_id.in_(game_ids))
+        query = db.query(Prediction).filter(
+            Prediction.game_id.in_(game_ids),
+            Prediction.sport == sport
+        )
         
         if stat_type:
             query = query.filter(Prediction.stat_type == stat_type)
@@ -493,25 +673,50 @@ async def get_upcoming_predictions(
             healthy_predictions.append(pred)
         predictions = healthy_predictions
         
-        # Enrich with player and game info
+        # Enrich with player and game info (filter by sport)
         result = []
         for pred in predictions:
-            player = db.query(Player).filter(Player.player_id == pred.player_id).first()
-            game = db.query(Game).filter(Game.game_id == pred.game_id).first()
+            player = db.query(Player).filter(
+                Player.player_id == pred.player_id,
+                Player.sport == sport
+            ).first()
+            game = db.query(Game).filter(
+                Game.game_id == pred.game_id,
+                Game.sport == sport
+            ).first()
             
             # Get player's team
             player_team = None
             if player and player.current_team_id:
                 from app.models.team import Team
-                team = db.query(Team).filter(Team.team_id == player.current_team_id).first()
+                team = db.query(Team).filter(
+                    Team.team_id == player.current_team_id,
+                    Team.sport == sport
+                ).first()
                 player_team = team.abbreviation if team else None
             
             # Get game time from schedule
             game_time = None
             if game:
                 from app.models import GameSchedule
-                schedule = db.query(GameSchedule).filter(GameSchedule.game_id == game.game_id).first()
+                schedule = db.query(GameSchedule).filter(
+                    GameSchedule.game_id == game.game_id,
+                    GameSchedule.sport == sport
+                ).first()
                 game_time = schedule.game_time if schedule else None
+
+            # Get last 3 games for this stat type
+            historical_data = get_last_n_games_for_stat(
+                db=db,
+                player_id=pred.player_id,
+                stat_type=pred.stat_type,
+                sport=sport,
+                n_games=3,
+                exclude_game_id=pred.game_id,
+                include_lineup_analysis=True,
+                current_game_id=pred.game_id
+            )
+            last_3_games = historical_data['games']
             
             result.append({
                 **pred.__dict__,
@@ -520,7 +725,8 @@ async def get_upcoming_predictions(
                 "game_date": game.game_date if game else None,
                 "game_time": game_time.isoformat() if game_time else None,
                 "home_team_id": game.home_team_id if game else None,
-                "away_team_id": game.away_team_id if game else None
+                "away_team_id": game.away_team_id if game else None,
+                "last_3_games": last_3_games
             })
         
         return result

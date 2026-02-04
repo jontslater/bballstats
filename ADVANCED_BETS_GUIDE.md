@@ -249,3 +249,6 @@ The Game Detail page now has a "Show Advanced Bets" button that displays:
 These advanced bets are now available via API and will appear on the Game Detail page when you click "Show Advanced Bets". All bets use the same comprehensive 30+ factor prediction system, ensuring accuracy and value identification.
 
 
+
+
+

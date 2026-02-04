@@ -30,3 +30,6 @@ class Injury(Base):
         return f"<Injury {self.player_id}: {self.status} - {self.injury_type}>"
 
 
+
+
+

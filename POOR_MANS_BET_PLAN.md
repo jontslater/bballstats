@@ -304,3 +304,6 @@ To reach $1000 from $5 in 8 days, need ~200x growth = ~2.35x per day average.
 5. **Notifications**: Alert when daily bet is ready
 6. **Automated betting**: Auto-place suggested bets (optional)
 
+
+
+

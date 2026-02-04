@@ -98,3 +98,6 @@ python -c "from app.database import SessionLocal; from app.models import Predict
 5. **Check API directly** - Use curl or browser to test endpoints
 
 
+
+
+

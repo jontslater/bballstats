@@ -17,12 +17,17 @@ router = APIRouter(prefix="/api/games", tags=["games"])
 async def get_games(
     game_date: Optional[str] = Query(None, description="Filter by game date (YYYY-MM-DD)"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)"),
     limit: int = Query(100, description="Maximum number of results")
 ):
     """Get list of games."""
     db = SessionLocal()
     try:
-        query = db.query(Game)
+        # Validate sport
+        if sport not in ['NBA', 'NFL']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        
+        query = db.query(Game).filter(Game.sport == sport)
         
         if game_date:
             # Parse date string (YYYY-MM-DD) to date object
@@ -61,19 +66,28 @@ async def get_games(
         from app.models import GameSchedule
         from sqlalchemy import func
         
-        # Batch load all teams
+        # Batch load all teams (filter by sport)
         team_ids = list(set([g.home_team_id for g in games] + [g.away_team_id for g in games]))
-        teams_dict = {t.team_id: t for t in db.query(Team).filter(Team.team_id.in_(team_ids)).all()}
+        teams_dict = {t.team_id: t for t in db.query(Team).filter(
+            Team.team_id.in_(team_ids),
+            Team.sport == sport
+        ).all()}
         
-        # Batch load all schedules
+        # Batch load all schedules (filter by sport)
         game_ids = [g.game_id for g in games]
-        schedules_dict = {s.game_id: s for s in db.query(GameSchedule).filter(GameSchedule.game_id.in_(game_ids)).all()}
+        schedules_dict = {s.game_id: s for s in db.query(GameSchedule).filter(
+            GameSchedule.game_id.in_(game_ids),
+            GameSchedule.sport == sport
+        ).all()}
         
-        # Batch count predictions
+        # Batch count predictions (filter by sport)
         pred_counts = db.query(
             Prediction.game_id,
             func.count(Prediction.prediction_id).label('count')
-        ).filter(Prediction.game_id.in_(game_ids)).group_by(Prediction.game_id).all()
+        ).filter(
+            Prediction.game_id.in_(game_ids),
+            Prediction.sport == sport
+        ).group_by(Prediction.game_id).all()
         pred_counts_dict = {pc.game_id: pc.count for pc in pred_counts}
         
         # Build result efficiently
@@ -131,27 +145,45 @@ async def get_games(
 
 
 @router.get("/{game_id}")
-async def get_game(game_id: int):
+async def get_game(
+    game_id: int,
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)")
+):
     """Get game details."""
     db = SessionLocal()
     try:
-        game = db.query(Game).filter(Game.game_id == game_id).first()
+        # Validate sport
+        if sport not in ['NBA', 'NFL']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        
+        game = db.query(Game).filter(
+            Game.game_id == game_id,
+            Game.sport == sport
+        ).first()
         
         if not game:
             raise HTTPException(status_code=404, detail="Game not found")
         
-        home_team = db.query(Team).filter(Team.team_id == game.home_team_id).first()
-        away_team = db.query(Team).filter(Team.team_id == game.away_team_id).first()
+        home_team = db.query(Team).filter(
+            Team.team_id == game.home_team_id,
+            Team.sport == sport
+        ).first()
+        away_team = db.query(Team).filter(
+            Team.team_id == game.away_team_id,
+            Team.sport == sport
+        ).first()
         
-        # Count predictions by type
+        # Count predictions by type (filter by sport)
         safe_bets = db.query(Prediction).filter(
             Prediction.game_id == game_id,
-            Prediction.bet_type == "safe"
+            Prediction.bet_type == "safe",
+            Prediction.sport == sport
         ).count()
         
         long_shots = db.query(Prediction).filter(
             Prediction.game_id == game_id,
-            Prediction.bet_type == "long_shot"
+            Prediction.bet_type == "long_shot",
+            Prediction.sport == sport
         ).count()
         
         return {
@@ -179,16 +211,22 @@ async def get_game(game_id: int):
 
 @router.get("/upcoming/list")
 async def get_upcoming_games(
-    days_ahead: int = Query(7, description="Days ahead to look")
+    days_ahead: int = Query(7, description="Days ahead to look"),
+    sport: str = Query('NBA', description="Sport type (NBA or NFL)")
 ):
     """Get upcoming games."""
     db = SessionLocal()
     try:
+        # Validate sport
+        if sport not in ['NBA', 'NFL']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        
         today = date.today()
         end_date = today + timedelta(days=days_ahead)
         
-        # Only get games from today onwards, exclude past games
+        # Only get games from today onwards, exclude past games (filter by sport)
         games = db.query(Game).filter(
+            Game.sport == sport,
             Game.game_date >= today,  # Only today and future
             Game.game_date <= end_date,
             Game.game_status.in_(['scheduled', 'in_progress'])
@@ -197,12 +235,21 @@ async def get_upcoming_games(
         # Enrich with team names
         result = []
         for game in games:
-            home_team = db.query(Team).filter(Team.team_id == game.home_team_id).first()
-            away_team = db.query(Team).filter(Team.team_id == game.away_team_id).first()
+            home_team = db.query(Team).filter(
+                Team.team_id == game.home_team_id,
+                Team.sport == sport
+            ).first()
+            away_team = db.query(Team).filter(
+                Team.team_id == game.away_team_id,
+                Team.sport == sport
+            ).first()
             
-            # Get game time from schedule if available
+            # Get game time from schedule if available (filter by sport)
             from app.models import GameSchedule
-            schedule = db.query(GameSchedule).filter(GameSchedule.game_id == game.game_id).first()
+            schedule = db.query(GameSchedule).filter(
+                GameSchedule.game_id == game.game_id,
+                GameSchedule.sport == sport
+            ).first()
             game_time = schedule.game_time if schedule else None
             
             result.append({

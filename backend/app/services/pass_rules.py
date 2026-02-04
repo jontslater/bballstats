@@ -17,7 +17,8 @@ class PassRules:
         coefficient_of_variation: Optional[float] = None,
         has_injury_uncertainty: bool = False,
         blowout_risk_high: bool = False,
-        is_starter: bool = True
+        is_starter: bool = True,
+        sport: str = 'NBA'
     ) -> Dict[str, any]:
         """
         Evaluate if we should pass on this prediction.
@@ -35,17 +36,23 @@ class PassRules:
         reasons = []
         
         # Rule 1: Sample size check
-        if sample_size < 15:
-            reasons.append(f"Insufficient sample size ({sample_size} games, need ≥15)")
+        # For NFL, use lower threshold (5 games) since we have less data
+        min_sample_size = 5 if sport == 'NFL' else 15
+        if sample_size < min_sample_size:
+            reasons.append(f"Insufficient sample size ({sample_size} games, need ≥{min_sample_size})")
         
         # Rule 2: Minutes check
-        # ENHANCEMENT: Relaxed thresholds to allow more players
-        # In high blowout risk games, starters may get pulled early, so be more lenient
-        # Bench players in blowouts get extended minutes, so also adjust threshold
-        min_minutes_threshold = 16 if (blowout_risk_high and is_starter) else 18
-        if not blowout_risk_high and not is_starter:
-            # Bench players in normal games - relaxed threshold
-            min_minutes_threshold = 18  # Reduced from 22 to 18
+        # For NFL, use lower threshold since minutes/snaps tracking may be less precise
+        if sport == 'NFL':
+            min_minutes_threshold = 5.0  # Very lenient for NFL
+        else:
+            # ENHANCEMENT: Relaxed thresholds to allow more players
+            # In high blowout risk games, starters may get pulled early, so be more lenient
+            # Bench players in blowouts get extended minutes, so also adjust threshold
+            min_minutes_threshold = 16 if (blowout_risk_high and is_starter) else 18
+            if not blowout_risk_high and not is_starter:
+                # Bench players in normal games - relaxed threshold
+                min_minutes_threshold = 18  # Reduced from 22 to 18
         
         if projected_minutes < min_minutes_threshold:
             reasons.append(f"Low projected minutes ({projected_minutes:.1f}, need ≥{min_minutes_threshold})")
@@ -54,9 +61,10 @@ class PassRules:
         if usage_change and abs(usage_change) > 0.25:
             reasons.append(f"Large usage change ({usage_change*100:.1f}%, threshold: 25%)")
         
-        # Rule 4: Volatility check (CV > 40%)
-        if coefficient_of_variation and coefficient_of_variation > 0.40:
-            reasons.append(f"High volatility (CV={coefficient_of_variation:.2f}, threshold: 0.40)")
+        # Rule 4: Volatility check (CV > 50% - reduced from 40% to allow more players)
+        # Players with CV > 50% will still be flagged as volatile but predictions will be generated
+        if coefficient_of_variation and coefficient_of_variation > 0.50:
+            reasons.append(f"High volatility (CV={coefficient_of_variation:.2f}, threshold: 0.50)")
         
         # Rule 5: Injury uncertainty
         if has_injury_uncertainty:

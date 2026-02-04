@@ -54,7 +54,8 @@ def init_db():
     from app.models import (Team, Season, Player, Game, PlayerGameStat,
                            Injury, TeamPositionDefense, PlayerTeamMatchup,
                            InjuryImpactHistory, Prediction, GameSchedule,
-                           UserPlay, Lineup, PoorMansBetChallenge, PoorMansBetDay)
+                           UserPlay, Lineup, PoorMansBetChallenge, PoorMansBetDay, ValueLadder,
+                           HistoricalSuggestedBet, HistoricalParlay, HistoricalParlayLeg)
     
     Base.metadata.create_all(bind=engine)
     print("✅ Database tables created successfully!")

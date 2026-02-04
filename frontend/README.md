@@ -38,3 +38,6 @@ uvicorn app.main:app --reload
 All API calls are handled through `src/services/api.ts`. The frontend automatically connects to the backend API.
 
 
+
+
+
