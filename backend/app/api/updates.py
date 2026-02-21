@@ -146,7 +146,7 @@ async def run_full_update(sport: str = Query('NBA', description="Sport type (NBA
         # Get project root - go up from backend/app/api/updates.py to project root
         current_file = Path(__file__).resolve()
         project_root = current_file.parent.parent.parent.parent
-        script_name = "nfl_update_all.py" if sport == 'NFL' else "update_all.py"
+        script_name = "nfl_update_all.py" if sport == 'NFL' else ("mlb_update_all.py" if sport == 'MLB' else "update_all.py")
         script_path = project_root / "scripts" / script_name
 
         if not script_path.exists():
@@ -258,22 +258,23 @@ async def run_full_update(sport: str = Query('NBA', description="Sport type (NBA
 
 
 @router.post("/run-quick-update")
-async def run_quick_update():
+async def run_quick_update(sport: str = Query("NBA", description="Sport: NBA, NFL, or MLB")):
     """
-    Run the quick update script (quick_update.py) with progress updates via SSE.
+    Run the quick update script with progress updates via SSE.
     
-    This will:
-    1. Collect box scores for yesterday's games
-    2. Evaluate yesterday's predictions
-    3. Generate predictions for today's games
+    NBA/NFL: quick_update.py (box scores, evaluate, generate predictions)
+    MLB: mlb_update_all.py (schedule, results, predictions, evaluate)
     
-    Note: This is faster (30-60 seconds).
+    Note: Takes 30-60 seconds (NBA) or 2-5 minutes (MLB).
     """
     async def run_with_progress():
-        # Get project root - go up from backend/app/api/updates.py to project root
         current_file = Path(__file__).resolve()
         project_root = current_file.parent.parent.parent.parent
-        script_path = project_root / "scripts" / "quick_update.py"
+        sport_upper = (sport or "NBA").upper()
+        if sport_upper == "MLB":
+            script_path = project_root / "scripts" / "mlb_update_all.py"
+        else:
+            script_path = project_root / "scripts" / "quick_update.py"
         
         if not script_path.exists():
             yield f"data: {json.dumps({'error': f'Quick update script not found at {script_path}', 'complete': True})}\n\n"

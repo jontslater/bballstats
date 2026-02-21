@@ -36,15 +36,18 @@ class PassRules:
         reasons = []
         
         # Rule 1: Sample size check
-        # For NFL, use lower threshold (5 games) since we have less data
-        min_sample_size = 5 if sport == 'NFL' else 15
+        # NFL: 5 games; MLB: 10 games; NBA: 15 games
+        min_sample_size = 5 if sport == 'NFL' else (10 if sport == 'MLB' else 15)
         if sample_size < min_sample_size:
             reasons.append(f"Insufficient sample size ({sample_size} games, need ≥{min_sample_size})")
         
-        # Rule 2: Minutes check
-        # For NFL, use lower threshold since minutes/snaps tracking may be less precise
+        # Rule 2: Minutes/playing time check
+        # NFL: snaps; MLB: plate_appearances (2+) or innings_pitched (3+); NBA: minutes
         if sport == 'NFL':
             min_minutes_threshold = 5.0  # Very lenient for NFL
+        elif sport == 'MLB':
+            # Batters: 2+ PA; Pitchers: 3+ IP
+            min_minutes_threshold = 2.0  # plate_appearances or innings_pitched proxy
         else:
             # ENHANCEMENT: Relaxed thresholds to allow more players
             # In high blowout risk games, starters may get pulled early, so be more lenient

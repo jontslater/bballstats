@@ -39,22 +39,46 @@ export default function Last3Games({
     'passing_tds': 'PTD',
     'rushing_tds': 'RTD',
     'receiving_tds': 'RETD',
+    'pts+ast+reb': 'P+A+R',
+    'points_assists': 'P+A',
+    'points_rebounds': 'P+R',
+    'rebounds_assists': 'R+A',
     'points+rebounds': 'P+R',
     'points+assists': 'P+A',
     'rebounds+assists': 'R+A',
+    'hits': 'H',
+    'home_runs': 'HR',
+    'total_bases': 'TB',
+    'strikeouts': 'K',
   };
   
-  // Handle combo stats (e.g., "points+assists")
+  // Handle combo stats (e.g., "points+assists", "pts+ast+reb")
   let statLabel: string;
-  if (isCombo || statType.includes('+')) {
-    const normalizedStat = statType.toLowerCase().replace(/\s+/g, '');
-    statLabel = statLabels[normalizedStat] || normalizedStat.toUpperCase().replace('+', '+');
+  const normalizedStat = statType.toLowerCase().replace(/\s+/g, '').replace(/_/g, '+');
+  
+  // Special handling for pts+ast+reb (check FIRST)
+  if (normalizedStat === 'pts+ast+reb' || 
+      (normalizedStat.includes('pts') && normalizedStat.includes('ast') && normalizedStat.includes('reb') && normalizedStat.includes('+'))) {
+    statLabel = 'P+A+R';
+  }
+  // Check for exact match (handles pts+ast+reb, points_assists, etc.)
+  else if (statLabels[normalizedStat]) {
+    statLabel = statLabels[normalizedStat];
+  } else if (statLabels[statType.toLowerCase()]) {
+    statLabel = statLabels[statType.toLowerCase()];
+  } else if (isCombo || statType.includes('+') || statType.includes('_')) {
+    statLabel = normalizedStat.toUpperCase().replace(/\+/g, '+');
   } else {
     statLabel = statLabels[statType] || statType.toUpperCase().substring(0, 3);
   }
 
   // Format value display based on type
   const formatValue = (game: Last3Game, idx: number) => {
+    // Debug: Log if we see suspicious values for assists
+    if (statType === 'assists' && game.value && game.value > 10) {
+      console.warn(`[Last3Games] Suspicious assists value: ${game.value} for game ${game.game_id} (statType: ${statType})`, game);
+    }
+    
     if (isMilestone && 'achieved' in game) {
       // For milestones, show checkmark if achieved
       const achieved = (game as any).achieved;

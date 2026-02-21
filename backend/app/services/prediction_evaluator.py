@@ -76,7 +76,16 @@ class PredictionEvaluator:
             # PAR: points + assists + rebounds
             if stat.points is not None and stat.assists is not None and stat.rebounds is not None:
                 actual_value = stat.points + stat.assists + stat.rebounds
-        
+        # MLB stats
+        elif prediction.stat_type == 'hits':
+            actual_value = stat.hits if stat.hits is not None else None
+        elif prediction.stat_type == 'home_runs':
+            actual_value = stat.home_runs if stat.home_runs is not None else None
+        elif prediction.stat_type == 'total_bases':
+            actual_value = stat.total_bases if stat.total_bases is not None else None
+        elif prediction.stat_type == 'strikeouts':
+            actual_value = stat.strikeouts if stat.strikeouts is not None else None
+
         # Only skip if actual_value is None (not if it's 0, which is valid)
         if actual_value is None:
             return {
@@ -365,8 +374,16 @@ class PredictionEvaluator:
             stat = player_stats.get((pred.player_id, pred.game_id))
             
             if stat:
-                # Player has stats - check if they actually played (minutes > 0)
+                # Player has stats - check if they actually played
+                # NBA: minutes_played > 0; NFL: snaps_played > 0; MLB: at_bats > 0 (batter) or innings_pitched > 0 (pitcher)
+                played = False
                 if stat.minutes_played is not None and stat.minutes_played > 0:
+                    played = True
+                elif stat.snaps_played is not None and stat.snaps_played > 0:
+                    played = True
+                elif (stat.at_bats is not None and stat.at_bats > 0) or (stat.innings_pitched is not None and stat.innings_pitched > 0):
+                    played = True
+                if played:
                     # Player played - get actual stat if we don't have it
                     if actual_result is None:
                         if pred.stat_type == 'points':
@@ -393,6 +410,15 @@ class PredictionEvaluator:
                             # PAR: points + assists + rebounds
                             if stat.points is not None and stat.assists is not None and stat.rebounds is not None:
                                 actual_result = stat.points + stat.assists + stat.rebounds
+                        # MLB stats
+                        elif pred.stat_type == 'hits':
+                            actual_result = stat.hits if stat.hits is not None else None
+                        elif pred.stat_type == 'home_runs':
+                            actual_result = stat.home_runs if stat.home_runs is not None else None
+                        elif pred.stat_type == 'total_bases':
+                            actual_result = stat.total_bases if stat.total_bases is not None else None
+                        elif pred.stat_type == 'strikeouts':
+                            actual_result = stat.strikeouts if stat.strikeouts is not None else None
                 else:
                     # Player has stats but minutes_played is 0 or None - they didn't play
                     is_void = True

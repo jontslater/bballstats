@@ -17,7 +17,7 @@ sys.path.insert(0, str(project_root / "backend"))
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from app.database import SessionLocal
-from app.models import GameSchedule, Team, Season
+from app.models import GameSchedule, Game, Team, Season
 from app.scrapers.nba_api_client import NBAAPIClient
 
 
@@ -29,9 +29,8 @@ def find_team_by_id(db: Session, nba_team_id: int):
 
 
 def find_team_by_nba_id(db: Session, nba_team_id: int):
-    """Find team by NBA API team ID using abbreviation mapping."""
+    """Find team by NBA API team ID using abbreviation mapping. Filters by sport=NBA."""
     # NBA API team IDs to abbreviations mapping
-    # This is a simplified mapping - you may need to update this
     team_id_map = {
         1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN",
         1610612766: "CHA", 1610612741: "CHI", 1610612739: "CLE",
@@ -47,7 +46,10 @@ def find_team_by_nba_id(db: Session, nba_team_id: int):
     
     abbrev = team_id_map.get(nba_team_id)
     if abbrev:
-        return db.query(Team).filter(Team.abbreviation == abbrev).first()
+        return db.query(Team).filter(
+            Team.abbreviation == abbrev,
+            Team.sport == 'NBA'
+        ).first()
     return None
 
 
@@ -91,9 +93,10 @@ def collect_schedule_for_date(db: Session, client: NBAAPIClient, game_date: date
             if not game_id:
                 continue
             
-            # Check if schedule already exists by NBA game ID
+            # Check if schedule already exists by NBA game ID (and sport)
             existing = db.query(GameSchedule).filter(
-                GameSchedule.nba_game_id == str(game_id)
+                GameSchedule.nba_game_id == str(game_id),
+                GameSchedule.sport == 'NBA'
             ).first()
             
             # Get team IDs
@@ -144,8 +147,9 @@ def collect_schedule_for_date(db: Session, client: NBAAPIClient, game_date: date
                         game.game_status = status
                 updated += 1
             else:
-                # Create new
+                # Create new - explicitly set sport=NBA for independent sport data
                 schedule = GameSchedule(
+                    sport='NBA',
                     nba_game_id=str(game_id),  # Store NBA game ID
                     game_date=game_date,
                     home_team_id=home_team.team_id,
@@ -180,11 +184,17 @@ def collect_schedules(season_year: str = None, start_date: date = None, end_date
     client = NBAAPIClient(delay=0.6)
     
     try:
-        # Get season
+        # Get season - always filter by sport=NBA for independent NBA data
         if season_year:
-            season = db.query(Season).filter(Season.season_year == season_year).first()
+            season = db.query(Season).filter(
+                Season.season_year == season_year,
+                Season.sport == 'NBA'
+            ).first()
         else:
-            season = db.query(Season).filter(Season.is_current == True).first()
+            season = db.query(Season).filter(
+                Season.is_current == True,
+                Season.sport == 'NBA'
+            ).first()
         
         if not season:
             print("❌ No season found. Please seed seasons first.")
@@ -224,7 +234,8 @@ def collect_schedules(season_year: str = None, start_date: date = None, end_date
         
         # Verify
         total = db.query(GameSchedule).filter(
-            GameSchedule.season_id == season.season_id
+            GameSchedule.season_id == season.season_id,
+            GameSchedule.sport == 'NBA'
         ).count()
         print(f"\n✅ Total schedules for {season.season_year}: {total}")
         
@@ -253,6 +264,7 @@ def update_upcoming_schedules(days_ahead: int = 7):
         db = SessionLocal()
         try:
             count = db.query(GameSchedule).filter(
+                GameSchedule.sport == 'NBA',
                 GameSchedule.game_date >= today,
                 GameSchedule.game_date <= end_date
             ).count()

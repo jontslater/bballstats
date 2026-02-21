@@ -24,8 +24,8 @@ async def get_games(
     db = SessionLocal()
     try:
         # Validate sport
-        if sport not in ['NBA', 'NFL']:
-            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA', 'NFL', or 'MLB'")
         
         query = db.query(Game).filter(Game.sport == sport)
         
@@ -153,8 +153,8 @@ async def get_game(
     db = SessionLocal()
     try:
         # Validate sport
-        if sport not in ['NBA', 'NFL']:
-            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA', 'NFL', or 'MLB'")
         
         game = db.query(Game).filter(
             Game.game_id == game_id,
@@ -218,8 +218,8 @@ async def get_upcoming_games(
     db = SessionLocal()
     try:
         # Validate sport
-        if sport not in ['NBA', 'NFL']:
-            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA', 'NFL', or 'MLB'")
         
         today = date.today()
         end_date = today + timedelta(days=days_ahead)

@@ -93,9 +93,9 @@ class PlayerTeamSyncService:
                         update_source = "nba_api"
                 
                 # Fallback: Use game stats if NBA API didn't find the player
-                if not new_team_id and most_recent_stat:
+                # Also use game stats to validate NBA API results
+                if most_recent_stat:
                     # Use team from most recent game (only if game was recent - within last 30 days)
-                    # Increased from 7 to 30 days to catch more cases
                     days_since_game = (date.today() - most_recent_stat.game.game_date).days
                     if days_since_game <= 30:
                         # Use majority vote from recent games for better accuracy
@@ -117,8 +117,18 @@ class PlayerTeamSyncService:
                             
                             # Use team with most appearances (majority vote)
                             if team_counts:
-                                new_team_id = max(team_counts.items(), key=lambda x: x[1])[0]
-                                update_source = "game_stats_majority"
+                                game_stats_team_id = max(team_counts.items(), key=lambda x: x[1])[0]
+                                
+                                # If NBA API found a team, validate it matches game stats
+                                # If they don't match, prefer game stats (more recent/accurate)
+                                if new_team_id and new_team_id != game_stats_team_id:
+                                    # Game stats disagree with NBA API - prefer game stats for traded players
+                                    new_team_id = game_stats_team_id
+                                    update_source = "game_stats_majority"
+                                elif not new_team_id:
+                                    # No NBA API result, use game stats
+                                    new_team_id = game_stats_team_id
+                                    update_source = "game_stats_majority"
                 
                 if new_team_id and player.current_team_id != new_team_id:
                     old_team = self.db.query(Team).filter(Team.team_id == player.current_team_id).first() if player.current_team_id else None
@@ -158,6 +168,20 @@ class PlayerTeamSyncService:
         try:
             from nba_api.stats.endpoints import commonteamroster
             from nba_api.stats.static import teams as nba_teams
+            from app.models.season import Season
+            from sqlalchemy import and_
+            
+            # Get current season dynamically
+            current_season = self.db.query(Season).filter(
+                and_(
+                    Season.sport == 'NBA',
+                    Season.is_current == True
+                )
+            ).first()
+            
+            season_str = '2024-25'  # Fallback
+            if current_season:
+                season_str = current_season.season_year
             
             # Map team abbreviation to NBA API team ID
             nba_team_id = None
@@ -172,7 +196,7 @@ class PlayerTeamSyncService:
             self._rate_limit()
             roster = commonteamroster.CommonTeamRoster(
                 team_id=nba_team_id,
-                season='2024-25',  # Current season
+                season=season_str,
                 timeout=30
             )
             
@@ -180,6 +204,7 @@ class PlayerTeamSyncService:
             roster_df = roster.get_data_frames()[0]  # CommonTeamRoster
             return roster_df.to_dict('records')
         except Exception as e:
+            print(f"    ⚠️  Error fetching roster for {team_abbreviation}: {e}")
             return None
     
     def _rate_limit(self):
@@ -192,8 +217,11 @@ class PlayerTeamSyncService:
         # Try to match player name (handle variations)
         player_name_lower = player.name.lower().strip()
         
+        # Normalize name - remove common suffixes and handle variations
+        player_name_normalized = player_name_lower.replace('.', '').replace("'", "").replace("-", " ")
+        
         # Split name into parts for better matching
-        player_parts = player_name_lower.split()
+        player_parts = player_name_normalized.split()
         
         best_match = None
         best_match_score = 0
@@ -205,12 +233,15 @@ class PlayerTeamSyncService:
                 if not roster_name:
                     continue
                 
+                # Normalize roster name too
+                roster_name_normalized = roster_name.replace('.', '').replace("'", "").replace("-", " ")
+                
                 # Exact match (highest priority)
-                if player_name_lower == roster_name:
+                if player_name_normalized == roster_name_normalized:
                     return team_id
                 
                 # Check if all name parts match
-                roster_parts = roster_name.split()
+                roster_parts = roster_name_normalized.split()
                 if len(player_parts) >= 2 and len(roster_parts) >= 2:
                     # Check if last name matches (most reliable)
                     if player_parts[-1] == roster_parts[-1]:
@@ -224,6 +255,15 @@ class PlayerTeamSyncService:
                                 if len(player_parts) == len(roster_parts):
                                     best_match = team_id
                                     best_match_score = 0.8
+                        # Or if first names are similar (handles "Kevin" vs "K")
+                        elif len(player_parts[0]) > 1 and len(roster_parts[0]) == 1:
+                            if player_parts[0][0] == roster_parts[0][0]:
+                                best_match = team_id
+                                best_match_score = 0.8
+                        elif len(player_parts[0]) == 1 and len(roster_parts[0]) > 1:
+                            if player_parts[0][0] == roster_parts[0][0]:
+                                best_match = team_id
+                                best_match_score = 0.8
         
         # Return best match if we found one with high confidence
         if best_match_score >= 0.8:

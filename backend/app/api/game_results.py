@@ -1,7 +1,7 @@
 """
 Game Results Collection API endpoints.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.orm import Session
 from datetime import date, timedelta
 from app.database import SessionLocal
@@ -85,13 +85,61 @@ def convert_br_to_nba_format(br_box_score: dict, home_team: Team, away_team: Tea
 
 
 @router.post("/collect-previous-day")
-async def collect_previous_day():
+async def collect_previous_day(sport: str = Query("NBA", description="Sport: NBA or MLB")):
     """
     Collect game results for the previous day.
     
-    Note: This operation can take 30-60 seconds as it processes multiple games
-    and fetches box scores from external APIs.
+    sport: NBA or MLB. MLB uses MLB Stats API; NBA uses NBA API.
+    Note: This operation can take 30-60 seconds as it processes multiple games.
     """
+    if sport.upper() == "MLB":
+        import subprocess
+        from pathlib import Path
+        project_root = Path(__file__).resolve().parent.parent.parent.parent
+        script_path = project_root / "scripts" / "mlb_collect_game_results.py"
+        if not script_path.exists():
+            raise HTTPException(status_code=404, detail=f"MLB collect script not found at {script_path}")
+        venv_python = project_root / "venv" / "bin" / "python3"
+        if not venv_python.exists():
+            venv_python = project_root / "backend" / "venv" / "bin" / "python3"
+        python_cmd = str(venv_python) if venv_python.exists() else "python3"
+        try:
+            import os
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(project_root / "backend")
+            result = subprocess.run(
+                [python_cmd, str(script_path), "--previous-day"],
+                cwd=str(project_root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+            )
+            # Parse output for counts (script prints "Created X games, processed Y games")
+            games_processed = games_created = stats_created = 0
+            for line in (result.stdout or "").splitlines():
+                if "processed" in line.lower() and "games" in line.lower():
+                    import re
+                    m = re.search(r"processed\s+(\d+)\s+games", line, re.I)
+                    if m:
+                        games_processed = int(m.group(1))
+                if "created" in line.lower() and "games" in line.lower():
+                    import re
+                    m = re.search(r"created\s+(\d+)\s+games", line, re.I)
+                    if m:
+                        games_created = int(m.group(1))
+            return {
+                "success": result.returncode == 0,
+                "message": f"MLB game results for previous day",
+                "games_processed": games_processed,
+                "games_created": games_created,
+                "stats_created": stats_created,
+            }
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=408, detail="MLB collection timed out")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     db = SessionLocal()
     try:
         target_date = date.today() - timedelta(days=1)

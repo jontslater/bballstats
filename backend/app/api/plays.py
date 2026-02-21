@@ -1,7 +1,7 @@
 """
 User Play API endpoints.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import date
@@ -33,20 +33,25 @@ class UpdatePlayRequest(BaseModel):
 @router.get("")
 async def get_plays(
     status: Optional[str] = None,
-    limit: int = 100
+    limit: int = 100,
+    sport: str = Query("NBA", description="Sport type (NBA, NFL, MLB)")
 ):
-    """Get all plays that are NOT part of any parlay."""
+    """Get all plays that are NOT part of any parlay. Filter by sport (NBA, NFL, MLB)."""
     db = SessionLocal()
     try:
         from app.models.parlay import parlay_plays, Parlay
         from sqlalchemy import select, exists
         
+        # Validate sport
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            sport = 'NBA'
+        
         # Use a subquery to check if a play exists in any parlay
-        # This is more reliable than manually querying the association table
         parlay_play_subquery = select(parlay_plays.c.play_id).distinct()
         
         query = db.query(UserPlay).filter(
-            ~UserPlay.play_id.in_(parlay_play_subquery)
+            ~UserPlay.play_id.in_(parlay_play_subquery),
+            UserPlay.sport == sport
         )
         
         if status:
@@ -86,6 +91,9 @@ async def create_play(request: CreatePlayRequest):
         if not game:
             raise HTTPException(status_code=404, detail="Game not found")
         
+        # Set sport from game for independent sport data
+        play_sport = game.sport if game.sport else 'NBA'
+        
         # Get prediction for this player/game/stat (if it exists)
         # Advanced bets might not have a corresponding prediction
         from app.models.prediction import Prediction
@@ -98,6 +106,7 @@ async def create_play(request: CreatePlayRequest):
             ).first()
         
         play = UserPlay(
+            sport=play_sport,
             player_id=request.player_id,
             game_id=request.game_id,
             stat_type=request.stat_type,
@@ -201,8 +210,10 @@ async def delete_play(play_id: int):
 
 
 @router.get("/stats/summary")
-async def get_play_stats():
-    """Get play performance statistics.
+async def get_play_stats(
+    sport: str = Query("NBA", description="Sport type (NBA, NFL, MLB)")
+):
+    """Get play performance statistics for the selected sport.
     
     Counts:
     - Standalone plays (not in parlays) as individual plays
@@ -213,12 +224,17 @@ async def get_play_stats():
         from app.models.parlay import parlay_plays, Parlay
         from sqlalchemy import select
         
+        # Validate sport
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            sport = 'NBA'
+        
         # Use subquery to get plays that are NOT in any parlay
         parlay_play_subquery = select(parlay_plays.c.play_id).distinct()
         
-        # Count standalone plays (not in parlays)
+        # Count standalone plays (not in parlays), filtered by sport
         standalone_query = db.query(UserPlay).filter(
-            ~UserPlay.play_id.in_(parlay_play_subquery)
+            ~UserPlay.play_id.in_(parlay_play_subquery),
+            UserPlay.sport == sport
         )
         
         total_standalone = standalone_query.count()
@@ -226,11 +242,12 @@ async def get_play_stats():
         miss_standalone = standalone_query.filter(UserPlay.status == "miss").count()
         pending_standalone = standalone_query.filter(UserPlay.status == "pending").count()
         
-        # Count parlays (each parlay counts as 1 play)
-        total_parlays = db.query(Parlay).count()
-        hit_parlays = db.query(Parlay).filter(Parlay.status == "hit").count()
-        miss_parlays = db.query(Parlay).filter(Parlay.status == "miss").count()
-        pending_parlays = db.query(Parlay).filter(Parlay.status == "pending").count()
+        # Count parlays (each parlay counts as 1 play), filtered by sport
+        parlay_query = db.query(Parlay).filter(Parlay.sport == sport)
+        total_parlays = parlay_query.count()
+        hit_parlays = parlay_query.filter(Parlay.status == "hit").count()
+        miss_parlays = parlay_query.filter(Parlay.status == "miss").count()
+        pending_parlays = parlay_query.filter(Parlay.status == "pending").count()
         
         # Combined totals
         total_plays = total_standalone + total_parlays

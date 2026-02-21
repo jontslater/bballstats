@@ -72,8 +72,10 @@ async def create_parlay(request: CreateParlayRequest):
         else:
             total_odds = None
         
-        # Create parlay
+        # Create parlay - set sport from first play for sport filtering
+        parlay_sport = plays[0].sport if plays and plays[0].sport else 'NBA'
         parlay = Parlay(
+            sport=parlay_sport,
             name=request.name,
             total_odds=total_odds,
             total_probability=total_probability,
@@ -141,11 +143,17 @@ async def create_parlay(request: CreateParlayRequest):
 
 
 @router.get("")
-async def get_parlays(status: Optional[str] = None):
-    """Get all parlays."""
+async def get_parlays(
+    status: Optional[str] = None,
+    sport: str = Query("NBA", description="Sport type (NBA, NFL, MLB)")
+):
+    """Get all parlays for the selected sport."""
     db = SessionLocal()
     try:
-        query = db.query(Parlay)
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            sport = 'NBA'
+        
+        query = db.query(Parlay).filter(Parlay.sport == sport)
         
         if status:
             query = query.filter(Parlay.status == status)

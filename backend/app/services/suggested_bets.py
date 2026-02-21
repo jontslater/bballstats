@@ -79,8 +79,9 @@ class SuggestedBetsService(BaseSportService):
         # For suggested bets, focus on primary bettable stats
         if self.sport == 'NFL':
             primary_stats = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']]
+        elif self.sport == 'MLB':
+            primary_stats = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
         else:  # NBA
-            # Include all bettable stats: points, rebounds, assists, three_pointers_made, pts+ast+reb
             primary_stats = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
 
         # For NFL, be more lenient with confidence levels and bet types since they tend to be lower
@@ -106,8 +107,9 @@ class SuggestedBetsService(BaseSportService):
             # Use sport-appropriate bettable stat types
             if self.sport == 'NFL':
                 long_shot_stats = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions', 'passing_tds', 'rushing_tds', 'receiving_tds']]
+            elif self.sport == 'MLB':
+                long_shot_stats = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
             else:  # NBA
-                # Include all bettable stats for long shots
                 long_shot_stats = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
             
             additional_long_shots = self.db.query(Prediction).filter(
@@ -184,7 +186,7 @@ class SuggestedBetsService(BaseSportService):
                 line = max(abs(line), 0.5)
 
                 # Round appropriately for stat type
-                if pred.stat_type in ['points', 'rebounds', 'assists', 'passing_yards', 'rushing_yards', 'receiving_yards']:
+                if pred.stat_type in ['points', 'rebounds', 'assists', 'passing_yards', 'rushing_yards', 'receiving_yards', 'hits', 'home_runs', 'total_bases', 'strikeouts']:
                     line = round(line, 1)
                 else:
                     line = round(line, 2)
@@ -230,6 +232,22 @@ class SuggestedBetsService(BaseSportService):
             final_line = round(float(line) if line is not None and line > 0 else 10.0, 1)
             if final_line <= 0:
                 final_line = 10.0  # Fallback to reasonable default
+            
+            # VALIDATION: Only filter extreme outliers that are clearly data errors
+            # This should be very lenient - only catch obvious mistakes (e.g., 5x+ recent max)
+            # Most predictions are valid even if they differ from recent performance
+            if last_3_games and len(last_3_games) > 0:
+                recent_values = [g.get('value', 0) for g in last_3_games if g.get('value') is not None]
+                if recent_values and len(recent_values) >= 2:  # Need at least 2 games for validation
+                    max_recent = max(recent_values)
+                    avg_recent = sum(recent_values) / len(recent_values)
+                    
+                    # Only filter if line is EXTREMELY high compared to recent (5x+ max recent)
+                    # This catches obvious data errors like assists showing 50 when player averages 2
+                    if max_recent > 0:  # Avoid division by zero
+                        if final_line > max_recent * 5.0:
+                            print(f"⚠️  WARNING: {player.name} {pred.stat_type} line {final_line} is >5x max recent ({max_recent}). Recent: {recent_values}. Skipping extreme outlier.")
+                            continue
             
             scored_predictions.append({
                 'prediction_id': pred.prediction_id,
@@ -541,8 +559,8 @@ class SuggestedBetsService(BaseSportService):
             game_date = date.today()
         
         # Get suggested bets grouped by stat type
-        # Use lower threshold for NFL since predictions tend to be less confident
-        min_prob_threshold = 0.50 if self.sport == 'NFL' else 0.60
+        # Use lower threshold for NFL/MLB since predictions tend to be less confident
+        min_prob_threshold = 0.50 if self.sport in ('NFL', 'MLB') else 0.60
         suggested_bets = self.get_suggested_bets(game_date, limit=30, min_probability=min_prob_threshold)
         
         # Use sport-appropriate stat types
@@ -553,6 +571,13 @@ class SuggestedBetsService(BaseSportService):
                 'receiving': [b for b in suggested_bets if 'receiving' in b['stat_type']]
             }
             required_stats = ['passing', 'rushing', 'receiving']
+        elif self.sport == 'MLB':
+            stat_categories = {
+                'hits': [b for b in suggested_bets if b['stat_type'] == 'hits'],
+                'home_runs': [b for b in suggested_bets if b['stat_type'] == 'home_runs'],
+                'strikeouts': [b for b in suggested_bets if b['stat_type'] == 'strikeouts']
+            }
+            required_stats = ['hits', 'home_runs', 'strikeouts']
         else:  # NBA
             stat_categories = {
                 'points': [b for b in suggested_bets if b['stat_type'] == 'points'],
@@ -631,6 +656,8 @@ class SuggestedBetsService(BaseSportService):
         # Also create 2-leg parlays with different stat types
         if self.sport == 'NFL':
             stat_pairs = [('passing', 'rushing'), ('passing', 'receiving'), ('rushing', 'receiving')]
+        elif self.sport == 'MLB':
+            stat_pairs = [('hits', 'home_runs'), ('hits', 'strikeouts'), ('home_runs', 'strikeouts')]
         else:
             stat_pairs = [('points', 'rebounds'), ('points', 'assists'), ('rebounds', 'assists')]
 
@@ -759,6 +786,8 @@ class SuggestedBetsService(BaseSportService):
         # For safe long parlays, use bettable stats only
         if self.sport == 'NFL':
             safe_stat_types = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']]
+        elif self.sport == 'MLB':
+            safe_stat_types = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
         else:  # NBA
             # Include points, rebounds, assists, three_pointers_made, and pts+ast+reb
             safe_stat_types = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
@@ -832,6 +861,18 @@ class SuggestedBetsService(BaseSportService):
             safe_line = pred.safe_line
             if safe_line is None or safe_line <= 0:
                 continue  # Skip bets with invalid lines
+            
+            # VALIDATION: Only filter extreme outliers that are clearly data errors
+            # This should be very lenient - only catch obvious mistakes (e.g., 5x+ recent max)
+            if last_3_games and len(last_3_games) > 0:
+                recent_values = [g.get('value', 0) for g in last_3_games if g.get('value') is not None]
+                if recent_values and len(recent_values) >= 2:  # Need at least 2 games for validation
+                    max_recent = max(recent_values)
+                    
+                    # Only filter if line is EXTREMELY high compared to recent (5x+ max recent)
+                    if max_recent > 0 and safe_line > max_recent * 5.0:
+                        print(f"⚠️  WARNING: {player.name} {pred.stat_type} line {safe_line} is >5x max recent ({max_recent}). Recent: {recent_values}. Skipping extreme outlier.")
+                        continue
             
             safe_bets.append({
                 'prediction_id': pred.prediction_id,
@@ -969,6 +1010,8 @@ class SuggestedBetsService(BaseSportService):
         # For NBA same-game parlays, use bettable stats: points, rebounds, assists, three_pointers_made, pts+ast+reb
         if self.sport == 'NBA':
             sgp_stat_types = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
+        elif self.sport == 'MLB':
+            sgp_stat_types = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
         else:  # NFL
             sgp_stat_types = bettable_stat_types
         
@@ -1054,6 +1097,35 @@ class SuggestedBetsService(BaseSportService):
             )
             last_3_games = historical_data['games']
             lineup_context = historical_data['lineup_context']
+            
+            # VALIDATION: Only filter extreme outliers that are clearly data errors
+            # This should be very lenient - only catch obvious mistakes (e.g., 5x+ recent max)
+            if last_3_games and len(last_3_games) > 0:
+                recent_values = [g.get('value', 0) for g in last_3_games if g.get('value') is not None]
+                if recent_values and len(recent_values) >= 2:  # Need at least 2 games for validation
+                    max_recent = max(recent_values)
+                    
+                    # Only filter if line is EXTREMELY high compared to recent (5x+ max recent)
+                    if max_recent > 0 and line > max_recent * 5.0:
+                        print(f"⚠️  WARNING: {player.name} {pred.stat_type} line {line} is >5x max recent ({max_recent}). Recent: {recent_values}. Skipping extreme outlier.")
+                        continue
+            
+            # DEBUG: Log if we see suspicious assists values
+            if pred.stat_type == 'assists' and last_3_games:
+                for game_data in last_3_games:
+                    if game_data.get('value', 0) > 10:
+                        print(f"⚠️  DEBUG: {player.name} assists showing value {game_data.get('value')} for game {game_data.get('game_date')} vs {game_data.get('opponent')}")
+                        print(f"    stat_type: {pred.stat_type}, stat_column should be: assists")
+                        # Verify what the actual stat value is
+                        from app.models import PlayerGameStat, Game as GameModel
+                        game_obj = self.db.query(GameModel).filter(GameModel.game_date == game_data.get('game_date')).first()
+                        if game_obj:
+                            stat = self.db.query(PlayerGameStat).filter(
+                                PlayerGameStat.player_id == pred.player_id,
+                                PlayerGameStat.game_id == game_obj.game_id
+                            ).first()
+                            if stat:
+                                print(f"    Actual DB values: {stat.points} PTS, {stat.rebounds} REB, {stat.assists} AST")
             
             bets.append({
                 'prediction_id': pred.prediction_id,

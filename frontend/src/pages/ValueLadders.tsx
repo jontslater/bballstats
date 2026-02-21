@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { apiService } from '../services/api';
+import { useSport } from '../contexts/SportContext';
 
 interface LadderStep {
   line: number;
@@ -24,10 +25,10 @@ interface ValueLadder {
 }
 
 const ValueLadders: React.FC = () => {
+  const { sport } = useSport();
   const [ladders, setLadders] = useState<ValueLadder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [sport, setSport] = useState('NBA');
   const [daysAhead, setDaysAhead] = useState(1); // Default to today's games only
   const [minSteps, setMinSteps] = useState(3);
 
@@ -148,21 +149,9 @@ const ValueLadders: React.FC = () => {
         </p>
       </div>
 
-      {/* Controls */}
+      {/* Controls - Sport comes from header selector */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-8">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Sport</label>
-            <select
-              value={sport}
-              onChange={(e) => setSport(e.target.value)}
-              className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-            >
-              <option value="NBA">NBA</option>
-              <option value="NFL">NFL</option>
-            </select>
-          </div>
-
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Days Ahead</label>
             <select

@@ -65,8 +65,8 @@ async def get_predictions_for_game(
     db = SessionLocal()
     try:
         # Validate sport
-        if sport not in ['NBA', 'NFL']:
-            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA', 'NFL', or 'MLB'")
         
         # Verify game exists and matches sport
         game = db.query(Game).filter(
@@ -168,8 +168,8 @@ async def get_player_prediction(
     db = SessionLocal()
     try:
         # Validate sport
-        if sport not in ['NBA', 'NFL']:
-            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA', 'NFL', or 'MLB'")
         
         prediction = db.query(Prediction).filter(
             Prediction.player_id == player_id,
@@ -218,8 +218,8 @@ async def get_safe_bets(
     db = SessionLocal()
     try:
         # Validate sport
-        if sport not in ['NBA', 'NFL']:
-            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA', 'NFL', or 'MLB'")
         
         query = db.query(Prediction).filter(
             Prediction.bet_type == "safe",
@@ -367,8 +367,8 @@ async def get_long_shots(
     db = SessionLocal()
     try:
         # Validate sport
-        if sport not in ['NBA', 'NFL']:
-            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA', 'NFL', or 'MLB'")
         
         query = db.query(Prediction).filter(
             Prediction.bet_type == "long_shot",
@@ -522,8 +522,8 @@ async def generate_predictions(request: GeneratePredictionsRequest):
         
         try:
             # Validate sport
-            if request.sport not in ['NBA', 'NFL']:
-                yield f"data: {json.dumps({'error': f'Invalid sport: {request.sport}. Must be NBA or NFL'})}\n\n"
+            if request.sport not in ['NBA', 'NFL', 'MLB']:
+                yield f"data: {json.dumps({'error': f'Invalid sport: {request.sport}. Must be NBA, NFL, or MLB'})}\n\n"
                 return
             
             # Collect lineups for upcoming games before generating predictions
@@ -628,8 +628,8 @@ async def get_upcoming_predictions(
     db = SessionLocal()
     try:
         # Validate sport
-        if sport not in ['NBA', 'NFL']:
-            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA' or 'NFL'")
+        if sport not in ['NBA', 'NFL', 'MLB']:
+            raise HTTPException(status_code=400, detail=f"Invalid sport: {sport}. Must be 'NBA', 'NFL', or 'MLB'")
         
         from datetime import timedelta
         

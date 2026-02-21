@@ -188,9 +188,9 @@ export const apiService = {
     return response.data;
   },
 
-  collectGameResults: async () => {
-    const response = await api.post('/api/game-results/collect-previous-day', {}, {
-      timeout: 60000, // 60 seconds for this slow operation (scrapes multiple games)
+  collectGameResults: async (sport: string = 'NBA') => {
+    const response = await api.post(`/api/game-results/collect-previous-day?sport=${sport}`, {}, {
+      timeout: 120000, // 2 min for MLB/NBA (multiple games)
     });
     return response.data;
   },
@@ -274,9 +274,19 @@ export const apiService = {
     return response.data;
   },
 
+  syncPlayerTeams: async (daysBack: number = 30) => {
+    const response = await api.post(`/api/players/sync-teams?days_back=${daysBack}`);
+    return response.data;
+  },
+
+  getTeamMismatches: async (daysBack: number = 7) => {
+    const response = await api.get(`/api/players/team-mismatches?days_back=${daysBack}`);
+    return response.data;
+  },
+
   // Plays
-  getPlays: async (status?: string, limit: number = 100) => {
-    const params: any = { limit };
+  getPlays: async (status?: string, limit: number = 100, sport: string = 'NBA') => {
+    const params: any = { limit, sport };
     if (status) params.status = status;
     const response = await api.get('/api/plays', { params });
     return response.data;
@@ -312,8 +322,8 @@ export const apiService = {
     return response.data;
   },
 
-  getPlayStats: async () => {
-    const response = await api.get('/api/plays/stats/summary');
+  getPlayStats: async (sport: string = 'NBA') => {
+    const response = await api.get('/api/plays/stats/summary', { params: { sport } });
     return response.data;
   },
 
@@ -355,8 +365,8 @@ export const apiService = {
     return response.data;
   },
 
-  getParlays: async (status?: string) => {
-    const params: any = {};
+  getParlays: async (status?: string, sport: string = 'NBA') => {
+    const params: any = { sport };
     if (status) params.status = status;
     const response = await api.get('/api/parlays', { params });
     return response.data;
@@ -457,21 +467,23 @@ export const apiService = {
     return response.data;
   },
 
-  refreshSafeLongParlay: async (gameDate?: string, numLegs: number = 12, minLegProbability: number = 0.75, excludePlayerIds: number[] = []) => {
+  refreshSafeLongParlay: async (gameDate?: string, numLegs: number = 12, minLegProbability: number = 0.75, excludePlayerIds: number[] = [], sport: string = 'NBA') => {
     const response = await api.post('/api/suggested-bets/refresh-safe-long-parlay', {
       game_date: gameDate,
       num_legs: numLegs,
       min_leg_probability: minLegProbability,
-      exclude_player_ids: excludePlayerIds
+      exclude_player_ids: excludePlayerIds,
+      sport
     });
     return response.data;
   },
 
-  refreshBuilderPlay: async (gameDate?: string, numLegs: number = 2, excludePlayerIds: number[] = []) => {
+  refreshBuilderPlay: async (gameDate?: string, numLegs: number = 2, excludePlayerIds: number[] = [], sport: string = 'NBA') => {
     const response = await api.post('/api/suggested-bets/refresh-builder-play', {
       game_date: gameDate,
       num_legs: numLegs,
-      exclude_player_ids: excludePlayerIds
+      exclude_player_ids: excludePlayerIds,
+      sport
     });
     return response.data;
   },
@@ -684,8 +696,8 @@ export const apiService = {
     return finalResult || { success: true };
   },
 
-  runQuickUpdate: async (onProgress?: (progress: any) => void) => {
-    const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/updates/run-quick-update`, {
+  runQuickUpdate: async (sport: string = 'NBA', onProgress?: (progress: any) => void) => {
+    const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/updates/run-quick-update?sport=${sport}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, ReactNode } from 'react';
 
-type Sport = 'NBA' | 'NFL';
+type Sport = 'NBA' | 'NFL' | 'MLB';
 
 interface SportContextType {
   sport: Sport;

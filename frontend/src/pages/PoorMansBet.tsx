@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import apiService from '../services/api';
 import Last3Games from '../components/Last3Games';
+import { useSport } from '../contexts/SportContext';
 import GenerationProgress from '../components/GenerationProgress';
 import { parseDateString } from '../utils/dateUtils';
 
@@ -52,6 +53,7 @@ interface DailyBettingPlan {
 }
 
 export default function PoorMansBet() {
+  const { sport } = useSport();
   const [sureBets, setSureBets] = useState<SureBet[]>([]);
   const [dailyPlan, setDailyPlan] = useState<DailyBettingPlan | null>(null);
   const [loading, setLoading] = useState(true);
@@ -70,7 +72,7 @@ export default function PoorMansBet() {
 
   useEffect(() => {
     loadSureBets();
-  }, [selectedGameDate]);
+  }, [selectedGameDate, sport]);
 
   const loadSureBets = async () => {
     setLoading(true);
@@ -80,7 +82,7 @@ export default function PoorMansBet() {
         1, // days ahead
         undefined, // stat type
         undefined, // bet type
-        'NBA' // sport
+        sport
       );
 
       // Filter for high-confidence predictions only

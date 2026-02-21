@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { format } from 'date-fns';
 import apiService, { Play } from '../services/api';
 import { parseDateString } from '../utils/dateUtils';
+import { useSport } from '../contexts/SportContext';
 
 interface AnalysisResult {
   player_name: string;
@@ -50,6 +51,7 @@ interface Parlay {
 }
 
 export default function MyPlays() {
+  const { sport } = useSport();
   const [plays, setPlays] = useState<Play[]>([]);
   const [parlays, setParlays] = useState<Parlay[]>([]);
   const [stats, setStats] = useState<any>(null);
@@ -63,12 +65,12 @@ export default function MyPlays() {
     loadPlays();
     loadParlays();
     loadStats();
-  }, [statusFilter]);
+  }, [statusFilter, sport]);
 
   const loadPlays = async () => {
     setLoading(true);
     try {
-      const playsData = await apiService.getPlays(statusFilter === 'all' ? undefined : statusFilter);
+      const playsData = await apiService.getPlays(statusFilter === 'all' ? undefined : statusFilter, 100, sport);
       setPlays(playsData);
     } catch (error) {
       console.error('Error loading plays:', error);
@@ -79,7 +81,7 @@ export default function MyPlays() {
 
   const loadParlays = async () => {
     try {
-      const parlaysData = await apiService.getParlays(statusFilter === 'all' ? undefined : statusFilter);
+      const parlaysData = await apiService.getParlays(statusFilter === 'all' ? undefined : statusFilter, sport);
       setParlays(parlaysData);
     } catch (error) {
       console.error('Error loading parlays:', error);
@@ -88,7 +90,7 @@ export default function MyPlays() {
 
   const loadStats = async () => {
     try {
-      const statsData = await apiService.getPlayStats();
+      const statsData = await apiService.getPlayStats(sport);
       setStats(statsData);
     } catch (error) {
       console.error('Error loading stats:', error);

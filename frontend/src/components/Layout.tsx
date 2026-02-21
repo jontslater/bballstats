@@ -14,8 +14,8 @@ export default function Layout({ children }: LayoutProps) {
     return location.pathname === path ? 'bg-primary-600 text-white' : 'text-gray-700 hover:bg-gray-100';
   };
 
-  const sportEmoji = sport === 'NBA' ? '🏀' : '🏈';
-  const sportTitle = sport === 'NBA' ? 'NBA' : 'NFL';
+  const sportEmoji = sport === 'NBA' ? '🏀' : sport === 'NFL' ? '🏈' : '⚾';
+  const sportTitle = sport === 'NBA' ? 'NBA' : sport === 'NFL' ? 'NFL' : 'MLB';
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -47,6 +47,16 @@ export default function Layout({ children }: LayoutProps) {
                     }`}
                   >
                     🏈 NFL
+                  </button>
+                  <button
+                    onClick={() => setSport('MLB')}
+                    className={`px-3 py-1 rounded-md text-sm font-medium ${
+                      sport === 'MLB'
+                        ? 'bg-primary-600 text-white'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}
+                  >
+                    ⚾ MLB
                   </button>
                 </div>
               </div>

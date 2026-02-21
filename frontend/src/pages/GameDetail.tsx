@@ -151,7 +151,7 @@ export default function GameDetail() {
     if (gameId) {
       loadGameData();
     }
-  }, [gameId, statFilter]);
+  }, [gameId, statFilter, sport]);
 
   const loadGameData = async () => {
     if (!gameId) return;
@@ -161,7 +161,7 @@ export default function GameDetail() {
         apiService.getGame(Number(gameId), sport),
         apiService.getPredictionsForGame(Number(gameId), statFilter === 'all' ? undefined : statFilter, undefined, sport),
         apiService.getSameGameParlays(Number(gameId), 5, 3, 0.70, sport),
-        apiService.getAdvancedBetsForGame(Number(gameId), 5),
+        apiService.getAdvancedBetsForGame(Number(gameId), 5, sport),
       ]);
       
       if (gameData.status === 'fulfilled') {

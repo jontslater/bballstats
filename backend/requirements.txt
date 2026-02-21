@@ -24,6 +24,9 @@ lxml==4.9.3
 # NBA Data
 nba-api==1.2.1
 
+# MLB Data (official MLB Stats API - no rate limits like Baseball Reference)
+MLB-StatsAPI>=1.7.0
+
 # Scheduling (optional)
 schedule==1.2.0
 

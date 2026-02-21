@@ -11,7 +11,7 @@ class PlayerGameStat(Base):
     __tablename__ = "player_game_stats"
 
     stat_id = Column(Integer, primary_key=True, index=True)
-    sport = Column(String(10), nullable=False, default='NBA', index=True)  # 'NBA' or 'NFL'
+    sport = Column(String(10), nullable=False, default='NBA', index=True)  # 'NBA', 'NFL', or 'MLB'
     player_id = Column(Integer, ForeignKey("players.player_id"), nullable=False)
     game_id = Column(Integer, ForeignKey("games.game_id"), nullable=False)
     team_id = Column(Integer, ForeignKey("teams.team_id"), nullable=False)
@@ -68,6 +68,22 @@ class PlayerGameStat(Base):
     # Playing time (NFL)
     snaps_played = Column(Integer, nullable=True)
     snap_percentage = Column(Float, nullable=True)
+    
+    # === MLB Stats (Batters) ===
+    hits = Column(Integer, nullable=True)
+    home_runs = Column(Integer, nullable=True)
+    total_bases = Column(Integer, nullable=True)
+    doubles = Column(Integer, nullable=True)
+    triples = Column(Integer, nullable=True)
+    at_bats = Column(Integer, nullable=True)
+    plate_appearances = Column(Integer, nullable=True)
+    rbis = Column(Integer, nullable=True)
+    
+    # === MLB Stats (Pitchers) ===
+    strikeouts = Column(Integer, nullable=True)  # Pitcher strikeouts (K)
+    innings_pitched = Column(Float, nullable=True)
+    walks_allowed = Column(Integer, nullable=True)
+    hits_allowed = Column(Integer, nullable=True)
     
     # Context
     is_home = Column(Boolean)

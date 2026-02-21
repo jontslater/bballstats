@@ -303,6 +303,7 @@ class RefreshSafeLongParlayRequest(BaseModel):
     num_legs: int = 12
     min_leg_probability: float = 0.75
     exclude_player_ids: List[int] = []
+    sport: str = "NBA"
 
 
 class RefreshBuilderPlayRequest(BaseModel):
@@ -310,16 +311,18 @@ class RefreshBuilderPlayRequest(BaseModel):
     game_date: Optional[str] = None
     num_legs: int = 2
     exclude_player_ids: List[int] = []
+    sport: str = "NBA"
 
 
 @router.post("/refresh-safe-long-parlay")
 async def refresh_safe_long_parlay(request: RefreshSafeLongParlayRequest):
     """Generate a new safe long parlay, excluding specified player IDs."""
     refresh_req = request
+    sport = (refresh_req.sport or "NBA").upper()
     
     db = SessionLocal()
     try:
-        service = SuggestedBetsService(db)
+        service = SuggestedBetsService(db, sport)
         
         parsed_date = None
         if refresh_req.game_date:
@@ -363,10 +366,11 @@ async def refresh_safe_long_parlay(request: RefreshSafeLongParlayRequest):
 async def refresh_builder_play(request: RefreshBuilderPlayRequest):
     """Generate a new builder play, excluding specified player IDs."""
     refresh_req = request
+    sport = (refresh_req.sport or "NBA").upper()
     
     db = SessionLocal()
     try:
-        service = BuilderPlaysService(db)
+        service = BuilderPlaysService(db, sport)
         
         parsed_date = None
         if refresh_req.game_date:

@@ -264,6 +264,18 @@ def get_last_n_games_for_stat(
                 'completions': 'completions',
                 'attempts': 'pass_attempts',
                 'snaps_played': 'snaps_played',
+            },
+            'MLB': {
+                'hits': 'hits',
+                'home_runs': 'home_runs',
+                'total_bases': 'total_bases',
+                'rbis': 'rbis',
+                'at_bats': 'at_bats',
+                'plate_appearances': 'plate_appearances',
+                'strikeouts': 'strikeouts',
+                'innings_pitched': 'innings_pitched',
+                'walks_allowed': 'walks_allowed',
+                'hits_allowed': 'hits_allowed',
             }
         }
 
@@ -317,11 +329,17 @@ def get_last_n_games_for_stat(
         query = query.filter(PlayerGameStat.minutes_played > 0)
     elif sport == 'NFL':
         # For NFL, check if player has meaningful stats (not just DNP)
-        # If snaps_played exists, use it; otherwise allow all
         query = query.filter(
             (PlayerGameStat.snaps_played > 0) | 
             (PlayerGameStat.snaps_played.is_(None))
         )
+    elif sport == 'MLB':
+        # Batters: at_bats > 0; Pitchers: innings_pitched > 0
+        batter_stats = ['hits', 'home_runs', 'total_bases', 'rbis', 'at_bats', 'plate_appearances']
+        if stat_type in batter_stats:
+            query = query.filter(PlayerGameStat.at_bats > 0)
+        else:
+            query = query.filter(PlayerGameStat.innings_pitched > 0)
     
     # Order by game date descending and limit to N games
     # Use distinct on game_id to avoid duplicates (in case there are multiple stat records per game)
@@ -375,6 +393,10 @@ def get_last_n_games_for_stat(
             stat_value = (stat.rebounds or 0) + (stat.assists or 0)
         else:
             stat_value = getattr(stat, stat_column)
+            # DEBUG: Verify we're getting the right column
+            if stat_type == 'assists' and stat_value and stat_value > 10:
+                print(f"⚠️  DEBUG get_last_n_games_for_stat: player_id={player_id}, stat_type={stat_type}, stat_column={stat_column}")
+                print(f"    Game {game.game_date}: stat_value={stat_value}, stat.assists={stat.assists}, stat.points={stat.points}, stat.rebounds={stat.rebounds}")
         
         last_games.append({
             'game_date': game.game_date.isoformat() if game.game_date else None,

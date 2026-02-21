@@ -443,12 +443,38 @@ class BoxScoreScraper:
                 
                 if 'AST' in header_indices and header_indices['AST'] < len(cell_texts):
                     try:
-                        assists = int(float(cell_texts[header_indices['AST']]))
-                    except:
-                        pass
+                        ast_val = cell_texts[header_indices['AST']].strip()
+                        if ast_val and ast_val != '':
+                            assists = int(float(ast_val))
+                        else:
+                            assists = 0
+                    except (ValueError, TypeError, IndexError) as e:
+                        # Log error for debugging
+                        if player_idx < 3:  # Only log first few to avoid spam
+                            print(f"      ⚠️  Error parsing assists for {player_name}: '{cell_texts[header_indices['AST']] if header_indices['AST'] < len(cell_texts) else 'N/A'}' - {e}")
+                        assists = 0
+                
+                # VALIDATION: Check if stats make sense (catch column misalignment)
+                # If assists are suspiciously high (>15) but points are low (<10), likely wrong column
+                if assists > 15 and points < 10 and minutes > 0:
+                    print(f"      ⚠️  SUSPICIOUS: {player_name} has {assists} assists but only {points} points (MIN: {minutes:.1f})")
+                    print(f"      📍 Full row: {cell_texts}")
+                    print(f"      📍 Header indices: MIN={header_indices.get('MIN')}, PTS={header_indices.get('PTS')}, REB={header_indices.get('REB')}, AST={header_indices.get('AST')}")
+                    # Try to find assists in nearby columns (might be misaligned)
+                    # For now, set assists to 0 to prevent bad data
+                    assists = 0
                 
                 # Increment stats_row_idx for next iteration (IMPORTANT: do this before continue/break)
                 stats_row_idx += 1
+                
+                # VALIDATION: Check row alignment - if minutes is 0 but we have other stats, likely misaligned
+                # Also check if stats seem reasonable (minutes should be > 0 if player has points/rebounds/assists)
+                has_stats = points > 0 or rebounds > 0 or assists > 0
+                if minutes == 0 and has_stats:
+                    print(f"      ⚠️  WARNING: {player_name} has stats ({points} PTS, {rebounds} REB, {assists} AST) but 0 minutes - possible row misalignment")
+                    print(f"      📍 Full row: {cell_texts}")
+                    # Skip this row - likely misaligned
+                    continue
                 
                 # Only add if player played (minutes > 0)
                 if minutes > 0:
@@ -477,12 +503,23 @@ class BoxScoreScraper:
                             'Thomas' in player_name or 'Cam' in player_name  # Cam Thomas specifically
                         )
                         
+                        # Enhanced logging for suspicious stats
+                        should_log = (
+                            len(stats['player_stats']) < 5 or  # First 5 players
+                            (points > 0 and points < 5 and minutes > 15) or  # Suspiciously low points
+                            (assists > 15 and points < 10) or  # Suspiciously high assists vs low points
+                            'Thomas' in player_name or 'Cam' in player_name or 'Kuzma' in player_name  # Specific players to monitor
+                        )
+                        
                         if should_log:
                             print(f"      ✅ {player_name} (DB: {player.name}): {points} PTS, {rebounds} REB, {assists} AST (MIN: {minutes:.1f})")
                             if 'PTS' in header_indices:
                                 pts_col = header_indices['PTS']
+                                ast_col = header_indices.get('AST')
                                 if pts_col < len(cell_texts):
                                     print(f"      📍 Raw PTS cell value: '{cell_texts[pts_col]}' (index {pts_col})")
+                                    if ast_col is not None and ast_col < len(cell_texts):
+                                        print(f"      📍 Raw AST cell value: '{cell_texts[ast_col]}' (index {ast_col})")
                                     print(f"      📍 Full row: {cell_texts}")
                                     print(f"      📍 Header: MIN={header_indices.get('MIN')}, PTS={header_indices.get('PTS')}, REB={header_indices.get('REB')}, AST={header_indices.get('AST')}")
                         

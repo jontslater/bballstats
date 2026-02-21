@@ -90,13 +90,19 @@ class DistributionEngine:
             )
         )
         
-        # Filter by time played (minutes for NBA, snaps for NFL)
-        # For NFL, we might not have snap data, so we'll use a different filter
+        # Filter by time played (minutes for NBA, snaps for NFL, at_bats/IP for MLB)
         if sport == 'NBA':
             query = query.filter(PlayerGameStat.minutes_played > 0)
             if projected_minutes:
                 min_minutes = projected_minutes * 0.65
                 query = query.filter(PlayerGameStat.minutes_played >= min_minutes)
+        elif sport == 'MLB':
+            # Batters: at_bats > 0; Pitchers: innings_pitched > 0
+            batter_stats = ['hits', 'home_runs', 'total_bases', 'rbis', 'at_bats', 'plate_appearances']
+            if stat_type in batter_stats:
+                query = query.filter(PlayerGameStat.at_bats > 0)
+            else:  # Pitcher stats
+                query = query.filter(PlayerGameStat.innings_pitched > 0)
         else:  # NFL
             # For NFL, filter by snaps if available, otherwise allow all
             # We'll filter out players with no relevant stats later
@@ -156,7 +162,7 @@ class DistributionEngine:
                     value = (stat.points or 0) + (stat.assists or 0) + (stat.rebounds or 0)
                 else:
                     raise ValueError(f"Unknown NBA stat_type: {stat_type}")
-            else:  # NFL
+            elif sport == 'NFL':
                 # NFL stats
                 if stat_type == 'passing_yards':
                     value = stat.passing_yards
@@ -188,14 +194,38 @@ class DistributionEngine:
                     value = stat.snap_percentage
                 else:
                     raise ValueError(f"Unknown NFL stat_type: {stat_type}")
+            elif sport == 'MLB':
+                # MLB stats - batters and pitchers
+                if stat_type == 'hits':
+                    value = stat.hits
+                elif stat_type == 'home_runs':
+                    value = stat.home_runs
+                elif stat_type == 'total_bases':
+                    value = stat.total_bases
+                elif stat_type == 'rbis':
+                    value = stat.rbis
+                elif stat_type == 'at_bats':
+                    value = stat.at_bats
+                elif stat_type == 'plate_appearances':
+                    value = stat.plate_appearances
+                elif stat_type == 'strikeouts':
+                    value = stat.strikeouts
+                elif stat_type == 'innings_pitched':
+                    value = stat.innings_pitched
+                elif stat_type == 'walks_allowed':
+                    value = stat.walks_allowed
+                elif stat_type == 'hits_allowed':
+                    value = stat.hits_allowed
+                else:
+                    raise ValueError(f"Unknown MLB stat_type: {stat_type}")
             
-            # Only add non-null values (NFL players might not have stats for some stat types)
+            # Only add non-null values
             if value is not None:
                 stat_values.append(value)
         
-        # For NFL, filter out players with insufficient data
-        # (e.g., QB might not have rushing stats)
-        if len(stat_values) < min_games:
+        # For NFL/MLB, use lower min_games (MLB: 10)
+        effective_min_games = 10 if sport == 'MLB' else min_games
+        if len(stat_values) < effective_min_games:
             return None
         
         if not stat_values:
@@ -299,10 +329,15 @@ class DistributionEngine:
         # Filter by time played
         if sport == 'NBA':
             query = query.filter(PlayerGameStat.minutes_played > 0)
-        else:  # NFL - prefer snaps if available
-            # For NFL, we'll check both snaps and minutes
-            # But for now, we'll allow all records and filter by snaps when available
-            pass
+        elif sport == 'MLB':
+            # Include batters (at_bats > 0) or pitchers (innings_pitched > 0)
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    PlayerGameStat.at_bats > 0,
+                    PlayerGameStat.innings_pitched > 0
+                )
+            )
         
         if recent_games:
             query = query.limit(recent_games * 2 if only_starters else recent_games)  # Get more games if filtering by starters
@@ -335,10 +370,14 @@ class DistributionEngine:
                 if stat.game_id in starter_game_ids:
                     is_starter = True
                 else:
-                    # Infer from minutes: >=25 minutes = likely starter (NBA)
-                    # For NFL, use snaps if available, otherwise minutes
+                    # Infer from playing time
                     if sport == 'NBA':
                         if stat.minutes_played and stat.minutes_played >= 25:
+                            is_starter = True
+                    elif sport == 'MLB':
+                        # Batter: 3+ PA = regular; Pitcher: 5+ IP = likely starter
+                        if (stat.plate_appearances and stat.plate_appearances >= 3) or \
+                           (stat.innings_pitched and stat.innings_pitched >= 5):
                             is_starter = True
                     else:  # NFL
                         if stat.snaps_played and stat.snaps_played >= 40:  # ~60% of snaps
@@ -365,6 +404,9 @@ class DistributionEngine:
             # Get time value based on sport
             if sport == 'NBA':
                 time_value = stat.minutes_played or 0
+            elif sport == 'MLB':
+                # Batters: plate_appearances; Pitchers: innings_pitched
+                time_value = stat.plate_appearances if stat.plate_appearances else (stat.innings_pitched or 0)
             else:  # NFL
                 # Prefer snaps, fallback to estimated minutes
                 time_value = stat.snaps_played if stat.snaps_played else (stat.minutes_played or 0)
@@ -381,6 +423,8 @@ class DistributionEngine:
             for stat in stats_list:
                 if sport == 'NBA':
                     time_values.append(stat.minutes_played or 0)
+                elif sport == 'MLB':
+                    time_values.append(stat.plate_appearances if stat.plate_appearances else (stat.innings_pitched or 0))
                 else:
                     time_values.append(stat.snaps_played if stat.snaps_played else (stat.minutes_played or 0))
             avg_time = sum(time_values) / len(time_values) if time_values else 0

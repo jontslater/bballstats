@@ -63,6 +63,47 @@ SPORT_CONFIGS: Dict[str, Dict] = {
             'WR': ['receptions', 'receiving_yards', 'receiving_tds', 'targets'],
             'TE': ['receptions', 'receiving_yards', 'receiving_tds', 'targets']
         }
+    },
+    'MLB': {
+        'stat_types': [
+            # Batters
+            'hits', 'home_runs', 'total_bases', 'rbis', 'at_bats', 'plate_appearances',
+            # Pitchers
+            'strikeouts', 'innings_pitched', 'walks_allowed', 'hits_allowed'
+        ],
+        'positions': ['P', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH', 'SP', 'RP'],
+        'time_unit': 'plate_appearances',  # batters; pitchers use innings_pitched
+        'positions_by_group': {
+            'batter': ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH'],
+            'pitcher': ['P', 'SP', 'RP']
+        },
+        'default_stat_type': 'hits',
+        'stat_type_labels': {
+            'hits': 'Hits',
+            'home_runs': 'Home Runs',
+            'total_bases': 'Total Bases',
+            'rbis': 'RBIs',
+            'at_bats': 'At Bats',
+            'plate_appearances': 'Plate Appearances',
+            'strikeouts': 'Strikeouts',
+            'innings_pitched': 'Innings Pitched',
+            'walks_allowed': 'Walks Allowed',
+            'hits_allowed': 'Hits Allowed'
+        },
+        'position_default_stats': {
+            'P': ['strikeouts'],
+            'SP': ['strikeouts'],
+            'RP': ['strikeouts'],
+            'C': ['hits', 'home_runs', 'total_bases'],
+            '1B': ['hits', 'home_runs', 'total_bases'],
+            '2B': ['hits', 'home_runs', 'total_bases'],
+            '3B': ['hits', 'home_runs', 'total_bases'],
+            'SS': ['hits', 'home_runs', 'total_bases'],
+            'LF': ['hits', 'home_runs', 'total_bases'],
+            'CF': ['hits', 'home_runs', 'total_bases'],
+            'RF': ['hits', 'home_runs', 'total_bases'],
+            'DH': ['hits', 'home_runs', 'total_bases']
+        }
     }
 }
 
@@ -90,8 +131,8 @@ def get_default_stat_type(sport: str, position: Optional[str] = None) -> str:
     """Get default stat type for a sport and optionally position."""
     config = get_sport_config(sport)
     
-    # For NFL, check position-specific defaults
-    if sport == 'NFL' and position and 'position_default_stats' in config:
+    # For NFL/MLB, check position-specific defaults
+    if position and 'position_default_stats' in config:
         if position in config['position_default_stats']:
             return config['position_default_stats'][position][0]
     
@@ -132,6 +173,10 @@ def get_bettable_stat_types(sport: str) -> List[str]:
         # Exclude snaps_played and snap_percentage (not bettable)
         excluded = ['snaps_played', 'snap_percentage']
         return [s for s in all_stats if s not in excluded]
+    elif sport == 'MLB':
+        # Bettable: hits, home_runs, total_bases, strikeouts
+        bettable_stats = ['hits', 'home_runs', 'total_bases', 'strikeouts']
+        return [s for s in all_stats if s in bettable_stats]
     else:
         return all_stats
 

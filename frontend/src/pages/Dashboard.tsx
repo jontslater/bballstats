@@ -10,6 +10,11 @@ import { useSport } from '../contexts/SportContext';
 
 // Helper function to display stat types
 const getStatTypeDisplay = (statType: string): string => {
+  if (!statType) return 'N/A';
+  
+  // Normalize the stat type (handle variations)
+  const normalized = statType.toLowerCase().trim();
+  
   const statMap: { [key: string]: string } = {
     // NBA stats
     'points': 'PTS',
@@ -20,6 +25,9 @@ const getStatTypeDisplay = (statType: string): string => {
     'turnovers': 'TOV',
     'minutes': 'MIN',
     'pts+ast+reb': 'P+A+R',
+    'points_assists': 'P+A',
+    'points_rebounds': 'P+R',
+    'rebounds_assists': 'R+A',
     'three_pointers_made': '3PM',
 
     // NFL stats
@@ -31,9 +39,56 @@ const getStatTypeDisplay = (statType: string): string => {
     'receiving_tds': 'REC TD',
     'receptions': 'REC',
     'targets': 'TGT',
+
+    // MLB stats
+    'hits': 'H',
+    'home_runs': 'HR',
+    'total_bases': 'TB',
+    'strikeouts': 'K',
+    'rbis': 'RBI',
+    'innings_pitched': 'IP',
   };
 
-  return statMap[statType] || statType.toUpperCase();
+  // Check exact match first (most common case) - this handles pts+ast+reb
+  if (statMap[normalized]) {
+    const result = statMap[normalized];
+    // Debug log for pts+ast+reb
+    if (normalized === 'pts+ast+reb') {
+      console.log(`[getStatTypeDisplay] Mapping "${statType}" (normalized: "${normalized}") -> "${result}"`);
+    }
+    return result;
+  }
+  
+  // Special handling for pts+ast+reb combo stat (fallback check)
+  if (normalized === 'pts+ast+reb' || 
+      (normalized.includes('pts') && normalized.includes('ast') && normalized.includes('reb') && normalized.includes('+'))) {
+    console.log(`[getStatTypeDisplay] Fallback: Mapping "${statType}" -> "P+A+R"`);
+    return 'P+A+R';
+  }
+  
+  // Check if it's a combo stat with underscores converted to plus signs
+  const normalizedWithUnderscores = normalized.replace(/_/g, '+');
+  if (statMap[normalizedWithUnderscores]) {
+    return statMap[normalizedWithUnderscores];
+  }
+  
+  // Fallback: try to parse combo stats
+  if (normalized.includes('+') || normalized.includes('_')) {
+    const parts = normalized.split(/[+_]/);
+    if (parts.length === 3 && parts.includes('pts') && parts.includes('ast') && parts.includes('reb')) {
+      return 'P+A+R';
+    } else if (parts.length === 2) {
+      const labels = parts.map(p => {
+        if (p.includes('point')) return 'P';
+        if (p.includes('rebound')) return 'R';
+        if (p.includes('assist')) return 'A';
+        return p.toUpperCase().substring(0, 1);
+      });
+      return labels.join('+');
+    }
+  }
+
+  return statMap[normalized] || normalized.toUpperCase();
 };
 
 // Helper function to get line and probability based on bet type
@@ -1011,7 +1066,7 @@ export default function Dashboard() {
     try {
       // Show user that this may take a while
       alert('Collecting game results... This may take 30-60 seconds. Please wait.');
-      const result = await apiService.collectGameResults();
+      const result = await apiService.collectGameResults(sport);
       alert(`Game results collected! Games processed: ${result.games_processed}, Stats created: ${result.stats_created}`);
       loadData(); // Reload to show updated data
     } catch (error: any) {
@@ -1083,6 +1138,8 @@ export default function Dashboard() {
       // Use appropriate stat types for the sport
       const statTypes = sport === 'NFL'
         ? ['passing_yards', 'rushing_yards', 'receiving_yards']
+        : sport === 'MLB'
+        ? ['hits', 'home_runs', 'total_bases', 'strikeouts']
         : ['points', 'rebounds', 'assists'];
 
       const result = await apiService.generatePredictions(
@@ -1122,7 +1179,8 @@ export default function Dashboard() {
   }
 
   const handleQuickUpdate = async () => {
-    if (!confirm('Run quick update? This will collect yesterday\'s box scores, evaluate predictions, and generate today\'s predictions. This takes 30-60 seconds.')) {
+    const timeEst = sport === 'MLB' ? '2-5 minutes' : '30-60 seconds';
+    if (!confirm(`Run quick update for ${sport}? This will collect yesterday's results, evaluate predictions, and generate today's predictions. Takes ${timeEst}.`)) {
       return;
     }
 
@@ -1130,7 +1188,7 @@ export default function Dashboard() {
     setUpdateStatus('Running quick update...');
     setUpdateProgress({ message: 'Starting...', progress: 0 });
     try {
-      const result = await apiService.runQuickUpdate((progress) => {
+      const result = await apiService.runQuickUpdate(sport, (progress) => {
         // Update progress if provided
         if (progress.progress !== undefined && progress.progress !== null) {
           setUpdateProgress(prev => ({
@@ -1172,7 +1230,10 @@ export default function Dashboard() {
   };
 
   const handleOneButtonUpdate = async () => {
-    if (!confirm('Run complete refresh? This will:\n1. Collect latest NBA schedules\n2. Update all player data\n3. Generate fresh predictions with proper lines\n\nThis takes 3-5 minutes. Continue?')) {
+    const stepsDesc = sport === 'MLB'
+      ? '1. Collect schedules & game results\n2. Generate predictions\n'
+      : '1. Collect latest schedules\n2. Update player data\n3. Generate predictions\n';
+    if (!confirm(`Run complete refresh for ${sport}? This will:\n${stepsDesc}\nThis takes 3-5 minutes. Continue?`)) {
       return;
     }
 
@@ -1181,32 +1242,33 @@ export default function Dashboard() {
     setUpdateProgress({ message: 'Initializing...', progress: 0 });
 
     try {
-      // Step 1: Collect schedules
-      setUpdateStatus('📅 Step 1/4: Collecting schedules...');
-      setUpdateProgress({ message: 'Getting NBA schedules...', progress: 10 });
+      // Step 1: Collect schedules (and for MLB: results, predictions)
+      setUpdateStatus(`📅 Step 1: Collecting ${sport} schedules...`);
+      setUpdateProgress({ message: `Getting ${sport} schedules...`, progress: 10 });
 
-      // For now, manually run quick update which includes some schedule updates
-      await apiService.runQuickUpdate((progress) => {
+      await apiService.runQuickUpdate(sport, (progress) => {
         setUpdateProgress(prev => ({
           ...prev,
           message: progress.message || 'Processing schedules...',
-          progress: 10 + Math.min(progress.progress || 0, 20)
+          progress: 10 + Math.min(progress.progress || 0, 30)
         }));
       });
 
-      // Step 2: Collect players
-      setUpdateStatus('👥 Step 2/4: Updating players...');
-      setUpdateProgress({ message: 'Collecting player data...', progress: 35 });
-      await apiService.collectPlayers(sport, true, (progress) => {
+      // Step 2: Collect players (skip for MLB - players come from game results)
+      if (sport !== 'MLB') {
+        setUpdateStatus('👥 Step 2: Updating players...');
+        setUpdateProgress({ message: 'Collecting player data...', progress: 35 });
+        await apiService.collectPlayers(sport, true, (progress) => {
         setUpdateProgress(prev => ({
           ...prev,
           message: `Collecting players: ${progress.message || ''}`,
           progress: 35 + Math.min(progress.progress || 0, 20)
         }));
       });
+      }
 
       // Step 3: Run full update to get complete data
-      setUpdateStatus('🔄 Step 3/4: Running full data update...');
+      setUpdateStatus('🔄 Step 3: Running full data update...');
       setUpdateProgress({ message: 'Updating all data...', progress: 60 });
       await apiService.runFullUpdate(sport, (progress) => {
         setUpdateProgress(prev => ({
@@ -1217,11 +1279,13 @@ export default function Dashboard() {
       });
 
       // Step 4: Generate predictions
-      setUpdateStatus('🎯 Step 4/4: Generating predictions...');
+      setUpdateStatus('🎯 Step 4: Generating predictions...');
       setUpdateProgress({ message: 'Generating predictions...', progress: 85 });
 
       const statTypes = sport === 'NFL'
         ? ['passing_yards', 'rushing_yards', 'receiving_yards']
+        : sport === 'MLB'
+        ? ['hits', 'home_runs', 'total_bases', 'strikeouts']
         : ['points', 'rebounds', 'assists'];
 
       await apiService.generatePredictions(
@@ -1399,11 +1463,11 @@ export default function Dashboard() {
           </button>
           <button
             onClick={handleCollectPlayers}
-            disabled={collectingPlayers}
+            disabled={collectingPlayers || sport === 'MLB'}
             className="px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            title={`Collect all ${sport} players from API (takes 5-10 minutes)`}
+            title={sport === 'MLB' ? 'MLB players are created when collecting game results' : `Collect all ${sport} players from API (takes 5-10 minutes)`}
           >
-            {collectingPlayers ? 'Collecting Players...' : `Collect ${sport} Players`}
+            {collectingPlayers ? 'Collecting Players...' : sport === 'MLB' ? 'Collect Players (N/A)' : `Collect ${sport} Players`}
           </button>
           <button
             onClick={handleCollectGameResults}
@@ -1815,7 +1879,8 @@ export default function Dashboard() {
                           selectedDate,
                           12,
                           0.75,
-                          excludePlayerIds
+                          excludePlayerIds,
+                          sport
                         );
                         setSafeLongParlays(prev => {
                           const updated = [...prev];
@@ -1925,7 +1990,8 @@ export default function Dashboard() {
                         const newPlay = await apiService.refreshBuilderPlay(
                           selectedDate,
                           play.num_legs,
-                          excludePlayerIds
+                          excludePlayerIds,
+                          sport
                         );
                         setBuilderPlays(prev => {
                           const updated = [...prev];

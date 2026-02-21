@@ -72,7 +72,7 @@ def convert_br_to_nba_format(br_box_score: dict, home_team: Team, away_team: Tea
 
 
 def find_team_by_nba_id(db: Session, nba_team_id: int):
-    """Find team by NBA API team ID using abbreviation mapping."""
+    """Find team by NBA API team ID using abbreviation mapping. Filters by sport=NBA."""
     team_id_map = {
         1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN",
         1610612766: "CHA", 1610612741: "CHI", 1610612739: "CLE",
@@ -88,19 +88,26 @@ def find_team_by_nba_id(db: Session, nba_team_id: int):
     
     abbrev = team_id_map.get(nba_team_id)
     if abbrev:
-        return db.query(Team).filter(Team.abbreviation == abbrev).first()
+        return db.query(Team).filter(
+            Team.abbreviation == abbrev,
+            Team.sport == 'NBA'
+        ).first()
     return None
 
 
 def get_or_create_player(db: Session, nba_player_id: int, player_name: str):
-    """Get existing player or create a new one."""
-    player = db.query(Player).filter(Player.player_id == nba_player_id).first()
+    """Get existing player or create a new one. NBA players have sport='NBA'."""
+    player = db.query(Player).filter(
+        Player.player_id == nba_player_id,
+        Player.sport == 'NBA'
+    ).first()
     
     if not player:
         # Create new player (we'll update details later)
         player = Player(
             player_id=nba_player_id,
-            name=player_name
+            name=player_name,
+            sport='NBA'
         )
         db.add(player)
         db.flush()  # Flush to get the ID
@@ -131,22 +138,23 @@ def collect_game_for_date(db: Session, client: NBAAPIClient, game_date: date, se
             if not nba_game_id:
                 continue
             
-            # Check if game already exists
-            existing_game = db.query(Game).filter(
-                and_(
-                    Game.game_date == game_date,
-                    Game.home_team_id == find_team_by_nba_id(db, game_data.get('HOME_TEAM_ID')).team_id if game_data.get('HOME_TEAM_ID') else None,
-                    Game.away_team_id == find_team_by_nba_id(db, game_data.get('VISITOR_TEAM_ID')).team_id if game_data.get('VISITOR_TEAM_ID') else None
-                )
-            ).first()
-            
-            # Get team IDs
+            # Get team IDs first (needed for existing game check)
             home_team = find_team_by_nba_id(db, game_data.get('HOME_TEAM_ID'))
             away_team = find_team_by_nba_id(db, game_data.get('VISITOR_TEAM_ID'))
             
             if not home_team or not away_team:
                 print(f"  ⚠️  Skipping game {nba_game_id} - teams not found")
                 continue
+            
+            # Check if game already exists (filter by sport=NBA for independent data)
+            existing_game = db.query(Game).filter(
+                and_(
+                    Game.sport == 'NBA',
+                    Game.game_date == game_date,
+                    Game.home_team_id == home_team.team_id,
+                    Game.away_team_id == away_team.team_id
+                )
+            ).first()
             
             # Check game status - only process finished games
             game_status_id = game_data.get('GAME_STATUS_ID', 1)
@@ -206,6 +214,7 @@ def collect_game_for_date(db: Session, client: NBAAPIClient, game_date: date, se
                 game.game_status = "finished"
             else:
                 game = Game(
+                    sport='NBA',
                     game_date=game_date,
                     season_id=season.season_id,
                     home_team_id=home_team.team_id,
@@ -237,10 +246,16 @@ def collect_game_for_date(db: Session, client: NBAAPIClient, game_date: date, se
                     else:
                         # Basketball Reference format - find by name and team
                         team_abbrev = stat_data.get('TEAM_ABBREVIATION')
-                        team = db.query(Team).filter(Team.abbreviation == team_abbrev).first() if team_abbrev else None
+                        team = db.query(Team).filter(
+                            Team.abbreviation == team_abbrev,
+                            Team.sport == 'NBA'
+                        ).first() if team_abbrev else None
                         
-                        # Try to find player by name (exact match)
-                        player = db.query(Player).filter(Player.name == player_name).first()
+                        # Try to find player by name (exact match, NBA only)
+                        player = db.query(Player).filter(
+                            Player.name == player_name,
+                            Player.sport == 'NBA'
+                        ).first()
                         
                         if not player:
                             # If not found, we'll skip for now (could add fuzzy matching later)
@@ -260,7 +275,10 @@ def collect_game_for_date(db: Session, client: NBAAPIClient, game_date: date, se
                     
                     # Get team (player's team for this game)
                     team_abbrev = stat_data.get('TEAM_ABBREVIATION')
-                    team = db.query(Team).filter(Team.abbreviation == team_abbrev).first() if team_abbrev else None
+                    team = db.query(Team).filter(
+                        Team.abbreviation == team_abbrev,
+                        Team.sport == 'NBA'
+                    ).first() if team_abbrev else None
                     
                     # Determine opponent
                     opponent_team_id = away_team.team_id if team == home_team else home_team.team_id
@@ -290,8 +308,9 @@ def collect_game_for_date(db: Session, client: NBAAPIClient, game_date: date, se
                     else:
                         minutes_played = 0
                     
-                    # Create player game stat
+                    # Create player game stat - explicitly set sport=NBA
                     player_stat = PlayerGameStat(
+                        sport='NBA',
                         player_id=player.player_id,
                         game_id=game.game_id,
                         team_id=team.team_id if team else None,
@@ -362,8 +381,11 @@ def collect_previous_day_games(target_date: date = None):
     client = NBAAPIClient(delay=1.0)
     
     try:
-        # Get current season
-        season = db.query(Season).filter(Season.is_current == True).first()
+        # Get current season - filter by sport=NBA for independent NBA data
+        season = db.query(Season).filter(
+            Season.is_current == True,
+            Season.sport == 'NBA'
+        ).first()
         if not season:
             print("❌ No current season found. Please seed seasons first.")
             return
@@ -377,9 +399,13 @@ def collect_previous_day_games(target_date: date = None):
         print(f"✅ Games created: {games_created}")
         
         # Count total games and player stats
-        total_games = db.query(Game).filter(Game.game_date == target_date).count()
+        total_games = db.query(Game).filter(
+            Game.game_date == target_date,
+            Game.sport == 'NBA'
+        ).count()
         total_stats = db.query(PlayerGameStat).join(Game).filter(
-            Game.game_date == target_date
+            Game.game_date == target_date,
+            PlayerGameStat.sport == 'NBA'
         ).count()
         
         print(f"✅ Total games in database for {target_date}: {total_games}")
@@ -402,7 +428,10 @@ def collect_season_games(season_year: str, start_date: date = None, end_date: da
     client = NBAAPIClient(delay=1.0)
     
     try:
-        season = db.query(Season).filter(Season.season_year == season_year).first()
+        season = db.query(Season).filter(
+            Season.season_year == season_year,
+            Season.sport == 'NBA'
+        ).first()
         if not season:
             print(f"❌ Season {season_year} not found")
             return
