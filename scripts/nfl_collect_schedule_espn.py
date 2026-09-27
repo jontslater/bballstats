@@ -59,17 +59,17 @@ def save_games_to_db(db: Session, games: list, season: Season) -> dict:
                 continue
             
             game_date = game_data.get('game_date')
-            espn_game_id = game_data.get('espn_game_id')
+            external_game_id = game_data.get('espn_game_id')  # ESPN ID stored in external_game_id
             status = game_data.get('status', 'scheduled')
             home_score = game_data.get('home_score')
             away_score = game_data.get('away_score')
             
             # Check if schedule already exists
             existing = None
-            if espn_game_id:
+            if external_game_id:
                 existing = db.query(GameSchedule).filter(
                     GameSchedule.sport == 'NFL',
-                    GameSchedule.espn_game_id == espn_game_id
+                    GameSchedule.external_game_id == external_game_id
                 ).first()
             
             if not existing:
@@ -82,7 +82,7 @@ def save_games_to_db(db: Session, games: list, season: Season) -> dict:
             
             if existing:
                 # Update existing
-                existing.espn_game_id = espn_game_id or existing.espn_game_id
+                existing.external_game_id = external_game_id or existing.external_game_id
                 existing.status = status
                 updated += 1
             else:
@@ -93,7 +93,7 @@ def save_games_to_db(db: Session, games: list, season: Season) -> dict:
                     home_team_id=home_team.team_id,
                     away_team_id=away_team.team_id,
                     season_id=season.season_id,
-                    espn_game_id=espn_game_id,
+                    external_game_id=external_game_id,  # Use external_game_id for sport-agnostic storage
                     status=status
                 )
                 db.add(schedule)
