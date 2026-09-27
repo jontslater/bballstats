@@ -14,6 +14,7 @@ from app.models.game import Game
 from app.models.player import Player
 from app.models.season import Season
 from app.models.lineup import Lineup
+from app.services.factor_weighting import TimeWeightedCalculator
 
 
 class DistributionEngine:
@@ -234,11 +235,21 @@ class DistributionEngine:
         # Convert to numpy array
         values = np.array(stat_values)
         
-        # Calculate base statistics
-        base_mean = float(np.mean(values))
-        base_std = float(np.std(values, ddof=1))  # Sample standard deviation
+        # Calculate time-weighted statistics (recent games weighted more heavily)
+        # Get stat-specific decay rate
+        decay_rate = TimeWeightedCalculator.get_stat_specific_decay_rate(stat_type)
         
-        # Calculate percentiles
+        # Use time-weighted mean and std dev instead of simple mean/std
+        # This gives more weight to recent performance
+        base_mean = TimeWeightedCalculator.calculate_time_weighted_mean(values, decay_rate)
+        base_std = TimeWeightedCalculator.calculate_time_weighted_std(values, decay_rate)
+        
+        # If time-weighted std is too small (< 1.0), use a minimum based on mean
+        # This prevents overconfidence in low-variance stats
+        if base_std < 1.0 and base_mean > 0:
+            base_std = max(base_std, base_mean * 0.15)  # At least 15% coefficient of variation
+        
+        # Calculate percentiles (still use actual percentiles for distribution shape)
         percentiles = {
             10: float(np.percentile(values, 10)),
             20: float(np.percentile(values, 20)),
