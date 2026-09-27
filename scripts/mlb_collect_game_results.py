@@ -32,23 +32,50 @@ def find_team_by_abbrev(db: Session, abbrev: str):
     ).first()
 
 
-def get_or_create_mlb_player(db: Session, player_name: str, team: Team, position: str = None):
+def get_or_create_mlb_player(db: Session, player_name: str, team: Team, position: str = None, is_batter: bool = False, is_pitcher: bool = False):
+    """
+    Get or create MLB player by name and team.
+    
+    Args:
+        player_name: Player name
+        team: Team object
+        position: Specific position (e.g., 'C', 'P', 'OF')
+        is_batter: True if player has batting stats
+        is_pitcher: True if player has pitching stats
+    """
     player = db.query(Player).filter(
         Player.sport == 'MLB',
         Player.name == player_name
     ).first()
+    
     if not player:
+        # Determine position based on role if not provided
+        if not position:
+            if is_pitcher:
+                position = 'P'
+            elif is_batter:
+                position = 'DH'  # Default for batters without specific position
+            else:
+                position = 'P'  # Default fallback
+        
         player = Player(
             sport='MLB',
             name=player_name,
-            position=position or 'P',
+            position=position,
             current_team_id=team.team_id
         )
         db.add(player)
         db.flush()
     else:
+        # Update team if changed
         if player.current_team_id != team.team_id:
             player.current_team_id = team.team_id
+        
+        # Update position if we have better information
+        if position and player.position == 'P' and is_batter and not is_pitcher:
+            # Player was defaulted to P but is actually a batter
+            player.position = position if position != 'P' else 'DH'
+    
     return player
 
 
@@ -163,7 +190,17 @@ def collect_games_for_date(
                         if not team:
                             continue
                         opponent = away_team if team.team_id == home_team.team_id else home_team
-                        player = get_or_create_mlb_player(db, ps['player_name'], team)
+                        
+                        # Get or create player with proper position based on role
+                        is_batter = ps.get('is_batter', False)
+                        is_pitcher = ps.get('is_pitcher', False)
+                        position = ps.get('position')  # May be None
+                        player = get_or_create_mlb_player(
+                            db, ps['player_name'], team, 
+                            position=position, 
+                            is_batter=is_batter, 
+                            is_pitcher=is_pitcher
+                        )
 
                         existing_stat = db.query(PlayerGameStat).filter(
                             PlayerGameStat.sport == 'MLB',

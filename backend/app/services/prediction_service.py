@@ -235,7 +235,16 @@ class PredictionService:
         
         # FILTER: Skip players with very low historical minutes (deep bench players)
         # For NFL, lower threshold since snaps might not be tracked
-        min_historical_threshold = 5.0 if self.sport == 'NFL' else 12.0
+        # For MLB, use PA/IP thresholds instead of minutes
+        if self.sport == 'MLB':
+            # For MLB, minutes represent PA/IP depending on role
+            # Minimum: 2 PA for batters or 1 IP for pitchers per game on average
+            min_historical_threshold = 2.0
+        elif self.sport == 'NFL':
+            min_historical_threshold = 5.0
+        else:  # NBA
+            min_historical_threshold = 12.0
+            
         if game.game_status in ['scheduled', 'in_progress']:
             if historical_avg_minutes < min_historical_threshold:
                 return None  # Player rarely plays, unlikely to have betting lines
@@ -377,7 +386,14 @@ class PredictionService:
         # This filters out deep bench players who won't have betting lines
         # BUT: In high blowout risk games, bench players may get extended minutes, so lower threshold
         # For NFL, lower threshold since minutes/snaps tracking might not be as precise
-        min_minutes_threshold = 5.0 if self.sport == 'NFL' else (12 if (blowout_risk_high and blowout_risk_score >= 0.6 and not is_confirmed_starter) else 15)
+        # For MLB, use PA/IP thresholds
+        if self.sport == 'MLB':
+            # MLB: 2+ PA for batters or 1+ IP for pitchers
+            min_minutes_threshold = 2.0
+        elif self.sport == 'NFL':
+            min_minutes_threshold = 5.0
+        else:  # NBA
+            min_minutes_threshold = 12 if (blowout_risk_high and blowout_risk_score >= 0.6 and not is_confirmed_starter) else 15
         
         if game.game_status in ['scheduled', 'in_progress']:
             if projected_minutes < min_minutes_threshold:
