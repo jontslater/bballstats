@@ -256,14 +256,19 @@ class SuggestedBetsService(BaseSportService):
                     final_line = 10.0
             
             # MLB SANITY CHECK 1: Reject absurd 10.0 lines for low-value stats
-            # If MLB stat has generic 10.0 fallback (not from real data), skip it
+            # CRITICAL: 10.0 is the known NBA-style generic fallback that's inappropriate for MLB
+            # For hits/HR/total_bases, even 5.0 would be unusual - 10.0 is always junk data
+            # Windows testing: 36× total_bases@10.0 shipped with positive distribution_mean
+            # Fix: Skip line≈10.0 unconditionally for MLB low-value stats (ignore distribution_mean)
             if self.sport == 'MLB':
                 mlb_low_value_stats = ['hits', 'home_runs', 'total_bases', 'strikeouts', 'runs', 'rbis', 'stolen_bases']
                 if pred.stat_type in mlb_low_value_stats and abs(final_line - 10.0) < 0.01:
-                    # This is the generic fallback, not real data - skip this bet
-                    if not (pred.distribution_mean and pred.distribution_mean > 0):
-                        print(f"⚠️  Skipping MLB {pred.stat_type} with absurd 10.0 fallback for player {pred.player_id}")
-                        continue
+                    # 10.0 is ALWAYS the generic NBA fallback for these MLB stats - never a real line
+                    # Even if distribution_mean exists, line=10.0 means the prediction system used
+                    # the generic fallback instead of sport-specific logic
+                    print(f"⚠️  Skipping MLB {pred.stat_type} with bogus 10.0 fallback (player {pred.player_id}, line={final_line:.1f})")
+                    # Self-check: This catches total_bases@10.0 even when distribution_mean > 0
+                    continue
             
             # MLB SANITY CHECK 2: Sport-specific maximum reasonable values
             # These catch prediction bugs before the 5x recent validation
