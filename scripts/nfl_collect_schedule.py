@@ -162,7 +162,7 @@ def collect_week_schedule(db: Session, scraper: ProFootballReferenceScraper, yea
             if nfl_game_id:
                 existing = db.query(GameSchedule).filter(
                     GameSchedule.sport == 'NFL',
-                    GameSchedule.nba_game_id == nfl_game_id
+                    GameSchedule.external_game_id == nfl_game_id
                 ).first()
             
             if not existing:
@@ -177,7 +177,8 @@ def collect_week_schedule(db: Session, scraper: ProFootballReferenceScraper, yea
             if existing:
                 # Update existing
                 existing.game_time = game_time
-                existing.nba_game_id = nfl_game_id or existing.nba_game_id
+                existing.external_game_id = nfl_game_id or existing.external_game_id
+                existing.nba_game_id = nfl_game_id or existing.nba_game_id  # Keep for backward compat
                 updated += 1
             else:
                 # Create new
@@ -188,7 +189,8 @@ def collect_week_schedule(db: Session, scraper: ProFootballReferenceScraper, yea
                     away_team_id=away_team.team_id,
                     game_time=game_time,
                     season_id=season.season_id,
-                    nba_game_id=nfl_game_id,
+                    external_game_id=nfl_game_id,
+                    nba_game_id=nfl_game_id,  # Keep for backward compat during transition
                     status='scheduled'
                 )
                 db.add(schedule)

@@ -18,7 +18,8 @@ class GameSchedule(Base):
     game_time = Column(DateTime(timezone=True))
     season_id = Column(Integer, ForeignKey("seasons.season_id"), nullable=False)
     status = Column(String(20), default="scheduled")  # scheduled, postponed, cancelled
-    nba_game_id = Column(String(20), nullable=True, index=True)  # NBA/NFL API game ID (not unique across sports)
+    nba_game_id = Column(String(20), nullable=True, index=True)  # DEPRECATED: Use external_game_id instead
+    external_game_id = Column(String(50), nullable=True, index=True)  # Sport-agnostic external game ID (ESPN, NBA.com, etc.)
     game_id = Column(Integer, ForeignKey("games.game_id"), nullable=True)  # link to actual game when played
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

@@ -172,6 +172,18 @@ class SuggestedBetsService(BaseSportService):
                         'receiving_tds': 0.5
                     }
                     base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else nfl_defaults.get(pred.stat_type, 10.0)
+                elif self.sport == 'MLB':
+                    # MLB defaults by stat type - much lower than NBA/NFL
+                    mlb_defaults = {
+                        'hits': 1.0,
+                        'home_runs': 0.5,
+                        'total_bases': 1.5,
+                        'rbis': 1.0,
+                        'strikeouts': 5.0,  # For pitchers
+                        'runs': 0.5,
+                        'stolen_bases': 0.3
+                    }
+                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else mlb_defaults.get(pred.stat_type, 1.0)
                 else:  # NBA
                     base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else 10.0
 
@@ -228,12 +240,38 @@ class SuggestedBetsService(BaseSportService):
             last_3_games = historical_data['games']
             lineup_context = historical_data['lineup_context']
             
-            # Ensure line is positive and reasonable
-            final_line = round(float(line) if line is not None and line > 0 else 10.0, 1)
-            if final_line <= 0:
-                final_line = 10.0  # Fallback to reasonable default
+            # Ensure line is positive and reasonable (sport-specific defaults)
+            if self.sport == 'MLB':
+                default_line = 1.0  # Conservative MLB default
+            elif self.sport == 'NFL':
+                default_line = 10.0  # NFL default
+            else:  # NBA
+                default_line = 10.0  # NBA default
             
-            # VALIDATION: Only filter extreme outliers that are clearly data errors
+            final_line = round(float(line) if line is not None and line > 0 else default_line, 1)
+            if final_line <= 0:
+                final_line = default_line  # Fallback to sport-appropriate default
+            
+            # VALIDATION: Filter extreme outliers and apply sport-specific sanity checks
+            
+            # MLB Sanity Maximums (realistic exceptional game limits)
+            if self.sport == 'MLB':
+                mlb_sanity_max = {
+                    'hits': 6.0,        # 6 hits = exceptional game
+                    'home_runs': 4.0,   # 4 HR = historically rare
+                    'total_bases': 18.0, # 18 TB = exceptional (e.g., 4 HR + 2 singles)
+                    'rbis': 10.0,       # 10 RBI = very rare
+                    'runs': 5.0,        # 5 runs = exceptional
+                    'stolen_bases': 4.0, # 4 SB = exceptional
+                    'strikeouts': 20.0  # For pitchers: 20 K = dominant
+                }
+                
+                max_allowed = mlb_sanity_max.get(pred.stat_type)
+                if max_allowed and final_line > max_allowed:
+                    print(f"⚠️  MLB SANITY: {player.name} {pred.stat_type} line {final_line} exceeds MLB maximum ({max_allowed}). Skipping.")
+                    continue
+            
+            # General validation: Only filter extreme outliers that are clearly data errors
             # This should be very lenient - only catch obvious mistakes (e.g., 5x+ recent max)
             # Most predictions are valid even if they differ from recent performance
             if last_3_games and len(last_3_games) > 0:
@@ -862,6 +900,17 @@ class SuggestedBetsService(BaseSportService):
             if safe_line is None or safe_line <= 0:
                 continue  # Skip bets with invalid lines
             
+            # MLB Sanity Checks
+            if self.sport == 'MLB':
+                mlb_sanity_max = {
+                    'hits': 6.0, 'home_runs': 4.0, 'total_bases': 18.0,
+                    'rbis': 10.0, 'runs': 5.0, 'stolen_bases': 4.0, 'strikeouts': 20.0
+                }
+                max_allowed = mlb_sanity_max.get(pred.stat_type)
+                if max_allowed and safe_line > max_allowed:
+                    print(f"⚠️  MLB SANITY: {player.name} {pred.stat_type} line {safe_line} exceeds maximum ({max_allowed}). Skipping.")
+                    continue
+            
             # VALIDATION: Only filter extreme outliers that are clearly data errors
             # This should be very lenient - only catch obvious mistakes (e.g., 5x+ recent max)
             if last_3_games and len(last_3_games) > 0:
@@ -1081,6 +1130,17 @@ class SuggestedBetsService(BaseSportService):
                 bet_type = 'standard'
             else:
                 continue  # Shouldn't happen, but safety check
+            
+            # MLB Sanity Checks
+            if self.sport == 'MLB':
+                mlb_sanity_max = {
+                    'hits': 6.0, 'home_runs': 4.0, 'total_bases': 18.0,
+                    'rbis': 10.0, 'runs': 5.0, 'stolen_bases': 4.0, 'strikeouts': 20.0
+                }
+                max_allowed = mlb_sanity_max.get(pred.stat_type)
+                if max_allowed and line > max_allowed:
+                    print(f"⚠️  MLB SANITY: {player.name} {pred.stat_type} line {line} exceeds maximum ({max_allowed}). Skipping.")
+                    continue
             
             team = teams_dict.get(player.current_team_id) if player.current_team_id else None
 
