@@ -21,8 +21,100 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import GameSchedule, Team, Season
 
+
+def fetch_nba_schedule_espn(year: int = 2025):
+    """
+    Fetch NBA schedule from ESPN API as a fallback.
+    ESPN API endpoint for NBA schedule: https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard
+    """
+    print("📅 Fetching NBA schedule from ESPN API (fallback)...")
+    
+    games = []
+    
+    try:
+        # ESPN scoreboard API - fetch date range
+        # We'll try to get games for the season by iterating through dates
+        # For a full season approach, we'd need to call this for each date or use their season calendar
+        
+        # Try the calendar endpoint first for full season
+        calendar_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={year}"
+        response = requests.get(calendar_url, timeout=30)
+        
+        if response.status_code == 403:
+            print("⚠️  ESPN API returned 403 Forbidden - rate limited or blocked")
+            return []
+        
+        response.raise_for_status()
+        data = response.json()
+        
+        # Parse events (games)
+        for event in data.get('events', []):
+            try:
+                # Get game date
+                date_str = event.get('date', '')  # ISO format: "2025-10-22T23:00Z"
+                if not date_str:
+                    continue
+                
+                game_date = datetime.fromisoformat(date_str.replace('Z', '+00:00')).date()
+                
+                # Get teams
+                competitions = event.get('competitions', [])
+                if not competitions:
+                    continue
+                
+                competition = competitions[0]
+                competitors = competition.get('competitors', [])
+                
+                if len(competitors) < 2:
+                    continue
+                
+                # ESPN format: competitors[0] is home, competitors[1] is away (or vice versa based on 'homeAway' field)
+                home_team = None
+                away_team = None
+                
+                for competitor in competitors:
+                    team_abbrev = competitor.get('team', {}).get('abbreviation', '')
+                    home_away = competitor.get('homeAway', '')
+                    
+                    if home_away == 'home':
+                        home_team = team_abbrev
+                    elif home_away == 'away':
+                        away_team = team_abbrev
+                
+                if not home_team or not away_team:
+                    continue
+                
+                # Get ESPN game ID
+                espn_game_id = event.get('id', '')
+                
+                games.append({
+                    'game_date': game_date,
+                    'home_team': home_team,
+                    'away_team': away_team,
+                    'nba_game_id': espn_game_id,
+                    'status': 'scheduled'
+                })
+                
+            except Exception as e:
+                print(f"⚠️ Error parsing ESPN game: {e}")
+                continue
+        
+        print(f"✅ ESPN: Found {len(games)} games")
+        return games
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            print(f"❌ ESPN API blocked with 403 - rate limited")
+        else:
+            print(f"❌ ESPN API error: {e}")
+        return []
+    except Exception as e:
+        print(f"❌ Error fetching ESPN schedule: {e}")
+        return []
+
+
 def fetch_nba_schedule(year: int = 2025):
-    """Fetch NBA schedule from NBA CDN API."""
+    """Fetch NBA schedule from NBA CDN API with ESPN fallback."""
     print("📅 Fetching NBA schedule from NBA CDN API...")
 
     url = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
@@ -47,7 +139,7 @@ def fetch_nba_schedule(year: int = 2025):
         try:
             response = requests.get(url, headers=headers, timeout=30)
             
-            # Handle 403 specifically
+            # Handle 403 specifically - try ESPN fallback
             if response.status_code == 403:
                 print(f"⚠️  HTTP 403 Forbidden from NBA CDN (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
@@ -56,54 +148,54 @@ def fetch_nba_schedule(year: int = 2025):
                     time.sleep(wait_time)
                     continue
                 else:
-                    print("❌ All retries exhausted. NBA CDN may be blocking requests.")
-                    print("💡 You may need to run this from a different network or use a VPN.")
-                    return []
+                    print("❌ All retries exhausted. Trying ESPN fallback...")
+                    return fetch_nba_schedule_espn(year)
             
             response.raise_for_status()
             data = response.json()
-        games = []
+            
+            games = []
 
-        # Parse the schedule data
-        for game_date_data in data.get('leagueSchedule', {}).get('gameDates', []):
-            try:
-                # Parse game date - format: "10/02/2025 00:00:00"
-                date_str = game_date_data.get('gameDate', '').split(' ')[0]  # Get "10/02/2025"
-                if not date_str:
-                    continue
-
-                # Convert MM/DD/YYYY to YYYY-MM-DD
-                month, day, year_str = date_str.split('/')
-                game_date = date(int(year_str), int(month), int(day))
-
-                # Get games for this date
-                for game in game_date_data.get('games', []):
-                    try:
-                        # Get team codes
-                        home_team_code = game.get('homeTeam', {}).get('teamTricode', '')
-                        away_team_code = game.get('awayTeam', {}).get('teamTricode', '')
-
-                        if not home_team_code or not away_team_code:
-                            continue
-
-                        # Get game ID
-                        game_id = str(game.get('gameId', ''))
-
-                        games.append({
-                            'game_date': game_date,
-                            'home_team': home_team_code,
-                            'away_team': away_team_code,
-                            'nba_game_id': game_id,
-                            'status': 'scheduled'
-                        })
-
-                    except Exception as e:
-                        print(f"⚠️ Error parsing individual game: {e}")
+            # Parse the schedule data
+            for game_date_data in data.get('leagueSchedule', {}).get('gameDates', []):
+                try:
+                    # Parse game date - format: "10/02/2025 00:00:00"
+                    date_str = game_date_data.get('gameDate', '').split(' ')[0]  # Get "10/02/2025"
+                    if not date_str:
                         continue
 
-            except Exception as e:
-                print(f"⚠️ Error parsing game date: {e}")
-                continue
+                    # Convert MM/DD/YYYY to YYYY-MM-DD
+                    month, day, year_str = date_str.split('/')
+                    game_date = date(int(year_str), int(month), int(day))
+
+                    # Get games for this date
+                    for game in game_date_data.get('games', []):
+                        try:
+                            # Get team codes
+                            home_team_code = game.get('homeTeam', {}).get('teamTricode', '')
+                            away_team_code = game.get('awayTeam', {}).get('teamTricode', '')
+
+                            if not home_team_code or not away_team_code:
+                                continue
+
+                            # Get game ID
+                            game_id = str(game.get('gameId', ''))
+
+                            games.append({
+                                'game_date': game_date,
+                                'home_team': home_team_code,
+                                'away_team': away_team_code,
+                                'nba_game_id': game_id,
+                                'status': 'scheduled'
+                            })
+
+                        except Exception as e:
+                            print(f"⚠️ Error parsing individual game: {e}")
+                            continue
+
+                except Exception as e:
+                    print(f"⚠️ Error parsing game date: {e}")
+                    continue
 
             print(f"✅ Found {len(games)} games")
             return games
@@ -115,19 +207,23 @@ def fetch_nba_schedule(year: int = 2025):
                 print(f"⏳ Waiting {wait_time}s before retry...")
                 time.sleep(wait_time)
             else:
-                print(f"❌ Error fetching schedule after {max_retries} attempts: {e}")
-                return []
+                print(f"❌ Error fetching schedule after {max_retries} attempts. Trying ESPN fallback...")
+                return fetch_nba_schedule_espn(year)
         except json.JSONDecodeError as e:
             print(f"❌ Error parsing JSON response: {e}")
             print(f"Response content preview: {response.text[:200]}")
-            return []
+            print("⚠️  Trying ESPN fallback...")
+            return fetch_nba_schedule_espn(year)
         except Exception as e:
             print(f"❌ Unexpected error: {e}")
             import traceback
             traceback.print_exc()
-            return []
+            print("⚠️  Trying ESPN fallback...")
+            return fetch_nba_schedule_espn(year)
     
-    return []
+    # If all retries failed
+    print("⚠️  All attempts failed. Trying ESPN fallback...")
+    return fetch_nba_schedule_espn(year)
 
 def save_games_to_db(games):
     """Save games to database."""

@@ -81,7 +81,7 @@ def add_recent_games():
                         game_date=game_data['date'],
                         home_team_id=home_team.team_id,
                         away_team_id=away_team.team_id,
-                        espn_game_id=game_data['espn_id'],
+                        nba_game_id=game_data['espn_id'],  # Use nba_game_id field (stores ESPN ID for compatibility)
                         status='scheduled'  # Will be updated when results are collected
                     )
 

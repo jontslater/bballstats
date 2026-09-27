@@ -119,7 +119,7 @@ def save_games_to_db(games):
                         game_date=game['game_date'],
                         home_team_id=home_team.team_id,
                         away_team_id=away_team.team_id,
-                        espn_game_id=game['espn_game_id'],
+                        nba_game_id=game['espn_game_id'],  # Use nba_game_id field (stores ESPN ID for compatibility)
                         status='scheduled'
                     )
 
