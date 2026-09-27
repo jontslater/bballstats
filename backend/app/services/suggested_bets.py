@@ -172,6 +172,18 @@ class SuggestedBetsService(BaseSportService):
                         'receiving_tds': 0.5
                     }
                     base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else nfl_defaults.get(pred.stat_type, 10.0)
+                elif self.sport == 'MLB':
+                    # MLB defaults by stat type (realistic MLB player performance)
+                    mlb_defaults = {
+                        'hits': 1.0,
+                        'home_runs': 0.5,
+                        'total_bases': 1.5,
+                        'strikeouts': 1.0,
+                        'runs': 0.5,
+                        'rbis': 0.5,
+                        'stolen_bases': 0.2
+                    }
+                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else mlb_defaults.get(pred.stat_type, 1.0)
                 else:  # NBA
                     base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else 10.0
 
@@ -231,9 +243,29 @@ class SuggestedBetsService(BaseSportService):
             # Ensure line is positive and reasonable
             final_line = round(float(line) if line is not None and line > 0 else 10.0, 1)
             if final_line <= 0:
-                final_line = 10.0  # Fallback to reasonable default
+                # Use sport-specific defaults instead of generic 10.0
+                if self.sport == 'MLB':
+                    mlb_fallback_defaults = {
+                        'hits': 1.0, 'home_runs': 0.5, 'total_bases': 1.5,
+                        'strikeouts': 1.0, 'runs': 0.5, 'rbis': 0.5, 'stolen_bases': 0.2
+                    }
+                    final_line = mlb_fallback_defaults.get(pred.stat_type, 1.0)
+                elif self.sport == 'NFL':
+                    final_line = 10.0  # NFL stats are typically higher
+                else:  # NBA
+                    final_line = 10.0
             
-            # ADDITIONAL SANITY CHECKS: Sport-specific maximum reasonable values
+            # MLB SANITY CHECK 1: Reject absurd 10.0 lines for low-value stats
+            # If MLB stat has generic 10.0 fallback (not from real data), skip it
+            if self.sport == 'MLB':
+                mlb_low_value_stats = ['hits', 'home_runs', 'total_bases', 'strikeouts', 'runs', 'rbis', 'stolen_bases']
+                if pred.stat_type in mlb_low_value_stats and abs(final_line - 10.0) < 0.01:
+                    # This is the generic fallback, not real data - skip this bet
+                    if not (pred.distribution_mean and pred.distribution_mean > 0):
+                        print(f"⚠️  Skipping MLB {pred.stat_type} with absurd 10.0 fallback for player {pred.player_id}")
+                        continue
+            
+            # MLB SANITY CHECK 2: Sport-specific maximum reasonable values
             # These catch prediction bugs before the 5x recent validation
             if self.sport == 'MLB':
                 # MLB stats have known reasonable maximums
