@@ -45,8 +45,19 @@ class ProFootballReferenceScraper:
         self.delay = delay
         self.last_request_time = 0
         self.session = requests.Session()
+        # Enhanced headers to avoid 403 blocks
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
         })
         # Disable SSL verification to work around certificate issues
         self.session.verify = False
@@ -65,18 +76,44 @@ class ProFootballReferenceScraper:
         self.last_request_time = time.time()
     
     def _get_page(self, url: str, retries: int = 3) -> Optional[BeautifulSoup]:
-        """Fetch and parse a page."""
+        """Fetch and parse a page with exponential backoff on failures."""
         self._rate_limit()
         
         for attempt in range(retries):
             try:
-                response = self.session.get(url, timeout=10)
+                response = self.session.get(url, timeout=15)
+                
+                # Handle 403 specifically with more helpful error message
+                if response.status_code == 403:
+                    print(f"  ⚠️  HTTP 403 Forbidden from {url}")
+                    if attempt < retries - 1:
+                        # Exponential backoff: 4s, 8s, 16s
+                        wait_time = 4 * (2 ** attempt)
+                        print(f"  ⏳ Waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"  ❌ All retries exhausted. PFR may be blocking requests.")
+                        print(f"  💡 Consider using ESPN API as alternative source.")
+                        return None
+                
                 response.raise_for_status()
                 return BeautifulSoup(response.content, 'html.parser')
+                
+            except requests.exceptions.Timeout as e:
+                if attempt < retries - 1:
+                    wait_time = 4 * (2 ** attempt)
+                    print(f"  ⏳ Timeout - waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                    time.sleep(wait_time)
+                else:
+                    print(f"  ❌ Timeout error fetching {url}: {e}")
+                    return None
+                    
             except Exception as e:
                 if attempt < retries - 1:
-                    print(f"  ⚠️  Retry {attempt + 1}/{retries} for {url}")
-                    time.sleep(2)
+                    wait_time = 4 * (2 ** attempt)
+                    print(f"  ⚠️  Error - waiting {wait_time}s before retry {attempt + 1}/{retries}: {e}")
+                    time.sleep(wait_time)
                 else:
                     print(f"  ❌ Error fetching {url}: {e}")
                     return None

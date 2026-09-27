@@ -8,6 +8,7 @@ import sys
 import os
 import requests
 import json
+import time
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -26,11 +27,41 @@ def fetch_nba_schedule(year: int = 2025):
 
     url = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
 
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
+    # Enhanced headers to avoid 403 blocks
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none'
+    }
 
-        data = response.json()
+    # Retry with exponential backoff
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            
+            # Handle 403 specifically
+            if response.status_code == 403:
+                print(f"⚠️  HTTP 403 Forbidden from NBA CDN (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    wait_time = 4 * (2 ** attempt)
+                    print(f"⏳ Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print("❌ All retries exhausted. NBA CDN may be blocking requests.")
+                    print("💡 You may need to run this from a different network or use a VPN.")
+                    return []
+            
+            response.raise_for_status()
+            data = response.json()
         games = []
 
         # Parse the schedule data
@@ -74,12 +105,29 @@ def fetch_nba_schedule(year: int = 2025):
                 print(f"⚠️ Error parsing game date: {e}")
                 continue
 
-        print(f"✅ Found {len(games)} games")
-        return games
-
-    except Exception as e:
-        print(f"❌ Error fetching schedule: {e}")
-        return []
+            print(f"✅ Found {len(games)} games")
+            return games
+            
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                wait_time = 4 * (2 ** attempt)
+                print(f"⚠️  Request error (attempt {attempt + 1}/{max_retries}): {e}")
+                print(f"⏳ Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+            else:
+                print(f"❌ Error fetching schedule after {max_retries} attempts: {e}")
+                return []
+        except json.JSONDecodeError as e:
+            print(f"❌ Error parsing JSON response: {e}")
+            print(f"Response content preview: {response.text[:200]}")
+            return []
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    return []
 
 def save_games_to_db(games):
     """Save games to database."""
