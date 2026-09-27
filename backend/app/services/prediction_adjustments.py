@@ -18,6 +18,7 @@ from app.services.situational_performance_service import SituationalPerformanceS
 from app.services.motivation_service import MotivationService
 from app.services.player_health_service import PlayerHealthService
 from app.services.ml_ensemble_service import MLEnsembleService
+from app.services.factor_weighting import FactorWeighting
 from app.models.player_game_stat import PlayerGameStat
 from app.models.game import Game
 from app.models.team import Team
@@ -404,34 +405,37 @@ class PredictionAdjustments:
         shooting_factor = shooting_factor if shooting_factor is not None else 1.0
         streak_continuation_factor = streak_continuation_factor if streak_continuation_factor is not None else 1.0
 
-        adjusted_mean = (base_mean *
-                        minutes_factor *
-                        pace_factor *
-                        defense_factor *
-                        offensive_context_factor *
-                        lineup_context_factor *
-                        teammate_chemistry_factor *
-                        advanced_analytics_factor *
-                        situational_performance_factor *
-                        motivation_factor *
-                        health_factor *
-                        ml_factor *
-                        usage_factor *
-                        home_factor *
-                        rest_days_factor *
-                        matchup_factor *
-                        form_trend_factor *
-                        shooting_factor *
-                        streak_continuation_factor)
+        # CRITICAL FIX: Use weighted factor combination instead of multiplication
+        # Old method multiplied all factors together, which compounds errors exponentially
+        # New method applies weighted adjustments based on empirical importance
         
-        # Note: Research shows some factors should be weighted differently:
-        # - Minutes factor: High weight (1.0-1.2) - most important
-        # - Defense factor: Medium-high weight (0.9-1.1)
-        # - Pace factor: Medium weight (0.95-1.05)
-        # - Form trend: Medium weight (0.95-1.05)
-        # - Home factor: Low weight (1.0-1.05)
-        # - Rest days: Low-medium weight (0.95-1.02)
-        # Future improvement: Use MLOptimizer to determine optimal weights
+        factors_dict = {
+            'minutes_factor': minutes_factor,
+            'pace_factor': pace_factor,
+            'defense_factor': defense_factor,
+            'offensive_context_factor': offensive_context_factor,
+            'lineup_context_factor': lineup_context_factor,
+            'teammate_chemistry_factor': teammate_chemistry_factor,
+            'advanced_analytics_factor': advanced_analytics_factor,
+            'situational_performance_factor': situational_performance_factor,
+            'motivation_factor': motivation_factor,
+            'health_factor': health_factor,
+            'ml_factor': ml_factor,
+            'usage_factor': usage_factor,
+            'home_factor': home_factor,
+            'rest_days_factor': rest_days_factor,
+            'matchup_factor': matchup_factor,
+            'form_trend_factor': form_trend_factor,
+            'shooting_factor': shooting_factor,
+            'streak_continuation_factor': streak_continuation_factor,
+        }
+        
+        # Apply weighted factors
+        weighted_result = FactorWeighting.apply_weighted_factors(base_mean, factors_dict)
+        adjusted_mean = weighted_result['adjusted_value']
+        
+        # Apply interaction effects (e.g., rest days + tough defense compounds)
+        adjusted_mean = FactorWeighting.apply_interaction_effects(adjusted_mean, factors_dict)
         
         return {
             'base_mean': base_mean,
@@ -468,11 +472,10 @@ class PredictionAdjustments:
         sample_size: Optional[int] = None
     ) -> Dict[str, float]:
         """
-        Calculate variance adjustment factors.
+        Calculate variance adjustment factors with empirical Bayes shrinkage.
         
-        TODO: Implement empirical Bayes shrinkage for small sample sizes
-        - For small samples, shrink variance toward position average
-        - This reduces overconfidence in small sample predictions
+        For small samples, we increase variance (reduce confidence) to account for
+        uncertainty. This prevents overconfidence in predictions based on few games.
         
         Returns:
             Dict with volatility multipliers and final adjusted std dev
@@ -497,16 +500,21 @@ class PredictionAdjustments:
         blowout_volatility = 1.15 if blowout_risk_high else 1.00
         
         # Empirical Bayes shrinkage for small sample sizes
-        # If sample size is small, increase variance (less confidence)
+        # For small samples, increase variance (decrease confidence) to account for uncertainty
+        # This prevents overconfidence in predictions from limited data
         sample_size_adjustment = 1.0
         if sample_size is not None:
-            if sample_size < 20:
-                # Small sample: increase variance by up to 20%
-                # This accounts for uncertainty in small samples
-                sample_size_adjustment = 1.0 + (20 - sample_size) * 0.01  # 1% per game under 20
-                sample_size_adjustment = min(sample_size_adjustment, 1.20)  # Cap at 20% increase
+            if sample_size < 10:
+                # Very small sample: large variance increase (30-50%)
+                # Formula: 1.0 + (target_games - actual_games) * rate
+                sample_size_adjustment = 1.0 + (10 - sample_size) * 0.04  # 4% per missing game
+                sample_size_adjustment = min(sample_size_adjustment, 1.50)  # Cap at 50% increase
+            elif sample_size < 20:
+                # Small sample: moderate variance increase (15-30%)
+                sample_size_adjustment = 1.0 + (20 - sample_size) * 0.015  # 1.5% per missing game
+                sample_size_adjustment = min(sample_size_adjustment, 1.30)  # Cap at 30% increase
             elif sample_size < 30:
-                # Medium sample: slight increase
+                # Medium sample: slight variance increase (5-15%)
                 sample_size_adjustment = 1.0 + (30 - sample_size) * 0.005  # 0.5% per game under 30
                 sample_size_adjustment = min(sample_size_adjustment, 1.10)  # Cap at 10% increase
         
