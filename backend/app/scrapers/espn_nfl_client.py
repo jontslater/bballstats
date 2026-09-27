@@ -1,227 +1,243 @@
 """
 ESPN NFL API Client
 
-Provides NFL schedule and game data via ESPN's public API.
-Primary data source for NFL schedules to avoid HTTP 403 from Pro Football Reference.
+Uses ESPN's public NFL API for schedule and game data.
+This is a more reliable alternative to Pro Football Reference scraping.
 """
-
 import requests
-from datetime import date, datetime
-from typing import List, Dict, Optional
 import time
+from typing import List, Dict, Optional
+from datetime import date, datetime, timedelta
 
 
 class ESPNNFLClient:
     """Client for ESPN NFL API."""
-
+    
     BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl"
+    
+    # ESPN team ID to abbreviation mapping
+    TEAM_ABBREV_MAP = {
+        '1': 'ATL', '2': 'BUF', '3': 'CHI', '4': 'CIN', '5': 'CLE',
+        '6': 'DAL', '7': 'DEN', '8': 'DET', '9': 'GB', '10': 'TEN',
+        '11': 'IND', '12': 'KC', '13': 'LV', '14': 'LAR', '15': 'MIA',
+        '16': 'MIN', '17': 'NE', '18': 'NO', '19': 'NYG', '20': 'NYJ',
+        '21': 'PHI', '22': 'ARI', '23': 'PIT', '24': 'LAC', '25': 'SF',
+        '26': 'SEA', '27': 'TB', '28': 'WAS', '29': 'CAR', '30': 'JAX',
+        '33': 'BAL', '34': 'HOU'
+    }
     
     def __init__(self, delay: float = 0.5):
         """
         Initialize ESPN NFL client.
         
         Args:
-            delay: Seconds to wait between API calls (rate limiting)
+            delay: Seconds to wait between requests (ESPN is more lenient than PFR)
         """
         self.delay = delay
-        self.last_call_time = 0
+        self.last_request_time = 0
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9'
         })
-
+    
     def _rate_limit(self):
-        """Simple rate limiting to be respectful to ESPN's API."""
+        """Enforce rate limiting between requests."""
         current_time = time.time()
-        time_since_last = current_time - self.last_call_time
+        time_since_last = current_time - self.last_request_time
+        
         if time_since_last < self.delay:
             time.sleep(self.delay - time_since_last)
-        self.last_call_time = time.time()
-
-    def get_scoreboard(self, game_date: Optional[date] = None) -> Dict:
-        """
-        Get NFL scoreboard for a specific date.
         
-        Args:
-            game_date: Date to get scoreboard for (defaults to today)
-            
-        Returns:
-            Dict containing scoreboard data
-        """
+        self.last_request_time = time.time()
+    
+    def _get_json(self, url: str, retries: int = 3) -> Optional[Dict]:
+        """Fetch JSON data with exponential backoff."""
         self._rate_limit()
         
+        for attempt in range(retries):
+            try:
+                response = self.session.get(url, timeout=15)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.HTTPError as e:
+                if response.status_code == 403:
+                    print(f"  ⚠️  HTTP 403 from ESPN API")
+                    if attempt < retries - 1:
+                        wait_time = 4 * (2 ** attempt)
+                        print(f"  ⏳ Waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"  ❌ ESPN API access blocked after {retries} retries")
+                        return None
+                elif attempt < retries - 1:
+                    wait_time = 2 * (2 ** attempt)
+                    time.sleep(wait_time)
+                else:
+                    print(f"  ❌ HTTP error from {url}: {e}")
+                    return None
+            except Exception as e:
+                if attempt < retries - 1:
+                    time.sleep(2)
+                else:
+                    print(f"  ❌ Error fetching {url}: {e}")
+                    return None
+        
+        return None
+    
+    def get_team_abbrev(self, espn_team_id: str) -> Optional[str]:
+        """Convert ESPN team ID to our abbreviation."""
+        return self.TEAM_ABBREV_MAP.get(str(espn_team_id))
+    
+    def get_scoreboard(self, season_year: int = None, week: int = None, dates: str = None) -> List[Dict]:
+        """
+        Get NFL scoreboard/schedule from ESPN.
+        
+        Args:
+            season_year: Season year (e.g., 2024)
+            week: Week number (1-22)
+            dates: Date string YYYYMMDD or date range YYYYMMDD-YYYYMMDD
+        
+        Returns:
+            List of game dictionaries
+        """
         url = f"{self.BASE_URL}/scoreboard"
         params = {}
-        if game_date:
-            params['dates'] = game_date.strftime('%Y%m%d')
         
-        try:
-            response = self.session.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            print(f"⚠️ ESPN API error: {e}")
-            return {}
-
-    def get_week_schedule(self, season: int, week: int, season_type: int = 2) -> List[Dict]:
-        """
-        Get NFL schedule for a specific week.
+        if season_year:
+            params['seasontype'] = 2  # Regular season (2) or playoffs (3)
+        if week:
+            params['week'] = week
+        if dates:
+            params['dates'] = dates
         
-        Args:
-            season: Year (e.g., 2024, 2025)
-            week: Week number (1-18 for regular season, 19-22 for playoffs)
-            season_type: 1=preseason, 2=regular season, 3=playoffs, 4=pro bowl
-            
-        Returns:
-            List of game dictionaries with standardized fields
-        """
-        self._rate_limit()
+        if params:
+            query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
+            url = f"{url}?{query_string}"
         
-        url = f"{self.BASE_URL}/scoreboard"
-        params = {
-            'seasontype': season_type,
-            'week': week,
-            'season': season
-        }
-        
-        try:
-            response = self.session.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            data = response.json()
-            
-            games = []
-            for event in data.get('events', []):
-                game = self._parse_event(event)
-                if game:
-                    games.append(game)
-            
-            return games
-            
-        except requests.RequestException as e:
-            print(f"⚠️ ESPN API error for week {week}: {e}")
+        data = self._get_json(url)
+        if not data:
             return []
-
-    def get_season_schedule(self, season: int, season_type: int = 2) -> List[Dict]:
+        
+        games = []
+        events = data.get('events', [])
+        
+        for event in events:
+            try:
+                # Get game info
+                game_id = event.get('id')
+                game_date_str = event.get('date')  # ISO format
+                game_status = event.get('status', {}).get('type', {}).get('name', 'scheduled')
+                
+                # Parse date
+                if game_date_str:
+                    game_date = datetime.fromisoformat(game_date_str.replace('Z', '+00:00')).date()
+                else:
+                    continue
+                
+                # Get teams
+                competitions = event.get('competitions', [])
+                if not competitions:
+                    continue
+                
+                competition = competitions[0]
+                competitors = competition.get('competitors', [])
+                
+                if len(competitors) < 2:
+                    continue
+                
+                # ESPN format: competitors[0] is usually away, competitors[1] is home
+                # But check homeAway field to be sure
+                home_team = None
+                away_team = None
+                home_score = None
+                away_score = None
+                
+                for comp in competitors:
+                    team = comp.get('team', {})
+                    team_id = team.get('id')
+                    team_abbrev = self.get_team_abbrev(team_id)
+                    
+                    if not team_abbrev:
+                        continue
+                    
+                    is_home = comp.get('homeAway') == 'home'
+                    score = comp.get('score')
+                    
+                    if is_home:
+                        home_team = team_abbrev
+                        home_score = int(score) if score and score.isdigit() else None
+                    else:
+                        away_team = team_abbrev
+                        away_score = int(score) if score and score.isdigit() else None
+                
+                if not home_team or not away_team:
+                    continue
+                
+                games.append({
+                    'espn_game_id': game_id,
+                    'game_date': game_date,
+                    'home_team': home_team,
+                    'away_team': away_team,
+                    'home_score': home_score,
+                    'away_score': away_score,
+                    'status': 'finished' if game_status in ['STATUS_FINAL', 'Final'] else 'scheduled'
+                })
+                
+            except Exception as e:
+                print(f"  ⚠️  Error parsing game: {e}")
+                continue
+        
+        return games
+    
+    def get_games_for_date(self, game_date: date) -> List[Dict]:
         """
-        Get full NFL season schedule.
+        Get all games for a specific date.
         
         Args:
-            season: Year (e.g., 2024, 2025)
-            season_type: 1=preseason, 2=regular season, 3=playoffs
-            
+            game_date: Date to get games for
+        
         Returns:
-            List of all games for the season
+            List of game dictionaries
+        """
+        # ESPN dates format: YYYYMMDD
+        date_str = game_date.strftime('%Y%m%d')
+        return self.get_scoreboard(dates=date_str)
+    
+    def get_games_for_week(self, season_year: int, week: int) -> List[Dict]:
+        """
+        Get all games for a specific week.
+        
+        Args:
+            season_year: Season year (e.g., 2024)
+            week: Week number (1-22)
+        
+        Returns:
+            List of game dictionaries
+        """
+        return self.get_scoreboard(season_year=season_year, week=week)
+    
+    def get_season_schedule(self, season_year: int) -> List[Dict]:
+        """
+        Get full season schedule.
+        
+        Args:
+            season_year: Season year (e.g., 2024)
+        
+        Returns:
+            List of game dictionaries
         """
         all_games = []
         
-        # Regular season: 18 weeks
-        max_week = 18 if season_type == 2 else (4 if season_type == 1 else 5)
-        
-        for week in range(1, max_week + 1):
-            print(f"  Fetching week {week}/{max_week}...")
-            games = self.get_week_schedule(season, week, season_type)
-            all_games.extend(games)
+        # NFL: 18 weeks regular season + 4 weeks playoffs
+        for week in range(1, 23):
+            print(f"  Fetching Week {week}...")
+            week_games = self.get_games_for_week(season_year, week)
+            all_games.extend(week_games)
             
+            if not week_games:
+                print(f"    No games found for Week {week}")
+        
         return all_games
-
-    def _parse_event(self, event: Dict) -> Optional[Dict]:
-        """
-        Parse ESPN event data into standardized game format.
-        
-        Returns:
-            Dict with fields:
-                - espn_game_id: ESPN game ID
-                - game_date: Date object
-                - game_time: Datetime object (if available)
-                - home_team_espn_id: ESPN team ID for home team
-                - away_team_espn_id: ESPN team ID for away team
-                - home_team_abbrev: Team abbreviation
-                - away_team_abbrev: Team abbreviation
-                - home_team_name: Full team name
-                - away_team_name: Full team name
-                - status: Game status (scheduled, in_progress, final)
-                - home_score: Score (if available)
-                - away_score: Score (if available)
-        """
-        try:
-            competitions = event.get('competitions', [])
-            if not competitions:
-                return None
-            
-            comp = competitions[0]
-            competitors = comp.get('competitors', [])
-            if len(competitors) < 2:
-                return None
-            
-            # Find home and away teams
-            home_team = next((c for c in competitors if c.get('homeAway') == 'home'), None)
-            away_team = next((c for c in competitors if c.get('homeAway') == 'away'), None)
-            
-            if not home_team or not away_team:
-                return None
-            
-            # Parse date/time
-            date_str = event.get('date', '')
-            game_datetime = None
-            game_date = None
-            if date_str:
-                try:
-                    game_datetime = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                    game_date = game_datetime.date()
-                except:
-                    pass
-            
-            # Parse status
-            status_type = event.get('status', {}).get('type', {}).get('name', '')
-            status_map = {
-                'STATUS_SCHEDULED': 'scheduled',
-                'STATUS_IN_PROGRESS': 'in_progress',
-                'STATUS_FINAL': 'final',
-                'STATUS_HALFTIME': 'in_progress',
-                'STATUS_END_PERIOD': 'in_progress',
-                'STATUS_POSTPONED': 'postponed',
-                'STATUS_CANCELED': 'cancelled'
-            }
-            status = status_map.get(status_type, 'scheduled')
-            
-            # Extract scores (if available)
-            home_score = home_team.get('score')
-            away_score = away_team.get('score')
-            
-            return {
-                'espn_game_id': event.get('id', ''),
-                'game_date': game_date,
-                'game_time': game_datetime,
-                'home_team_espn_id': home_team.get('team', {}).get('id', ''),
-                'away_team_espn_id': away_team.get('team', {}).get('id', ''),
-                'home_team_abbrev': home_team.get('team', {}).get('abbreviation', ''),
-                'away_team_abbrev': away_team.get('team', {}).get('abbreviation', ''),
-                'home_team_name': home_team.get('team', {}).get('displayName', ''),
-                'away_team_name': away_team.get('team', {}).get('displayName', ''),
-                'status': status,
-                'home_score': int(home_score) if home_score is not None else None,
-                'away_score': int(away_score) if away_score is not None else None,
-            }
-            
-        except Exception as e:
-            print(f"⚠️ Error parsing ESPN event: {e}")
-            return None
-
-    def map_espn_abbrev_to_nfl(self, espn_abbrev: str) -> str:
-        """
-        Map ESPN team abbreviation to our NFL team abbreviation.
-        Most are identical, but handle any edge cases.
-        
-        Args:
-            espn_abbrev: ESPN team abbreviation
-            
-        Returns:
-            Our internal NFL team abbreviation
-        """
-        # ESPN uses standard NFL abbreviations
-        # Handle any special cases here if needed
-        mapping = {
-            'WSH': 'WAS',  # Washington changed name
-            # Add other mappings as discovered
-        }
-        return mapping.get(espn_abbrev.upper(), espn_abbrev.upper())
