@@ -146,10 +146,16 @@ def save_games_to_db(games):
         print(f"Using season: {current_season.season_year}")
 
         for game in games:
-            # Check if game already exists by nba_game_id (most reliable)
+            # Check if game already exists by external_game_id (or fallback to nba_game_id)
             existing = db.query(GameSchedule).filter(
-                GameSchedule.nba_game_id == game['nba_game_id']
+                GameSchedule.external_game_id == game['nba_game_id']
             ).first()
+            
+            if not existing:
+                # Fallback check using old nba_game_id column
+                existing = db.query(GameSchedule).filter(
+                    GameSchedule.nba_game_id == game['nba_game_id']
+                ).first()
 
             if not existing:
                 # Find teams
@@ -162,7 +168,8 @@ def save_games_to_db(games):
                         game_date=game['game_date'],
                         home_team_id=home_team.team_id,
                         away_team_id=away_team.team_id,
-                        nba_game_id=game['nba_game_id'],
+                        external_game_id=game['nba_game_id'],
+                        nba_game_id=game['nba_game_id'],  # Keep for backward compat
                         status='scheduled'
                     )
 
