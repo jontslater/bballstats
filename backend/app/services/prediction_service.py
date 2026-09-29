@@ -1335,7 +1335,8 @@ class PredictionService:
                 Game.game_status == 'finished',
                 Game.game_date >= cutoff_date,
                 stat_column.isnot(None),
-                stat_column > 0
+                # Include ALL values including zeros (count stats can be 0)
+                stat_column >= 0
             ).first()
             
             if result and result.mean is not None:
@@ -1365,9 +1366,9 @@ class PredictionService:
                 'receiving_tds': (0.5, 0.5),
             },
             'MLB': {
-                'hits': (0.9, 0.9),  # Per game for a starter
-                'home_runs': (0.15, 0.4),  # Per game
-                'total_bases': (1.2, 1.3),  # Per game
+                'hits': (0.81, 0.9),  # Per game including zeros
+                'home_runs': (0.113, 0.33),  # Per game including zeros (~11% get >=1 HR)
+                'total_bases': (1.33, 1.3),  # Per game including zeros
                 'strikeouts': (0.8, 0.9),  # For batters
                 'rbis': (0.5, 0.7),
             }

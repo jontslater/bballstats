@@ -252,13 +252,21 @@ class TestBetDefinitions(unittest.TestCase):
         )
         self.assertEqual(bet_type, 'standard')
         
-        # Long shot: lower probability in 0.10-0.35 range
+        # Long shot: even with all probabilities poor, long_shot in range qualifies
         bet_type = self.bet_defs.determine_bet_type(
             safe_probability=0.30,
             standard_probability=0.35,
             long_shot_probability=0.20
         )
         self.assertEqual(bet_type, 'long_shot')
+        
+        # Pass: all probabilities poor and long_shot out of range
+        bet_type = self.bet_defs.determine_bet_type(
+            safe_probability=0.30,
+            standard_probability=0.35,
+            long_shot_probability=0.08  # Too low for long_shot
+        )
+        self.assertEqual(bet_type, 'pass')
         
         # Pass
         bet_type = self.bet_defs.determine_bet_type(
