@@ -19,6 +19,12 @@ PRIOR_STRENGTH_HITS = float(os.environ.get('K_HITS', '18.0'))  # 15-20 range for
 PRIOR_STRENGTH_TB = float(os.environ.get('K_TB', '15.0'))  # Re-tuned after NB fix
 PRIOR_STRENGTH_HR = float(os.environ.get('K_HR', '40.0'))  # HRs are rare, need stronger shrinkage
 
+# High-end compression to fix overshoot at p >= 0.65
+# Compresses probabilities above knee_point by shrinking excess over base rate
+# Set via environment for tuning (defaults calibrated from desktop backtest)
+COMPRESSION_KNEE = float(os.environ.get('COMPRESSION_KNEE', '0.60'))  # Start compressing above this
+COMPRESSION_FACTOR = float(os.environ.get('COMPRESSION_FACTOR', '0.50'))  # Shrink excess by 50%
+
 
 class CalibratedProbabilityCalculator:
     """Calculate calibrated probabilities with shrinkage and base rates."""
@@ -57,6 +63,46 @@ class CalibratedProbabilityCalculator:
     def __init__(self, sport: str = 'NBA'):
         """Initialize with sport-specific parameters."""
         self.sport = sport
+    
+    def _apply_high_end_compression(
+        self,
+        prob: float,
+        stat_type: str,
+        line: float
+    ) -> float:
+        """
+        Apply high-end compression to fix overshoot at p >= 0.65.
+        
+        Desktop backtest showed TB/hits at p>=0.65 overshoot by ~7-10 pts.
+        Compress probabilities above knee_point by shrinking excess over base rate.
+        
+        Maintains monotonicity: higher raw prob -> higher compressed prob.
+        """
+        if self.sport != 'MLB' or prob <= COMPRESSION_KNEE:
+            return prob
+        
+        # Get stat/line-specific base rate
+        base_rates = {
+            ('hits', 0.5): 0.58,
+            ('hits', 1.5): 0.26,
+            ('total_bases', 0.5): 0.58,
+            ('total_bases', 1.5): 0.38,
+            ('home_runs', 0.5): 0.12,
+        }
+        
+        line_rounded = round(line, 1)
+        base_rate = base_rates.get((stat_type, line_rounded), 0.50)
+        
+        # For probs above knee, compress the excess over base rate
+        if prob > COMPRESSION_KNEE:
+            excess = prob - base_rate
+            compressed_excess = excess * COMPRESSION_FACTOR
+            prob = base_rate + compressed_excess
+            
+            # Ensure still above knee (monotonicity)
+            prob = max(prob, COMPRESSION_KNEE)
+        
+        return prob
     
     def calculate_probability_for_line(
         self,
@@ -140,6 +186,9 @@ class CalibratedProbabilityCalculator:
             # Never above 0.85 unless n >= 30
             if sample_size < 30 and prob > 0.85:
                 prob = 0.85
+            
+            # Apply high-end compression to fix overshoot at p >= 0.65
+            prob = self._apply_high_end_compression(prob, stat_type, line)
             
             # Clamp
             prob = max(0.01, min(0.99, prob))
@@ -266,6 +315,9 @@ class CalibratedProbabilityCalculator:
         except (ValueError, ZeroDivisionError):
             # Fallback to simple calculation
             prob = 0.5
+        
+        # Apply high-end compression to fix overshoot at p >= 0.65
+        prob = self._apply_high_end_compression(prob, stat_type, line)
         
         # Clamp to valid range
         prob = max(0.01, min(0.99, prob))

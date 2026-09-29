@@ -153,14 +153,39 @@ class SuggestedBetsService(BaseSportService):
             if probability is None or line is None or line <= 0:
                 continue
             
-            # Only include if meets minimum probability (for safe/standard bets)
-            # Long shots have lower probability threshold
-            if pred.bet_type == 'safe' and probability < min_probability:
-                continue
-            if pred.bet_type == 'standard' and probability < 0.40:
-                continue
-            if pred.bet_type == 'long_shot' and (probability < 0.08 or probability > 0.30):
-                continue
+            # Get stat/line-specific base rate for edge calculation
+            base_rates = {
+                ('hits', 0.5): 0.58,
+                ('hits', 1.5): 0.26,
+                ('hits', 2.5): 0.10,
+                ('total_bases', 0.5): 0.58,
+                ('total_bases', 1.5): 0.38,
+                ('total_bases', 2.5): 0.20,
+                ('total_bases', 3.5): 0.10,
+                ('home_runs', 0.5): 0.12,
+                ('home_runs', 1.5): 0.01,
+            }
+            line_rounded = round(line, 1)
+            stat_line_key = (pred.stat_type, line_rounded)
+            base_rate = base_rates.get(stat_line_key, 0.50)
+            
+            edge = probability - base_rate
+            
+            # Filter by bet type with stricter requirements for 'safe' tier
+            if pred.bet_type == 'safe':
+                # Safe bets must have p >= 0.55 AND positive edge over base rate
+                if probability < 0.55 or edge <= 0:
+                    continue
+            elif pred.bet_type == 'standard':
+                # Standard bets: minimum 0.40 probability
+                if probability < 0.40:
+                    continue
+            elif pred.bet_type == 'long_shot':
+                # Long shots: 0.08 to 0.30 range
+                if probability < 0.08 or probability > 0.30:
+                    continue
+            
+            # Skip long shots if not included
             if not include_long_shots and pred.bet_type == 'long_shot':
                 continue
             
@@ -380,9 +405,13 @@ class SuggestedBetsService(BaseSportService):
             'MLB': {
                 ('hits', 0.5): 0.58,
                 ('hits', 1.5): 0.26,
+                ('hits', 2.5): 0.10,
                 ('total_bases', 0.5): 0.58,
                 ('total_bases', 1.5): 0.38,
+                ('total_bases', 2.5): 0.20,
+                ('total_bases', 3.5): 0.10,
                 ('home_runs', 0.5): 0.12,
+                ('home_runs', 1.5): 0.01,
                 ('strikeouts', 0.5): 0.50,  # Pitchers
             },
             'NBA': {

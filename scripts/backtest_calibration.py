@@ -481,9 +481,11 @@ def main():
         import app.services.calibrated_probability
         importlib.reload(app.services.calibrated_probability)
     
-    print(f"Using: K_HITS={os.environ.get('K_HITS', '10.0')}, "
-          f"K_TB={os.environ.get('K_TB', '10.0')}, "
-          f"K_HR={os.environ.get('K_HR', '30.0')}")
+    print(f"Using: K_HITS={os.environ.get('K_HITS', '18.0')}, "
+          f"K_TB={os.environ.get('K_TB', '15.0')}, "
+          f"K_HR={os.environ.get('K_HR', '40.0')}, "
+          f"COMPRESSION_KNEE={os.environ.get('COMPRESSION_KNEE', '0.60')}, "
+          f"COMPRESSION_FACTOR={os.environ.get('COMPRESSION_FACTOR', '0.50')}")
     print()
     
     engine = create_engine(db_url)

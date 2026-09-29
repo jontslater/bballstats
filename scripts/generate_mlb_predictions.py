@@ -128,10 +128,11 @@ def generate_predictions_for_game(db: Session, game_id: int):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--date', type=str)
-    parser.add_argument('--game-id', type=int)
-    parser.add_argument('--upcoming', action='store_true')
+    parser = argparse.ArgumentParser(description='Generate MLB predictions')
+    parser.add_argument('--date', type=str, help='Specific date (YYYY-MM-DD)')
+    parser.add_argument('--game-id', type=int, help='Specific game ID')
+    parser.add_argument('--upcoming', action='store_true', help='Generate for upcoming games (next 7 days)')
+    parser.add_argument('--future-dates', type=str, help='Regenerate specific future dates (comma-separated, e.g., 2026-09-30,2026-10-01)')
     args = parser.parse_args()
 
     db = SessionLocal()
@@ -150,6 +151,25 @@ def main():
                 result = generate_predictions_for_game(db, g.game_id) or 0
                 if result != 0:
                     exit_code = result
+        elif args.future_dates:
+            # Regenerate predictions for specific future dates
+            dates_str = args.future_dates.split(',')
+            for date_str in dates_str:
+                d = datetime.strptime(date_str.strip(), '%Y-%m-%d').date()
+                print(f"\n{'=' * 60}")
+                print(f"Regenerating predictions for {d}")
+                print('=' * 60)
+                games = db.query(Game).filter(
+                    Game.sport == 'MLB',
+                    Game.game_date == d,
+                    Game.game_status.in_(['scheduled', 'in_progress'])
+                ).all()
+                if not games:
+                    print(f"No scheduled games found for {d}")
+                for g in games:
+                    result = generate_predictions_for_game(db, g.game_id) or 0
+                    if result != 0:
+                        exit_code = result
         elif args.upcoming:
             today = date.today()
             end = today + timedelta(days=7)
@@ -164,7 +184,11 @@ def main():
                 if result != 0:
                     exit_code = result
         else:
-            print("Specify --date, --game-id, or --upcoming")
+            print("Specify --date, --game-id, --upcoming, or --future-dates")
+            print("\nExamples:")
+            print("  python scripts/generate_mlb_predictions.py --upcoming")
+            print("  python scripts/generate_mlb_predictions.py --date 2026-09-30")
+            print("  python scripts/generate_mlb_predictions.py --future-dates 2026-09-30,2026-10-01")
             exit_code = 1
     finally:
         db.close()

@@ -141,36 +141,63 @@ class BetDefinitions:
         
         # Find long shot line: line with p in 0.15-0.30 range (prefer ~0.20)
         # Cap at sport-specific single-game maximum
+        # Prefer x.5 lines for OVER bets (avoid whole numbers like 1.0, 2.0, 3.0)
         long_shot_max = self._get_long_shot_max_for_stat(stat_type)
         long_shot_line = None
         long_shot_probability = None
         best_distance = float('inf')
         target_prob = 0.20
         
-        for line in candidates:
-            if line <= standard_line:
-                continue  # Long shot should be harder than standard
-            if line > long_shot_max:
-                continue  # Cap at plausible single-game maximum
-            
-            prob_data = self.calibrator.calculate_probability_for_line(
-                line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                league_mean, league_std
-            )
-            prob = prob_data['probability']
-            
-            if 0.15 <= prob <= 0.30:
-                distance = abs(prob - target_prob)
-                if distance < best_distance:
-                    best_distance = distance
-                    long_shot_line = line
-                    long_shot_probability = prob
+        # For HR, if probability would be <5%, skip long_shot tier entirely
+        if self.sport == 'MLB' and stat_type == 'home_runs':
+            # Check if even the lowest long_shot candidate would be <5%
+            test_line = standard_line + 0.5
+            if test_line <= long_shot_max:
+                test_prob = self.calibrator.calculate_probability_for_line(
+                    test_line, adjusted_mean, adjusted_std, sample_size, stat_type,
+                    league_mean, league_std
+                )
+                if test_prob['probability'] < 0.05:
+                    # Skip HR long_shot entirely - too unlikely
+                    long_shot_line = None
+                    long_shot_probability = None
+                    best_distance = float('inf')
+        
+        if long_shot_line is None:
+            for line in candidates:
+                if line <= standard_line:
+                    continue  # Long shot should be harder than standard
+                if line > long_shot_max:
+                    continue  # Cap at plausible single-game maximum
+                
+                # Prefer x.5 lines (skip whole numbers for MLB count stats)
+                if self.sport == 'MLB' and stat_type in ['hits', 'total_bases', 'home_runs']:
+                    if line > 0 and line % 1.0 == 0:
+                        continue  # Skip whole-number lines like 1.0, 2.0, 3.0
+                
+                prob_data = self.calibrator.calculate_probability_for_line(
+                    line, adjusted_mean, adjusted_std, sample_size, stat_type,
+                    league_mean, league_std
+                )
+                prob = prob_data['probability']
+                
+                if 0.15 <= prob <= 0.30:
+                    distance = abs(prob - target_prob)
+                    if distance < best_distance:
+                        best_distance = distance
+                        long_shot_line = line
+                        long_shot_probability = prob
         
         # If no long shot found in probability range or exceeds max, don't force one
         if long_shot_line is None:
-            # Try to find any line above standard within cap
+            # Try to find any line above standard within cap (prefer x.5)
             for line in sorted(candidates):
                 if line > standard_line and line <= long_shot_max:
+                    # Prefer x.5 lines for MLB count stats
+                    if self.sport == 'MLB' and stat_type in ['hits', 'total_bases', 'home_runs']:
+                        if line > 0 and line % 1.0 == 0:
+                            continue
+                    
                     prob_data = self.calibrator.calculate_probability_for_line(
                         line, adjusted_mean, adjusted_std, sample_size, stat_type,
                         league_mean, league_std
@@ -180,9 +207,9 @@ class BetDefinitions:
                         long_shot_probability = prob_data['probability']
                         break
             
-            # If still no long shot, use None (no long shot pick)
+            # If still no long shot, use x.5 default fallback
             if long_shot_line is None:
-                long_shot_line = standard_line + 1.0  # Default fallback
+                long_shot_line = standard_line + 0.5 if (standard_line % 1.0 == 0) else standard_line + 1.0
                 long_shot_data = self.calibrator.calculate_probability_for_line(
                     long_shot_line, adjusted_mean, adjusted_std, sample_size, stat_type,
                     league_mean, league_std
