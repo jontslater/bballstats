@@ -93,9 +93,8 @@ class PredictionService:
             
             # Check if player is on the correct team for this game
             if player.current_team_id not in [game.home_team_id, game.away_team_id]:
-                # Log this as it indicates a team assignment issue
-                print(f"⚠️  Warning: {player.name} (team_id={player.current_team_id}) not in game {game.game_id} (teams: {game.home_team_id}, {game.away_team_id})")
-                return None  # Player not on either team, skip
+                # Player not on either team, skip silently (roster data issue)
+                return None
             
             # Get blowout risk early to inform decision (needed for both scheduled and finished games)
             game_context = self.context_calc.get_game_context(game_id, player.current_team_id)
@@ -706,7 +705,10 @@ class PredictionService:
                     prediction.confidence_level = tier_order[current_idx - 1]
                     prediction.confidence_score = max(0, prediction.confidence_score - 15)
             
-            prediction.volatility_level = self.pass_rules.calculate_volatility_level(base_dist.get('cv'))
+            prediction.volatility_level = self.pass_rules.calculate_volatility_level(
+                base_dist.get('cv'),
+                stat_type=stat_type
+            )
             prediction.reasoning = reasoning
             
             if is_new:

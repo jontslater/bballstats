@@ -227,8 +227,8 @@ class TestBetDefinitions(unittest.TestCase):
         self.assertNotEqual(result['long_shot_probability'], 0.25)
     
     def test_determine_bet_type(self):
-        """Test bet type determination."""
-        # Safe bet
+        """Test bet type determination with new likelihood-based logic."""
+        # Safe bet: safe_probability >= standard_probability
         bet_type = self.bet_defs.determine_bet_type(
             safe_probability=0.70,
             standard_probability=0.52,
@@ -236,18 +236,26 @@ class TestBetDefinitions(unittest.TestCase):
         )
         self.assertEqual(bet_type, 'safe')
         
-        # Standard bet
+        # Safe bet: even modest probability (0.60 >= 0.50)
         bet_type = self.bet_defs.determine_bet_type(
             safe_probability=0.60,
             standard_probability=0.50,
             long_shot_probability=0.15
         )
+        self.assertEqual(bet_type, 'safe')  # Changed: safe = highest likelihood
+        
+        # Standard bet: standard better than safe, and >= 0.40
+        bet_type = self.bet_defs.determine_bet_type(
+            safe_probability=0.35,
+            standard_probability=0.45,
+            long_shot_probability=0.15
+        )
         self.assertEqual(bet_type, 'standard')
         
-        # Long shot
+        # Long shot: lower probability in 0.10-0.35 range
         bet_type = self.bet_defs.determine_bet_type(
-            safe_probability=0.55,
-            standard_probability=0.40,
+            safe_probability=0.30,
+            standard_probability=0.35,
             long_shot_probability=0.20
         )
         self.assertEqual(bet_type, 'long_shot')

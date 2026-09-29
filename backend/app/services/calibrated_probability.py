@@ -127,9 +127,13 @@ class CalibratedProbabilityCalculator:
         Apply Empirical Bayes shrinkage to player mean toward league prior.
         
         Uses James-Stein style shrinkage: weight player data by sample size.
+        Prior strength = 10 games for shrinkage calculation.
         
         Returns:
-            (shrunk_mean, effective_sample_size)
+            (shrunk_mean, actual_sample_size)
+            
+        Note: We shrink using prior_strength but return the REAL sample_size
+        (not inflated by pseudo-observations) for display to users.
         """
         # Shrinkage weight: more data = less shrinkage
         # Use a prior strength equivalent to 10 games
@@ -138,9 +142,11 @@ class CalibratedProbabilityCalculator:
         weight_prior = prior_strength / (sample_size + prior_strength)
         
         shrunk_mean = weight_player * player_mean + weight_prior * league_mean
-        effective_n = sample_size + prior_strength
         
-        return shrunk_mean, effective_n
+        # Return REAL sample size, not inflated by prior pseudo-observations
+        # effective_n for statistical purposes uses prior_strength internally,
+        # but we report the actual games played to the user
+        return shrunk_mean, sample_size
     
     def _calculate_effective_std(
         self,

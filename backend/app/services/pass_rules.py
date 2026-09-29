@@ -165,10 +165,20 @@ class PassRules:
             else:
                 return 'LOW'
     
-    @staticmethod
-    def calculate_volatility_level(coefficient_of_variation: Optional[float]) -> str:
+    def calculate_volatility_level(
+        self,
+        coefficient_of_variation: Optional[float],
+        stat_type: Optional[str] = None
+    ) -> str:
         """
-        Determine volatility level from CV.
+        Determine volatility level from CV using stat-appropriate thresholds.
+        
+        MLB count stats (hits, HRs, total_bases) have naturally high CV due to
+        Poisson/binomial distribution. Use different thresholds for different stats.
+        
+        Args:
+            coefficient_of_variation: std_dev / mean
+            stat_type: Type of stat (e.g., 'hits', 'points', 'passing_yards')
         
         Returns:
             'LOW', 'MEDIUM', or 'HIGH'
@@ -176,9 +186,18 @@ class PassRules:
         if coefficient_of_variation is None:
             return 'MEDIUM'
         
-        if coefficient_of_variation < 0.20:
+        # Get stat-appropriate threshold
+        cv_threshold = self._get_cv_threshold(stat_type)
+        
+        # Calculate LOW and MEDIUM thresholds relative to the HIGH threshold
+        # LOW: < 60% of HIGH threshold
+        # MEDIUM: 60-100% of HIGH threshold
+        # HIGH: > HIGH threshold
+        low_threshold = cv_threshold * 0.6
+        
+        if coefficient_of_variation < low_threshold:
             return 'LOW'
-        elif coefficient_of_variation < 0.35:
+        elif coefficient_of_variation < cv_threshold:
             return 'MEDIUM'
         else:
             return 'HIGH'

@@ -51,10 +51,14 @@ class ConfidenceCalculator:
         coefficient_of_variation: Optional[float] = None,
         days_since_last_game: Optional[int] = None,
         is_synthetic_line: bool = False,
-        has_real_line: bool = False
+        has_real_line: bool = False,
+        edge_over_base_rate: Optional[float] = None
     ) -> Dict[str, any]:
         """
         Calculate confidence tier and score.
+        
+        Tier is capped by synthetic lines (MODEL_ONLY/LOW max).
+        Score varies based on sample size, variance, freshness, and edge.
         
         Args:
             sample_size: Number of games in history
@@ -63,6 +67,7 @@ class ConfidenceCalculator:
             days_since_last_game: Freshness of data
             is_synthetic_line: Whether line is model-generated
             has_real_line: Whether a real sportsbook line exists
+            edge_over_base_rate: Probability advantage over league average
         
         Returns:
             Dict with 'tier', 'score', 'reasons'
@@ -70,82 +75,76 @@ class ConfidenceCalculator:
         reasons = []
         score = 0.0
         
-        # 1. Base tier from sample size
+        # 1. Base tier from sample size (for tier determination only)
         if sample_size >= self.thresholds['HIGH']:
             base_tier = 'HIGH'
-            score += 100
-            reasons.append(f"{sample_size} games (excellent sample)")
         elif sample_size >= self.thresholds['MEDIUM']:
             base_tier = 'MEDIUM'
-            score += 70
-            reasons.append(f"{sample_size} games (good sample)")
         elif sample_size >= self.thresholds['LOW']:
             base_tier = 'LOW'
-            score += 40
-            reasons.append(f"{sample_size} games (adequate sample)")
         else:
             base_tier = 'MODEL_ONLY'
-            score += 10
-            reasons.append(f"{sample_size} games (limited sample)")
         
-        # Add granular sample size score (beyond tier threshold)
-        # This makes score vary even within same tier
-        score += min(sample_size * 0.5, 30)  # Up to +30 for very large samples
-        
-        # 2. Line source adjustment
+        # 2. Cap tier by line source (synthetic lines max LOW/MODEL_ONLY)
         if is_synthetic_line or line_source == 'model':
-            # Synthetic lines capped at LOW or MODEL_ONLY
-            if base_tier == 'HIGH':
-                base_tier = 'LOW'
-                score -= 30
-                reasons.append("Synthetic line (no sportsbook line available)")
-            elif base_tier == 'MEDIUM':
-                base_tier = 'LOW'
-                score -= 20
-                reasons.append("Synthetic line (no sportsbook line available)")
-            # LOW and MODEL_ONLY stay as is
-            if base_tier in ['LOW', 'MODEL_ONLY']:
+            if base_tier in ['HIGH', 'MEDIUM']:
+                final_tier = 'LOW'
+                reasons.append("Model-generated line (no sportsbook line)")
+            else:
+                final_tier = base_tier
                 reasons.append("Model-generated line")
         else:
-            # Real sportsbook line
-            score += 20
+            final_tier = base_tier
             reasons.append("Real sportsbook line")
         
-        # 3. Variance penalty
+        # 3. Sample size note
+        if sample_size >= self.thresholds['HIGH']:
+            reasons.append(f"{sample_size} games (excellent sample)")
+        elif sample_size >= self.thresholds['MEDIUM']:
+            reasons.append(f"{sample_size} games (good sample)")
+        elif sample_size >= self.thresholds['LOW']:
+            reasons.append(f"{sample_size} games (adequate sample)")
+        else:
+            reasons.append(f"{sample_size} games (limited sample)")
+        
+        # 4. Calculate numeric score (independent of tier caps)
+        # Base score from sample size (granular, not just tier)
+        score += min(sample_size * 2.0, 80)  # 0-80 range based on games
+        
+        # Edge bonus/penalty
+        if edge_over_base_rate is not None:
+            if edge_over_base_rate > 0.10:
+                score += 15
+                reasons.append(f"Strong edge over base rate (+{edge_over_base_rate:.1%})")
+            elif edge_over_base_rate > 0.05:
+                score += 10
+            elif edge_over_base_rate < -0.05:
+                score -= 10
+                reasons.append(f"Below base rate ({edge_over_base_rate:.1%})")
+        
+        # Variance adjustment
         if coefficient_of_variation is not None:
             if coefficient_of_variation > 0.50:
-                # High variance
-                score -= 20
-                reasons.append(f"High variance (CV={coefficient_of_variation:.2f})")
-                # Potentially downgrade tier
-                if base_tier == 'HIGH' and coefficient_of_variation > 0.60:
-                    base_tier = 'MEDIUM'
+                score -= 15
+                reasons.append(f"High volatility (CV={coefficient_of_variation:.2f})")
             elif coefficient_of_variation > 0.35:
-                # Moderate variance
-                score -= 10
-                reasons.append(f"Moderate variance (CV={coefficient_of_variation:.2f})")
+                score -= 8
             else:
-                # Low variance - bonus
-                score += 10
-                reasons.append(f"Low variance (CV={coefficient_of_variation:.2f})")
+                score += 5
         
-        # 4. Data freshness
+        # Freshness
         if days_since_last_game is not None:
             if days_since_last_game > 14:
-                score -= 15
-                reasons.append(f"Stale data ({days_since_last_game} days since last game)")
-                # Downgrade tier if very stale
-                if days_since_last_game > 30 and base_tier == 'HIGH':
-                    base_tier = 'MEDIUM'
+                score -= 10
+                reasons.append(f"Stale data ({days_since_last_game} days)")
             elif days_since_last_game > 7:
                 score -= 5
-                reasons.append(f"Somewhat stale data ({days_since_last_game} days)")
         
         # Final score clamped
         score = max(0, min(100, score))
         
         return {
-            'tier': base_tier,
+            'tier': final_tier,
             'score': round(score, 1),
             'reasons': reasons
         }
