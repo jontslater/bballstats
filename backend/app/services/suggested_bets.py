@@ -314,55 +314,56 @@ class SuggestedBetsService(BaseSportService):
         
         Higher score = better bet recommendation.
         Ranks by:
-        1. Calibrated probability and edge
+        1. Calibrated probability EDGE over base rate (heavily weighted)
         2. Sample size (n_games_effective)
         3. Confidence tier as multiplier
         4. Line source (real > synthetic)
         """
         score = 0.0
         
-        # Base score from probability (weighted heavily)
+        # Get probability and calculate edge over base rate
         if prediction.bet_type == 'safe':
             prob = prediction.safe_probability or 0
-            # Safe bets: reward higher probabilities (65%+ ideal)
-            if prob >= 0.75:
-                score += 100  # Excellent safe bet
-            elif prob >= 0.65:
-                score += 80  # Good safe bet
-            else:
-                score += prob * 70  # Adequate
+            base_rate = 0.67 if self.sport == 'MLB' else 0.52  # Typical safe pick base rate
         elif prediction.bet_type == 'standard':
             prob = prediction.standard_probability or 0
-            # Standard bets: 45-60% range
-            if 0.50 <= prob <= 0.60:
-                score += 90  # Sweet spot
-            elif prob >= 0.45:
-                score += prob * 80
-            else:
-                score += prob * 60
+            base_rate = 0.50  # Coin flip
         else:  # long_shot
             prob = prediction.long_shot_probability or 0
-            # Long shots: 10-25% range ideal
-            if 0.15 <= prob <= 0.25:
-                score += 70  # Good long shot
-            elif 0.10 <= prob < 0.15 or 0.25 < prob <= 0.30:
-                score += prob * 60
-            else:
-                score += prob * 40
+            base_rate = 0.20  # Typical long shot base
         
-        # Sample size bonus (even for MODEL_ONLY this matters)
+        # Edge = how much better than base rate
+        edge = prob - base_rate
+        
+        # Base score from edge (0-150 points range)
+        if edge > 0:
+            # Positive edge: scale by magnitude
+            score += min(edge * 300, 150)  # Cap at 150
+        else:
+            # Negative edge: penalize but not eliminate
+            score += max(edge * 200, -50)  # Cap penalty at -50
+        
+        # Add bonus for high absolute probability (safe bets)
+        if prediction.bet_type == 'safe' and prob >= 0.70:
+            score += 30
+        elif prediction.bet_type == 'safe' and prob >= 0.65:
+            score += 15
+        
+        # Sample size bonus (vary based on effective games)
         n_games = prediction.n_games_effective or prediction.sample_size or 0
-        if n_games >= 30:
+        if n_games >= 40:
+            score += 35
+        elif n_games >= 30:
             score += 25
         elif n_games >= 20:
             score += 15
         elif n_games >= 10:
             score += 5
         else:
-            # Penalize very small samples
-            score -= 10
+            # Penalize very small samples more
+            score -= 15
         
-        # Confidence tier multiplier
+        # Confidence tier multiplier (apply after base score)
         confidence_tier = prediction.confidence_level or 'LOW'
         if confidence_tier == 'HIGH':
             score *= 1.4
@@ -371,24 +372,24 @@ class SuggestedBetsService(BaseSportService):
         elif confidence_tier == 'LOW':
             score *= 1.0
         elif confidence_tier == 'MODEL_ONLY':
-            score *= 0.8  # Penalize but don't eliminate
+            score *= 0.85  # Less penalty than before
         
         # Line source adjustment (after multiplier)
         if prediction.line_source == 'sportsbook':
-            score += 30  # Significant bonus for real lines
+            score += 35  # Significant bonus for real lines
         else:
-            # Synthetic lines: smaller penalty
-            score -= 10
+            # Synthetic lines: modest penalty
+            score -= 15
         
-        # Volatility penalty
+        # Volatility penalty (reduced)
         if prediction.volatility_level == 'HIGH':
-            score -= 20
+            score -= 15
         elif prediction.volatility_level == 'MEDIUM':
-            score -= 8
+            score -= 5
         
         # Pass reason penalty
         if prediction.pass_reason:
-            score -= 40
+            score -= 30
         
         return max(0, score)
     

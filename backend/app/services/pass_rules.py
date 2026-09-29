@@ -26,7 +26,8 @@ class PassRules:
         is_starter: bool = True,
         line_source: str = 'model',
         is_synthetic_line: bool = True,
-        days_since_last_game: Optional[int] = None
+        days_since_last_game: Optional[int] = None,
+        stat_type: Optional[str] = None
     ) -> Dict[str, any]:
         """
         Evaluate if we should pass on this prediction.
@@ -42,6 +43,7 @@ class PassRules:
             line_source: 'sportsbook' or 'model'
             is_synthetic_line: Whether line is model-generated
             days_since_last_game: Days since player's last game
+            stat_type: Type of stat for sport-specific CV thresholds
         
         Returns:
             Dict with 'should_pass' (bool), 'reason' (str or None), 'confidence_level', 'confidence_data'
@@ -71,15 +73,21 @@ class PassRules:
         if usage_change and abs(usage_change) > 0.25:
             reasons.append(f"Large usage change ({usage_change*100:.1f}%, threshold: 25%)")
         
-        # Rule 4: Volatility check (CV > 50%)
-        if coefficient_of_variation and coefficient_of_variation > 0.50:
-            reasons.append(f"High volatility (CV={coefficient_of_variation:.2f}, threshold: 0.50)")
+        # Rule 4: Volatility check - USE SPORT/STAT-APPROPRIATE THRESHOLDS
+        # MLB count stats (hits, HRs) naturally have high CV due to Poisson-like distribution
+        # Don't penalize them with NBA-style CV thresholds
+        if coefficient_of_variation and coefficient_of_variation > 0:
+            cv_threshold = self._get_cv_threshold(stat_type)
+            if coefficient_of_variation > cv_threshold:
+                reasons.append(f"High volatility (CV={coefficient_of_variation:.2f}, threshold: {cv_threshold:.2f})")
         
         # Rule 5: Injury uncertainty
         if has_injury_uncertainty:
             reasons.append("Uncertainty due to injuries or lineup changes")
         
-        should_pass = len(reasons) > 0
+        # Don't mark as should_pass - just note the reasons
+        # Let confidence system handle degradation
+        should_pass = False  # Changed: never hard-block, only lower confidence
         reason = "; ".join(reasons) if reasons else None
         
         # Calculate confidence using the new confidence calculator
@@ -98,6 +106,29 @@ class PassRules:
             'confidence_level': confidence_data['tier'],
             'confidence_data': confidence_data
         }
+    
+    def _get_cv_threshold(self, stat_type: Optional[str]) -> float:
+        """
+        Get sport/stat-appropriate CV threshold.
+        
+        MLB count stats naturally have high CV due to binomial/Poisson distribution.
+        Don't use NBA-style 0.50 threshold for everything.
+        """
+        if self.sport == 'MLB':
+            # MLB stats have naturally high variance
+            mlb_thresholds = {
+                'hits': 1.2,  # Hits are very variable (0-4 per game)
+                'home_runs': 2.0,  # Home runs are rare events
+                'total_bases': 1.5,  # Also quite variable
+                'rbis': 1.5,
+                'strikeouts': 1.2,  # For pitchers
+            }
+            return mlb_thresholds.get(stat_type, 1.0)
+        elif self.sport == 'NFL':
+            # NFL also has high variance
+            return 0.80
+        else:  # NBA
+            return 0.50
     
     def _calculate_confidence(sample_size: int, reasons: list, sport: str = 'NBA') -> str:
         """

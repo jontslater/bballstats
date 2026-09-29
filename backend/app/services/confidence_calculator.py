@@ -88,6 +88,10 @@ class ConfidenceCalculator:
             score += 10
             reasons.append(f"{sample_size} games (limited sample)")
         
+        # Add granular sample size score (beyond tier threshold)
+        # This makes score vary even within same tier
+        score += min(sample_size * 0.5, 30)  # Up to +30 for very large samples
+        
         # 2. Line source adjustment
         if is_synthetic_line or line_source == 'model':
             # Synthetic lines capped at LOW or MODEL_ONLY

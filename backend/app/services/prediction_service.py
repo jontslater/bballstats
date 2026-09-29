@@ -594,7 +594,8 @@ class PredictionService:
             is_starter=is_confirmed_starter,
             line_source=bet_lines['line_source'],
             is_synthetic_line=bet_lines['is_synthetic'],
-            days_since_last_game=days_since_last_game
+            days_since_last_game=days_since_last_game,
+            stat_type=stat_type  # Pass stat_type for sport-specific CV thresholds
         )
         
         # Step 7: Determine which bet types qualify using CALIBRATED probabilities
@@ -1268,7 +1269,7 @@ class PredictionService:
             from app.models.player_game_stat import PlayerGameStat
             from sqlalchemy import func
             
-            # Map stat_type to database column
+            # Map stat_type to ACTUAL database column (not nonexistent attributes)
             stat_column_map = {
                 # NBA
                 'points': PlayerGameStat.points,
@@ -1283,26 +1284,26 @@ class PredictionService:
                 'passing_tds': PlayerGameStat.passing_tds,
                 'rushing_tds': PlayerGameStat.rushing_tds,
                 'receiving_tds': PlayerGameStat.receiving_tds,
-                # MLB
+                # MLB - use ACTUAL columns from model
                 'hits': PlayerGameStat.hits,
                 'home_runs': PlayerGameStat.home_runs,
                 'total_bases': PlayerGameStat.total_bases,
                 'strikeouts': PlayerGameStat.strikeouts,
-                'runs': PlayerGameStat.runs,
                 'rbis': PlayerGameStat.rbis,
+                # Note: 'runs' column doesn't exist in PlayerGameStat model
             }
             
             stat_column = stat_column_map.get(stat_type)
             if stat_column is None:
-                # Fallback defaults
+                # No column exists for this stat type
                 self._league_avg_cache[cache_key] = (None, None)
                 return (None, None)
             
-            # Query last 100 games worth of data for this sport
+            # Query last 6 months of data for this sport
             from app.models.game import Game
             from datetime import date, timedelta
             
-            cutoff_date = date.today() - timedelta(days=180)  # Last 6 months
+            cutoff_date = date.today() - timedelta(days=180)
             
             result = self.db.query(
                 func.avg(stat_column).label('mean'),
@@ -1342,11 +1343,10 @@ class PredictionService:
                 'receiving_tds': (0.5, 0.5),
             },
             'MLB': {
-                'hits': (1.0, 1.0),
-                'home_runs': (0.3, 0.5),
-                'total_bases': (1.5, 1.5),
-                'strikeouts': (1.0, 1.0),
-                'runs': (0.5, 0.7),
+                'hits': (0.9, 0.9),  # Per game for a starter
+                'home_runs': (0.15, 0.4),  # Per game
+                'total_bases': (1.2, 1.3),  # Per game
+                'strikeouts': (0.8, 0.9),  # For batters
                 'rbis': (0.5, 0.7),
             }
         }

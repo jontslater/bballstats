@@ -16,6 +16,7 @@ class CalibratedProbabilityCalculator:
     """Calculate calibrated probabilities with shrinkage and base rates."""
     
     # League-wide base rates for different sports and stat types
+    # These are P(player exceeds typical line) not per-game averages
     BASE_HIT_RATES = {
         'NBA': {
             'points': 0.52,
@@ -34,12 +35,14 @@ class CalibratedProbabilityCalculator:
             'receiving_tds': 0.46,
         },
         'MLB': {
-            'hits': 0.48,
-            'home_runs': 0.45,
-            'total_bases': 0.49,
-            'strikeouts': 0.51,
-            'runs': 0.47,
+            # P(hits >= 1) for a starter: ~65-70%
+            # P(total_bases >= 1): ~65-70%
+            # P(home_runs >= 1): ~15-20%
+            'hits': 0.67,  # Most starters get at least 1 hit
+            'home_runs': 0.18,  # HRs are rare
+            'total_bases': 0.68,  # Similar to hits
             'rbis': 0.48,
+            'strikeouts': 0.52,  # For pitchers
         }
     }
     
@@ -178,10 +181,12 @@ class CalibratedProbabilityCalculator:
         Adjust probability toward base rate, weighted by sample size.
         
         Small samples get pulled more toward the base rate.
+        But don't over-shrink - use lighter weight.
         """
         # Weight base rate inversely with sample size
-        # At n=10: weight base rate 50%, at n=50+: weight base rate 5%
-        base_weight = min(0.50, 10.0 / effective_n)
+        # At n=10: weight base rate 20%, at n=50+: weight base rate 2%
+        # Reduced from previous 50%/5% to avoid over-shrinking
+        base_weight = min(0.20, 5.0 / effective_n)
         player_weight = 1.0 - base_weight
         
         adjusted_prob = player_weight * raw_prob + base_weight * base_hit_rate

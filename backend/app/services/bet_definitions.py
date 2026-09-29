@@ -79,14 +79,20 @@ class BetDefinitions:
         )
         
         # Generate candidate lines on discrete grid
-        # Range: 0.5 to 2x mean, step by 0.5
-        max_line = max(adjusted_mean * 2, standard_line + 10)
-        candidates = [x * 0.5 for x in range(1, int(max_line * 2) + 1)]
+        # Range: 0.5 to reasonable max for this stat type
+        max_candidate = self._get_max_line_for_stat(stat_type, adjusted_mean)
+        candidates = [x * 0.5 for x in range(1, int(max_candidate * 2) + 1)]
+        
+        # Ensure minimum line is 0.5
+        candidates = [c for c in candidates if c >= 0.5]
         
         # Find safe line: highest line with p >= 0.65
         safe_line = None
         safe_probability = None
         for line in sorted(candidates, reverse=True):
+            if line > standard_line * 0.5:  # Safe line should be <= standard
+                continue
+            
             prob_data = self.calibrator.calculate_probability_for_line(
                 line, adjusted_mean, adjusted_std, sample_size, stat_type,
                 league_mean, league_std
@@ -96,9 +102,9 @@ class BetDefinitions:
                 safe_probability = prob_data['probability']
                 break
         
-        # If no safe line found, use a very low line
+        # If no safe line found, use lowest candidate
         if safe_line is None:
-            safe_line = max(0.5, standard_line * 0.5)
+            safe_line = min(candidates) if candidates else 0.5
             safe_data = self.calibrator.calculate_probability_for_line(
                 safe_line, adjusted_mean, adjusted_std, sample_size, stat_type,
                 league_mean, league_std
@@ -106,6 +112,8 @@ class BetDefinitions:
             safe_probability = safe_data['probability']
         
         # Find long shot line: line with p in 0.15-0.30 range (prefer ~0.20)
+        # Cap at sport-specific single-game maximum
+        long_shot_max = self._get_long_shot_max_for_stat(stat_type)
         long_shot_line = None
         long_shot_probability = None
         best_distance = float('inf')
@@ -114,6 +122,8 @@ class BetDefinitions:
         for line in candidates:
             if line <= standard_line:
                 continue  # Long shot should be harder than standard
+            if line > long_shot_max:
+                continue  # Cap at plausible single-game maximum
             
             prob_data = self.calibrator.calculate_probability_for_line(
                 line, adjusted_mean, adjusted_std, sample_size, stat_type,
@@ -128,14 +138,28 @@ class BetDefinitions:
                     long_shot_line = line
                     long_shot_probability = prob
         
-        # If no long shot found, use a high line
+        # If no long shot found in probability range or exceeds max, don't force one
         if long_shot_line is None:
-            long_shot_line = standard_line + max(3, adjusted_std)
-            long_shot_data = self.calibrator.calculate_probability_for_line(
-                long_shot_line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                league_mean, league_std
-            )
-            long_shot_probability = long_shot_data['probability']
+            # Try to find any line above standard within cap
+            for line in sorted(candidates):
+                if line > standard_line and line <= long_shot_max:
+                    prob_data = self.calibrator.calculate_probability_for_line(
+                        line, adjusted_mean, adjusted_std, sample_size, stat_type,
+                        league_mean, league_std
+                    )
+                    if prob_data['probability'] < 0.40:  # At least somewhat unlikely
+                        long_shot_line = line
+                        long_shot_probability = prob_data['probability']
+                        break
+            
+            # If still no long shot, use None (no long shot pick)
+            if long_shot_line is None:
+                long_shot_line = standard_line + 1.0  # Default fallback
+                long_shot_data = self.calibrator.calculate_probability_for_line(
+                    long_shot_line, adjusted_mean, adjusted_std, sample_size, stat_type,
+                    league_mean, league_std
+                )
+                long_shot_probability = long_shot_data['probability']
         
         return {
             'safe_line': round(safe_line, 1),
@@ -179,3 +203,65 @@ class BetDefinitions:
         
         # Default to pass if nothing qualifies
         return 'pass'
+    
+    def _get_max_line_for_stat(self, stat_type: str, mean: float) -> float:
+        """Get reasonable maximum line for candidate generation."""
+        if self.sport == 'MLB':
+            mlb_maxes = {
+                'hits': 5.0,  # Very high for a single game
+                'home_runs': 3.0,  # 3 HRs is exceptional
+                'total_bases': 10.0,  # 3 HRs = 12 bases, but 10 is reasonable max
+                'rbis': 8.0,
+                'strikeouts': 15.0,  # For pitchers
+            }
+            return mlb_maxes.get(stat_type, max(mean * 3, 10.0))
+        elif self.sport == 'NFL':
+            nfl_maxes = {
+                'passing_yards': 450.0,
+                'rushing_yards': 200.0,
+                'receiving_yards': 200.0,
+                'receptions': 15.0,
+                'passing_tds': 5.0,
+                'rushing_tds': 4.0,
+                'receiving_tds': 3.0,
+            }
+            return nfl_maxes.get(stat_type, max(mean * 3, 20.0))
+        else:  # NBA
+            nba_maxes = {
+                'points': 60.0,
+                'rebounds': 25.0,
+                'assists': 20.0,
+                'three_pointers_made': 12.0,
+            }
+            return nba_maxes.get(stat_type, max(mean * 3, 30.0))
+    
+    def _get_long_shot_max_for_stat(self, stat_type: str) -> float:
+        """Get plausible single-game maximum for long-shot lines."""
+        if self.sport == 'MLB':
+            mlb_long_shot_maxes = {
+                'hits': 2.5,  # 3+ hits in a game is rare
+                'home_runs': 1.5,  # 2+ HRs is a long shot
+                'total_bases': 4.5,  # 5+ bases is exceptional
+                'rbis': 4.5,  # 5+ RBI is a long shot
+                'strikeouts': 10.5,  # For pitchers
+            }
+            return mlb_long_shot_maxes.get(stat_type, 10.0)
+        elif self.sport == 'NFL':
+            nfl_long_shot_maxes = {
+                'passing_yards': 350.0,
+                'rushing_yards': 150.0,
+                'receiving_yards': 150.0,
+                'receptions': 12.0,
+                'passing_tds': 4.0,
+                'rushing_tds': 3.0,
+                'receiving_tds': 2.5,
+            }
+            return nfl_long_shot_maxes.get(stat_type, 200.0)
+        else:  # NBA
+            nba_long_shot_maxes = {
+                'points': 45.0,
+                'rebounds': 18.0,
+                'assists': 15.0,
+                'three_pointers_made': 9.0,
+            }
+            return nba_long_shot_maxes.get(stat_type, 40.0)
