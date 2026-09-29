@@ -62,7 +62,8 @@ def generate_predictions_for_game(db: Session, game_id: int):
         all_players = players_in_game
 
     print(f"Found {len(all_players)} players")
-    created = skipped = 0
+    created = skipped = errors = 0
+    error_types = {}
 
     for player in all_players:
         pos = (player.position or '').upper()
@@ -92,11 +93,26 @@ def generate_predictions_for_game(db: Session, game_id: int):
                 else:
                     skipped += 1
             except Exception as e:
+                error_type = type(e).__name__
+                errors += 1
+                error_types[error_type] = error_types.get(error_type, 0) + 1
                 skipped += 1
                 if skipped <= 5:
-                    print(f"  Skip {player.name} {stat_type}: {e}")
+                    print(f"  ERROR ({error_type}): {player.name} {stat_type}: {e}")
 
-    print(f"\nCreated: {created}, Skipped: {skipped}")
+    print(f"\nCreated: {created}, Skipped: {skipped}, Errors: {errors}")
+    if error_types:
+        print("Error types:")
+        for err_type, count in sorted(error_types.items(), key=lambda x: -x[1]):
+            print(f"  {err_type}: {count}")
+    
+    # Return 1 (failure) if more than 20% had errors
+    total_attempted = created + skipped
+    if total_attempted > 0 and errors / total_attempted > 0.20:
+        print(f"\nFAILED: {errors}/{total_attempted} ({errors/total_attempted*100:.1f}%) had errors (threshold: 20%)")
+        return 1
+    
+    return 0
 
 
 def main():
@@ -107,9 +123,10 @@ def main():
     args = parser.parse_args()
 
     db = SessionLocal()
+    exit_code = 0
     try:
         if args.game_id:
-            generate_predictions_for_game(db, args.game_id)
+            exit_code = generate_predictions_for_game(db, args.game_id) or 0
         elif args.date:
             d = datetime.strptime(args.date, '%Y-%m-%d').date()
             games = db.query(Game).filter(
@@ -118,7 +135,9 @@ def main():
                 Game.game_status.in_(['scheduled', 'in_progress'])
             ).all()
             for g in games:
-                generate_predictions_for_game(db, g.game_id)
+                result = generate_predictions_for_game(db, g.game_id) or 0
+                if result != 0:
+                    exit_code = result
         elif args.upcoming:
             today = date.today()
             end = today + timedelta(days=7)
@@ -129,11 +148,16 @@ def main():
                 Game.game_status == 'scheduled'
             ).all()
             for g in games:
-                generate_predictions_for_game(db, g.game_id)
+                result = generate_predictions_for_game(db, g.game_id) or 0
+                if result != 0:
+                    exit_code = result
         else:
             print("Specify --date, --game-id, or --upcoming")
+            exit_code = 1
     finally:
         db.close()
+    
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

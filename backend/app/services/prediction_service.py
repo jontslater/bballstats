@@ -868,9 +868,10 @@ class PredictionService:
         Generate predictions for all players in a game.
         
         Returns:
-            Dict with counts of predictions created/updated
+            Dict with counts of predictions created/updated/skipped/errors
         """
         import logging
+        from collections import defaultdict
         logger = logging.getLogger(__name__)
 
         game = self.db.query(Game).filter(Game.game_id == game_id).first()
@@ -969,6 +970,7 @@ class PredictionService:
         created = 0
         updated = 0
         skipped = 0
+        errors = defaultdict(int)  # Track error types
         
         total_predictions = len(all_players) * len(stat_types)
         processed = 0
@@ -1024,7 +1026,9 @@ class PredictionService:
                         self.db.commit()
                         
                 except Exception as e:
-                    print(f"  ⚠️  Error generating prediction for player {player.player_id}, stat {stat_type}: {e}")
+                    error_type = type(e).__name__
+                    errors[error_type] += 1
+                    print(f"  ERROR ({error_type}): player {player.player_id}, stat {stat_type}: {e}")
                     skipped += 1
                     self.db.rollback()
                     continue
@@ -1037,7 +1041,19 @@ class PredictionService:
         # Final commit
         self.db.commit()
         
-        return {'created': created, 'updated': updated, 'skipped': skipped}
+        # Report error summary
+        if errors:
+            print(f"\n  ERROR SUMMARY:")
+            for error_type, count in sorted(errors.items(), key=lambda x: -x[1]):
+                print(f"    {error_type}: {count} occurrences")
+        
+        return {
+            'created': created,
+            'updated': updated,
+            'skipped': skipped,
+            'errors': dict(errors),
+            'total_errors': sum(errors.values())
+        }
     
     def _generate_combo_predictions_for_game(self, game_id: int, players: List) -> tuple[int, int]:
         """

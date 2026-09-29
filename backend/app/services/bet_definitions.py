@@ -66,7 +66,7 @@ class BetDefinitions:
             # Shrink mean if league data available
             if league_mean is not None:
                 shrunk_mean, _ = self.calibrator._shrink_mean_toward_prior(
-                    adjusted_mean, sample_size, league_mean, league_std or adjusted_std
+                    adjusted_mean, league_mean, sample_size
                 )
             else:
                 shrunk_mean = adjusted_mean
