@@ -63,6 +63,9 @@ class CalibratedProbabilityCalculator:
         """
         Calculate calibrated probability of exceeding a line.
         
+        For MLB count stats, uses discrete Poisson/Negative Binomial.
+        For other stats, uses Normal/Student-t with shrinkage and base rate adjustment.
+        
         Args:
             line: The betting line to evaluate
             player_mean: Player's historical mean
@@ -75,6 +78,52 @@ class CalibratedProbabilityCalculator:
         Returns:
             Dict with 'probability', 'shrunk_mean', 'effective_std', 'effective_n'
         """
+        # For MLB count stats, use discrete Poisson/Negative Binomial model
+        if self.sport == 'MLB' and stat_type in ['hits', 'home_runs', 'total_bases']:
+            # Shrinkage toward league rate
+            if league_mean is not None:
+                if stat_type == 'home_runs':
+                    prior_strength = 20.0  # Strong shrinkage for HRs
+                else:
+                    prior_strength = 10.0  # Moderate shrinkage
+                
+                weight_player = sample_size / (sample_size + prior_strength)
+                shrunk_rate = weight_player * player_mean + (1 - weight_player) * league_mean
+            else:
+                shrunk_rate = player_mean
+            
+            # Estimate dispersion from mean and std
+            if player_mean > 0:
+                dispersion = (player_std ** 2) / player_mean
+            else:
+                dispersion = 1.0
+            
+            # Choose distribution
+            try:
+                if dispersion > 1.5 and player_std ** 2 > player_mean and player_mean > 0:
+                    # Negative Binomial for over-dispersed
+                    r = (player_mean ** 2) / (player_std ** 2 - player_mean)
+                    p_nb = player_mean / (player_std ** 2)
+                    prob = 1.0 - stats.nbinom.cdf(int(line), r, p_nb)
+                else:
+                    # Poisson for standard count data
+                    prob = 1.0 - stats.poisson.cdf(int(line), shrunk_rate)
+            except (ValueError, ZeroDivisionError):
+                # Fallback to 50%
+                prob = 0.5
+            
+            # Clamp
+            prob = max(0.01, min(0.99, prob))
+            
+            return {
+                'probability': round(prob, 3),
+                'shrunk_mean': round(shrunk_rate, 2),
+                'effective_std': round(player_std, 2),
+                'effective_n': sample_size,
+                'raw_probability': round(prob, 3)
+            }
+        
+        # For continuous stats or non-MLB, use Normal/Student-t
         # Apply Empirical Bayes shrinkage to the mean
         if league_mean is not None:
             shrunk_mean, effective_n = self._shrink_mean_toward_prior(
