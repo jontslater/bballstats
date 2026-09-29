@@ -602,7 +602,24 @@ class PredictionService:
         # Note: We ALWAYS generate all three bet types (safe, standard, long_shot) for each prediction
         # Even if a bet type doesn't qualify (low probability), we still save it so regeneration
         # updates all existing rows. The API layer will filter out unqualified bets.
-        qualifying_bet_types = ['safe', 'standard', 'long_shot']  # Always generate all three
+        
+        # CRITICAL FIX: If long_shot_line is None (probability < 5%), do NOT emit long_shot row
+        qualifying_bet_types = ['safe', 'standard']
+        if bet_lines['long_shot_line'] is not None and bet_lines['long_shot_probability'] is not None:
+            qualifying_bet_types.append('long_shot')
+        else:
+            # Delete any stale long_shot prediction for this player/stat/game
+            stale_long_shot = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.player_id == player_id,
+                    Prediction.game_id == game_id,
+                    Prediction.stat_type == stat_type,
+                    Prediction.bet_type == 'long_shot',
+                    Prediction.sport == self.sport
+                )
+            ).first()
+            if stale_long_shot:
+                self.db.delete(stale_long_shot)
         
         # Skip duplicates when lines collapse to the same value
         # This prevents generating multiple rows with identical lines

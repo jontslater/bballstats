@@ -189,39 +189,19 @@ class BetDefinitions:
                         long_shot_probability = prob
         
         # If no long shot found in probability range or exceeds max, don't force one
+        # CRITICAL: Do NOT fall back to auto-generating a long_shot line when probability is too low
+        # If long_shot_line is None here, it means no valid long_shot exists - leave it None
         if long_shot_line is None:
-            # Try to find any line above standard within cap (prefer x.5)
-            for line in sorted(candidates):
-                if line > standard_line and line <= long_shot_max:
-                    # Prefer x.5 lines for MLB count stats
-                    if self.sport == 'MLB' and stat_type in ['hits', 'total_bases', 'home_runs']:
-                        if line > 0 and line % 1.0 == 0:
-                            continue
-                    
-                    prob_data = self.calibrator.calculate_probability_for_line(
-                        line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                        league_mean, league_std
-                    )
-                    if prob_data['probability'] < 0.40:  # At least somewhat unlikely
-                        long_shot_line = line
-                        long_shot_probability = prob_data['probability']
-                        break
-            
-            # If still no long shot, use x.5 default fallback
-            if long_shot_line is None:
-                long_shot_line = standard_line + 0.5 if (standard_line % 1.0 == 0) else standard_line + 1.0
-                long_shot_data = self.calibrator.calculate_probability_for_line(
-                    long_shot_line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                    league_mean, league_std
-                )
-                long_shot_probability = long_shot_data['probability']
+            # No valid long_shot found (either out of p range or above max line)
+            # Do NOT force a fallback line - keep it None
+            long_shot_probability = None
         
         return {
             'safe_line': round(safe_line, 1),
             'safe_probability': safe_probability,
             'standard_line': round(standard_line, 1),
             'standard_probability': standard_data['probability'],
-            'long_shot_line': round(long_shot_line, 1),
+            'long_shot_line': round(long_shot_line, 1) if long_shot_line is not None else None,
             'long_shot_probability': long_shot_probability,
             'line_source': line_source,
             'is_synthetic': is_synthetic,

@@ -74,33 +74,19 @@ class CalibratedProbabilityCalculator:
         Apply high-end compression to fix overshoot at p >= 0.65.
         
         Desktop backtest showed TB/hits at p>=0.65 overshoot by ~7-10 pts.
-        Compress probabilities above knee_point by shrinking excess over base rate.
+        Compress probabilities above knee_point using strictly monotone transformation.
         
-        Maintains monotonicity: higher raw prob -> higher compressed prob.
+        Formula: p' = knee + (p - knee) * factor for p > knee
+        
+        Maintains strict monotonicity: higher raw prob -> higher compressed prob (no clamping).
         """
         if self.sport != 'MLB' or prob <= COMPRESSION_KNEE:
             return prob
         
-        # Get stat/line-specific base rate
-        base_rates = {
-            ('hits', 0.5): 0.58,
-            ('hits', 1.5): 0.26,
-            ('total_bases', 0.5): 0.58,
-            ('total_bases', 1.5): 0.38,
-            ('home_runs', 0.5): 0.12,
-        }
-        
-        line_rounded = round(line, 1)
-        base_rate = base_rates.get((stat_type, line_rounded), 0.50)
-        
-        # For probs above knee, compress the excess over base rate
-        if prob > COMPRESSION_KNEE:
-            excess = prob - base_rate
-            compressed_excess = excess * COMPRESSION_FACTOR
-            prob = base_rate + compressed_excess
-            
-            # Ensure still above knee (monotonicity)
-            prob = max(prob, COMPRESSION_KNEE)
+        # Strictly monotone compression above knee: apply factor to excess only
+        # p' = knee + (p - knee) * factor
+        # This ensures p1 > p2 => p1' > p2' (no ties from clamping)
+        prob = COMPRESSION_KNEE + (prob - COMPRESSION_KNEE) * COMPRESSION_FACTOR
         
         return prob
     

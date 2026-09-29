@@ -27,7 +27,7 @@ class SuggestedBetsService(BaseSportService):
         game_date: Optional[date] = None,
         limit: int = 10,
         min_probability: float = 0.60,
-        include_long_shots: bool = True
+        include_long_shots: bool = False  # FIXED: Default to False, safe tier only
     ) -> List[Dict]:
         """
         Get suggested bets ranked by quality.
@@ -154,20 +154,9 @@ class SuggestedBetsService(BaseSportService):
                 continue
             
             # Get stat/line-specific base rate for edge calculation
-            base_rates = {
-                ('hits', 0.5): 0.58,
-                ('hits', 1.5): 0.26,
-                ('hits', 2.5): 0.10,
-                ('total_bases', 0.5): 0.58,
-                ('total_bases', 1.5): 0.38,
-                ('total_bases', 2.5): 0.20,
-                ('total_bases', 3.5): 0.10,
-                ('home_runs', 0.5): 0.12,
-                ('home_runs', 1.5): 0.01,
-            }
+            from app.constants.base_rates import get_base_rate
             line_rounded = round(line, 1)
-            stat_line_key = (pred.stat_type, line_rounded)
-            base_rate = base_rates.get(stat_line_key, 0.50)
+            base_rate = get_base_rate(pred.stat_type, line_rounded, default=0.50)
             
             edge = probability - base_rate
             
@@ -401,19 +390,10 @@ class SuggestedBetsService(BaseSportService):
         
         # Stat/line-specific league base rates (empirical from data)
         # These are P(stat > line) from league-wide data
+        from app.constants.base_rates import MLB_STAT_LINE_BASE_RATES
+        
         league_base_rates = {
-            'MLB': {
-                ('hits', 0.5): 0.58,
-                ('hits', 1.5): 0.26,
-                ('hits', 2.5): 0.10,
-                ('total_bases', 0.5): 0.58,
-                ('total_bases', 1.5): 0.38,
-                ('total_bases', 2.5): 0.20,
-                ('total_bases', 3.5): 0.10,
-                ('home_runs', 0.5): 0.12,
-                ('home_runs', 1.5): 0.01,
-                ('strikeouts', 0.5): 0.50,  # Pitchers
-            },
+            'MLB': MLB_STAT_LINE_BASE_RATES,
             'NBA': {
                 ('points', 10.0): 0.52,
                 ('rebounds', 5.0): 0.51,
@@ -512,10 +492,10 @@ class SuggestedBetsService(BaseSportService):
         if game_date is None:
             game_date = date.today()
         
-        # Get suggested bets first (include long shots for parlay variety)
+        # Get suggested bets first (exclude long shots by default for safety)
         # Use lower threshold for NFL since predictions tend to be less confident
         min_prob_threshold = 0.50 if self.sport == 'NFL' else 0.60
-        suggested_bets = self.get_suggested_bets(game_date, limit=50, min_probability=min_prob_threshold, include_long_shots=True)
+        suggested_bets = self.get_suggested_bets(game_date, limit=50, min_probability=min_prob_threshold, include_long_shots=False)
         
         if len(suggested_bets) < min_legs:
             return []
