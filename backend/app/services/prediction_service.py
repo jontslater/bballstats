@@ -46,51 +46,17 @@ class PredictionService:
         
         self.dist_engine = DistributionEngine(db)
         self.adjustments = PredictionAdjustments(db)
-        self.pass_rules = PassRules()
+        self.pass_rules = PassRules(sport=sport)  # Pass sport to PassRules
         self.redist_engine = RedistributionEngine(db)
         self.context_calc = GameContextCalculator(db)
-        # Initialize BetDefinitions (calibration will be loaded lazily)
-        self.bet_defs = BetDefinitions()
+        
+        # Initialize new bet definitions with sport
+        self.bet_defs = BetDefinitions(sport=sport)
+        
         self.lineup_service = LineupService(db)
         self.injury_context = InjuryContext(db)
         self.ml_optimizer = MLOptimizer(db)
         self.calibration_service = PredictionCalibration(db)
-        
-        # Calibration cache (loaded on first use)
-        self._calibration_cache = None
-        self._calibration_loaded = False
-    
-    def _load_calibration_data(self):
-        """
-        Load probability calibration data from calibration service.
-        
-        This is called lazily on first use to avoid loading calibration
-        data if it's not needed or not available.
-        """
-        try:
-            # Get calibration curves from calibration service
-            calibration_curves = self.calibration_service.calculate_calibration_curves()
-            
-            # Convert to format expected by BetDefinitions
-            self._calibration_cache = {}
-            for bet_type in ['safe', 'standard', 'long_shot']:
-                if bet_type in calibration_curves:
-                    self._calibration_cache[bet_type] = {}
-                    for range_label, cal_data in calibration_curves[bet_type].items():
-                        # Store calibration adjustments
-                        self._calibration_cache[bet_type][range_label] = {
-                            'adjustment': cal_data.get('calibration_adjustment', 0.0),
-                            'min_prob': cal_data.get('min_prob', 0.0),
-                            'max_prob': cal_data.get('max_prob', 1.0)
-                        }
-            
-            self._calibration_loaded = True
-        except Exception as e:
-            # If calibration loading fails, just use empty calibration
-            # This allows predictions to still work without calibration
-            print(f"Warning: Could not load calibration data: {e}")
-            self._calibration_cache = {}
-            self._calibration_loaded = True
     
     def generate_prediction(
         self,
@@ -127,9 +93,8 @@ class PredictionService:
             
             # Check if player is on the correct team for this game
             if player.current_team_id not in [game.home_team_id, game.away_team_id]:
-                # Log this as it indicates a team assignment issue
-                print(f"⚠️  Warning: {player.name} (team_id={player.current_team_id}) not in game {game.game_id} (teams: {game.home_team_id}, {game.away_team_id})")
-                return None  # Player not on either team, skip
+                # Player not on either team, skip silently (roster data issue)
+                return None
             
             # Get blowout risk early to inform decision (needed for both scheduled and finished games)
             game_context = self.context_calc.get_game_context(game_id, player.current_team_id)
@@ -593,31 +558,30 @@ class PredictionService:
             adjusted_std=variance_adjustments['adjusted_std']
         )
         
-        # Step 5: Load calibration data if not already loaded (lazy loading)
-        # Note: Calibration is recalculated fresh each time to ensure we have latest data
-        # This ensures that if you update prediction results, the next regeneration uses updated calibration
-        if not self._calibration_loaded:
-            self._load_calibration_data()
-        else:
-            # Reload calibration data to ensure we have the latest adjustments
-            # This is important if prediction results were updated since last load
-            self._load_calibration_data()
+        # Step 5: Calculate bet lines using calibrated probability
+        # Get league averages for this stat type (optional, for shrinkage)
+        league_mean, league_std = self._get_league_averages(stat_type)
         
-        # Update BetDefinitions with calibration data if available
-        if self._calibration_cache:
-            self.bet_defs.calibration_data = self._calibration_cache
+        # TODO: Check if real betting line exists (from betting_lines table)
+        # For now, we'll pass None to synthesize from the player's distribution
+        real_line = None  # self._get_real_betting_line(game_id, player_id, stat_type)
         
-        # Step 6: Calculate bet lines (with calibration if available)
         bet_lines = self.bet_defs.calculate_bet_lines(
             adjusted_mean=mean_adjustments['adjusted_mean'],
             adjusted_std=variance_adjustments['adjusted_std'],
-            percentiles=adjusted_percentiles,
-            apply_calibration=True
+            sample_size=base_dist['sample_size'],
+            stat_type=stat_type,
+            real_line=real_line,
+            league_mean=league_mean,
+            league_std=league_std
         )
         
-        # Step 7: Evaluate pass rules
+        # Step 6: Evaluate pass rules with new confidence calculation
         # usage_redist already calculated above
         usage_change = usage_redist.get('usage_change_pct', 0) / 100.0
+        
+        # Calculate days since last game
+        days_since_last_game = self._get_days_since_last_game(player_id, game.game_date)
         
         pass_eval = self.pass_rules.evaluate_pass(
             sample_size=base_dist['sample_size'],
@@ -627,40 +591,93 @@ class PredictionService:
             has_injury_uncertainty=minutes_redist['benefits_from_injury'],
             blowout_risk_high=blowout_risk_high,
             is_starter=is_confirmed_starter,
-            sport=self.sport
+            line_source=bet_lines['line_source'],
+            is_synthetic_line=bet_lines['is_synthetic'],
+            days_since_last_game=days_since_last_game,
+            stat_type=stat_type  # Pass stat_type for sport-specific CV thresholds
         )
         
-        # Step 7: Determine which bet types qualify (can create multiple predictions!)
-        # This allows showing safe, standard, AND long shot options for the same player
-        # NOTE: High volatility no longer blocks predictions - we just label them as volatile
-        qualifying_bet_types = []
+        # Step 7: Determine which bet types qualify using CALIBRATED probabilities
+        # No more flat 0.75/0.60/0.25 - use realistic thresholds
+        # Note: We ALWAYS generate all three bet types (safe, standard, long_shot) for each prediction
+        # Even if a bet type doesn't qualify (low probability), we still save it so regeneration
+        # updates all existing rows. The API layer will filter out unqualified bets.
         
-        # Always check bet probabilities, regardless of pass rules
-        # Pass rules now only affect confidence/warnings, not blocking
-        # Safe bets: high probability (≥70%)
-        if bet_lines['safe_probability'] >= 0.70:
-            qualifying_bet_types.append('safe')
-        
-        # Standard bets: moderate probability (≥45%)
-        if bet_lines['standard_probability'] >= 0.45:
-            qualifying_bet_types.append('standard')
-        
-        # Long shots: lower probability but reasonable (8-30%)
-        # IMPORTANT: Always include long shots if they qualify, even if safe/standard exist
-        if 0.08 <= bet_lines['long_shot_probability'] <= 0.30:
+        # CRITICAL FIX: If long_shot_line is None (probability < 5%), do NOT emit long_shot row
+        qualifying_bet_types = ['safe', 'standard']
+        if bet_lines['long_shot_line'] is not None and bet_lines['long_shot_probability'] is not None:
             qualifying_bet_types.append('long_shot')
+        else:
+            # Delete any stale long_shot prediction for this player/stat/game
+            stale_long_shot = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.player_id == player_id,
+                    Prediction.game_id == game_id,
+                    Prediction.stat_type == stat_type,
+                    Prediction.bet_type == 'long_shot',
+                    Prediction.sport == self.sport
+                )
+            ).first()
+            if stale_long_shot:
+                self.db.delete(stale_long_shot)
         
-        # If nothing qualifies, use the old logic to determine primary bet type
-        if not qualifying_bet_types:
-            bet_type = self.bet_defs.determine_bet_type(
-                safe_probability=bet_lines['safe_probability'],
-                standard_probability=bet_lines['standard_probability'],
-                long_shot_probability=bet_lines['long_shot_probability'],
-                should_pass=pass_eval['should_pass']
-            )
-            qualifying_bet_types = [bet_type] if bet_type != 'pass' else []
+        # Skip duplicates when lines collapse to the same value
+        # This prevents generating multiple rows with identical lines
+        if bet_lines['safe_line'] == bet_lines['standard_line']:
+            qualifying_bet_types.remove('standard')
+            
+            # Delete any existing stale 'standard' prediction for this player/stat/game
+            stale_standard = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.player_id == player_id,
+                    Prediction.game_id == game_id,
+                    Prediction.stat_type == stat_type,
+                    Prediction.bet_type == 'standard',
+                    Prediction.sport == self.sport
+                )
+            ).first()
+            if stale_standard:
+                self.db.delete(stale_standard)
         
-        # Step 9: Analyze lineup context for reasoning
+        # Check if safe equals long_shot (only if long_shot exists)
+        if bet_lines['long_shot_line'] is not None and bet_lines['safe_line'] == bet_lines['long_shot_line']:
+            if 'long_shot' in qualifying_bet_types:
+                qualifying_bet_types.remove('long_shot')
+            
+            # Delete stale long_shot if it now equals safe
+            stale_long_shot = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.player_id == player_id,
+                    Prediction.game_id == game_id,
+                    Prediction.stat_type == stat_type,
+                    Prediction.bet_type == 'long_shot',
+                    Prediction.sport == self.sport
+                )
+            ).first()
+            if stale_long_shot:
+                self.db.delete(stale_long_shot)
+        
+        # Check if standard equals long_shot (only if both exist)
+        if ('standard' in qualifying_bet_types and 
+            bet_lines['long_shot_line'] is not None and 
+            bet_lines['standard_line'] == bet_lines['long_shot_line']):
+            if 'long_shot' in qualifying_bet_types:
+                qualifying_bet_types.remove('long_shot')
+            
+            # Delete stale long_shot if it now equals standard
+            stale_long_shot = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.player_id == player_id,
+                    Prediction.game_id == game_id,
+                    Prediction.stat_type == stat_type,
+                    Prediction.bet_type == 'long_shot',
+                    Prediction.sport == self.sport
+                )
+            ).first()
+            if stale_long_shot:
+                self.db.delete(stale_long_shot)
+        
+        # Step 8: Analyze lineup context for reasoning
         lineup_context = None
         try:
             from app.services.prediction_history_helper import analyze_lineup_context
@@ -727,30 +744,59 @@ class PredictionService:
             prediction.percentile_85 = adjusted_percentiles.get(85)
             prediction.percentile_90 = adjusted_percentiles.get(90)
             prediction.sample_size = base_dist.get('sample_size')
+            
+            # Validate lines are positive and sensible
+            # Note: long_shot_line can be None (when p < 5%), which is valid
+            if (bet_lines['safe_line'] <= 0 or 
+                bet_lines['standard_line'] <= 0 or 
+                (bet_lines['long_shot_line'] is not None and bet_lines['long_shot_line'] <= 0)):
+                # Skip this prediction entirely - invalid line
+                print(f"⚠️  Skipping {player.name} {stat_type}: invalid line (safe={bet_lines['safe_line']}, std={bet_lines['standard_line']}, long={bet_lines['long_shot_line']})")
+                return None
+            
             prediction.safe_line = bet_lines['safe_line']
             prediction.safe_probability = bet_lines['safe_probability']
             prediction.safe_under_probability = 1.0 - bet_lines['safe_probability']
             prediction.standard_line = bet_lines['standard_line']
             prediction.standard_probability = bet_lines['standard_probability']
             prediction.standard_under_probability = 1.0 - bet_lines['standard_probability']
+            
+            # long_shot can be None (no long-shot tier when p < 5%)
             prediction.long_shot_line = bet_lines['long_shot_line']
             prediction.long_shot_probability = bet_lines['long_shot_probability']
-            prediction.long_shot_under_probability = 1.0 - bet_lines['long_shot_probability']
+            if bet_lines['long_shot_probability'] is not None:
+                prediction.long_shot_under_probability = 1.0 - bet_lines['long_shot_probability']
+            else:
+                prediction.long_shot_under_probability = None
             prediction.bet_type = bet_type
             prediction.pass_reason = pass_eval['reason'] if pass_eval['should_pass'] else None
-            # Apply lineup context confidence modifier
-            base_confidence = pass_eval['confidence_level']
+            
+            # New confidence fields
+            prediction.line_source = bet_lines['line_source']
+            confidence_data = pass_eval.get('confidence_data', {})
+            prediction.confidence_level = confidence_data.get('tier', 'LOW')
+            prediction.confidence_score = confidence_data.get('score', 0)
+            
+            # Store confidence reasons as JSON string
+            import json
+            prediction.confidence_reasons = json.dumps(confidence_data.get('reasons', []))
+            
+            prediction.data_as_of = game.game_date  # Use game date as data timestamp
+            prediction.n_games_effective = bet_lines.get('effective_n', base_dist.get('sample_size', 0))
+            
+            # Apply lineup context confidence modifier if needed
             if lineup_context and lineup_context.get('confidence_modifier'):
                 modifier = lineup_context['confidence_modifier']
-                if modifier < -0.1 and base_confidence == 'HIGH':
-                    prediction.confidence_level = 'MEDIUM'
-                elif modifier < -0.05 and base_confidence in ['HIGH', 'MEDIUM']:
-                    prediction.confidence_level = 'MEDIUM' if base_confidence == 'HIGH' else 'LOW'
-                else:
-                    prediction.confidence_level = base_confidence
-            else:
-                prediction.confidence_level = base_confidence
-            prediction.volatility_level = self.pass_rules.calculate_volatility_level(base_dist.get('cv'))
+                tier_order = ['MODEL_ONLY', 'LOW', 'MEDIUM', 'HIGH']
+                current_idx = tier_order.index(prediction.confidence_level)
+                if modifier < -0.1 and current_idx > 0:
+                    prediction.confidence_level = tier_order[current_idx - 1]
+                    prediction.confidence_score = max(0, prediction.confidence_score - 15)
+            
+            prediction.volatility_level = self.pass_rules.calculate_volatility_level(
+                base_dist.get('cv'),
+                stat_type=stat_type
+            )
             prediction.reasoning = reasoning
             
             if is_new:
@@ -906,9 +952,10 @@ class PredictionService:
         Generate predictions for all players in a game.
         
         Returns:
-            Dict with counts of predictions created/updated
+            Dict with counts of predictions created/updated/skipped/errors
         """
         import logging
+        from collections import defaultdict
         logger = logging.getLogger(__name__)
 
         game = self.db.query(Game).filter(Game.game_id == game_id).first()
@@ -1007,6 +1054,7 @@ class PredictionService:
         created = 0
         updated = 0
         skipped = 0
+        errors = defaultdict(int)  # Track error types
         
         total_predictions = len(all_players) * len(stat_types)
         processed = 0
@@ -1062,7 +1110,9 @@ class PredictionService:
                         self.db.commit()
                         
                 except Exception as e:
-                    print(f"  ⚠️  Error generating prediction for player {player.player_id}, stat {stat_type}: {e}")
+                    error_type = type(e).__name__
+                    errors[error_type] += 1
+                    print(f"  ERROR ({error_type}): player {player.player_id}, stat {stat_type}: {e}")
                     skipped += 1
                     self.db.rollback()
                     continue
@@ -1075,7 +1125,19 @@ class PredictionService:
         # Final commit
         self.db.commit()
         
-        return {'created': created, 'updated': updated, 'skipped': skipped}
+        # Report error summary
+        if errors:
+            print(f"\n  ERROR SUMMARY:")
+            for error_type, count in sorted(errors.items(), key=lambda x: -x[1]):
+                print(f"    {error_type}: {count} occurrences")
+        
+        return {
+            'created': created,
+            'updated': updated,
+            'skipped': skipped,
+            'errors': dict(errors),
+            'total_errors': sum(errors.values())
+        }
     
     def _generate_combo_predictions_for_game(self, game_id: int, players: List) -> tuple[int, int]:
         """
@@ -1293,4 +1355,135 @@ class PredictionService:
             'skipped': total_skipped,
             'ladders_created': ladders_created if 'ladders_created' in locals() else 0
         }
+    
+    def _get_league_averages(self, stat_type: str) -> tuple:
+        """
+        Get league average and std for a stat type from historical data.
+        
+        Returns:
+            (league_mean, league_std) or (None, None) if not available
+        """
+        # Check cache first
+        cache_key = f'{self.sport}_{stat_type}'
+        if not hasattr(self, '_league_avg_cache'):
+            self._league_avg_cache = {}
+        
+        if cache_key in self._league_avg_cache:
+            return self._league_avg_cache[cache_key]
+        
+        try:
+            from app.models.player_game_stat import PlayerGameStat
+            from sqlalchemy import func
+            
+            # Map stat_type to ACTUAL database column (not nonexistent attributes)
+            stat_column_map = {
+                # NBA
+                'points': PlayerGameStat.points,
+                'rebounds': PlayerGameStat.rebounds,
+                'assists': PlayerGameStat.assists,
+                'three_pointers_made': PlayerGameStat.three_pointers_made,
+                # NFL
+                'passing_yards': PlayerGameStat.passing_yards,
+                'rushing_yards': PlayerGameStat.rushing_yards,
+                'receiving_yards': PlayerGameStat.receiving_yards,
+                'receptions': PlayerGameStat.receptions,
+                'passing_tds': PlayerGameStat.passing_tds,
+                'rushing_tds': PlayerGameStat.rushing_tds,
+                'receiving_tds': PlayerGameStat.receiving_tds,
+                # MLB - use ACTUAL columns from model
+                'hits': PlayerGameStat.hits,
+                'home_runs': PlayerGameStat.home_runs,
+                'total_bases': PlayerGameStat.total_bases,
+                'strikeouts': PlayerGameStat.strikeouts,
+                'rbis': PlayerGameStat.rbis,
+                # Note: 'runs' column doesn't exist in PlayerGameStat model
+            }
+            
+            stat_column = stat_column_map.get(stat_type)
+            if stat_column is None:
+                # No column exists for this stat type
+                self._league_avg_cache[cache_key] = (None, None)
+                return (None, None)
+            
+            # Query last 6 months of data for this sport
+            from app.models.game import Game
+            from datetime import date, timedelta
+            
+            cutoff_date = date.today() - timedelta(days=180)
+            
+            result = self.db.query(
+                func.avg(stat_column).label('mean'),
+                func.stddev(stat_column).label('std')
+            ).join(Game).filter(
+                Game.sport == self.sport,
+                Game.game_status == 'finished',
+                Game.game_date >= cutoff_date,
+                stat_column.isnot(None),
+                # Include ALL values including zeros (count stats can be 0)
+                stat_column >= 0
+            ).first()
+            
+            if result and result.mean is not None:
+                league_mean = float(result.mean)
+                league_std = float(result.std) if result.std else league_mean * 0.3
+                self._league_avg_cache[cache_key] = (league_mean, league_std)
+                return (league_mean, league_std)
+            
+        except Exception as e:
+            print(f"Warning: Could not load league averages for {stat_type}: {e}")
+        
+        # Fallback defaults by sport and stat type
+        fallback_averages = {
+            'NBA': {
+                'points': (20.0, 8.0),
+                'rebounds': (6.0, 3.0),
+                'assists': (4.0, 3.0),
+                'three_pointers_made': (1.5, 1.5),
+            },
+            'NFL': {
+                'passing_yards': (200.0, 80.0),
+                'rushing_yards': (50.0, 30.0),
+                'receiving_yards': (40.0, 25.0),
+                'receptions': (4.0, 2.5),
+                'passing_tds': (1.5, 1.0),
+                'rushing_tds': (0.5, 0.5),
+                'receiving_tds': (0.5, 0.5),
+            },
+            'MLB': {
+                'hits': (0.81, 0.9),  # Per game including zeros
+                'home_runs': (0.113, 0.33),  # Per game including zeros (~11% get >=1 HR)
+                'total_bases': (1.33, 1.3),  # Per game including zeros
+                'strikeouts': (0.8, 0.9),  # For batters
+                'rbis': (0.5, 0.7),
+            }
+        }
+        
+        sport_defaults = fallback_averages.get(self.sport, {})
+        result = sport_defaults.get(stat_type, (None, None))
+        self._league_avg_cache[cache_key] = result
+        return result
+    
+    def _get_days_since_last_game(self, player_id: int, current_game_date: date) -> Optional[int]:
+        """
+        Calculate days since player's last game.
+        
+        Returns:
+            Number of days or None if no prior game found
+        """
+        from app.models.player_game_stat import PlayerGameStat
+        from sqlalchemy import desc
+        
+        last_game_stat = self.db.query(PlayerGameStat).join(Game).filter(
+            and_(
+                PlayerGameStat.player_id == player_id,
+                Game.game_date < current_game_date,
+                Game.game_status == 'finished'
+            )
+        ).order_by(desc(Game.game_date)).first()
+        
+        if last_game_stat and last_game_stat.game:
+            delta = current_game_date - last_game_stat.game.game_date
+            return delta.days
+        
+        return None
 

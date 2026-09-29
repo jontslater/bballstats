@@ -4,13 +4,19 @@ Pass Rules
 Determines when to pass on a bet (not recommend it).
 """
 from typing import Optional, Dict
+from app.services.confidence_calculator import ConfidenceCalculator
 
 
 class PassRules:
     """Evaluate whether to pass on a prediction."""
     
-    @staticmethod
+    def __init__(self, sport: str = 'NBA'):
+        """Initialize with sport-specific configuration."""
+        self.sport = sport
+        self.confidence_calc = ConfidenceCalculator(sport)
+    
     def evaluate_pass(
+        self,
         sample_size: int,
         projected_minutes: float,
         usage_change: Optional[float] = None,
@@ -18,7 +24,10 @@ class PassRules:
         has_injury_uncertainty: bool = False,
         blowout_risk_high: bool = False,
         is_starter: bool = True,
-        sport: str = 'NBA'
+        line_source: str = 'model',
+        is_synthetic_line: bool = True,
+        days_since_last_game: Optional[int] = None,
+        stat_type: Optional[str] = None
     ) -> Dict[str, any]:
         """
         Evaluate if we should pass on this prediction.
@@ -29,33 +38,33 @@ class PassRules:
             usage_change: Change in usage rate (as decimal, e.g., 0.25 for 25%)
             coefficient_of_variation: CV = std_dev / mean
             has_injury_uncertainty: Whether there's uncertainty due to injuries
+            blowout_risk_high: Whether blowout risk is high
+            is_starter: Whether player is a starter
+            line_source: 'sportsbook' or 'model'
+            is_synthetic_line: Whether line is model-generated
+            days_since_last_game: Days since player's last game
+            stat_type: Type of stat for sport-specific CV thresholds
         
         Returns:
-            Dict with 'should_pass' (bool) and 'reason' (str or None)
+            Dict with 'should_pass' (bool), 'reason' (str or None), 'confidence_level', 'confidence_data'
         """
         reasons = []
         
         # Rule 1: Sample size check
-        # NFL: 5 games; MLB: 10 games; NBA: 15 games
-        min_sample_size = 5 if sport == 'NFL' else (10 if sport == 'MLB' else 15)
+        # NFL: 3 games minimum; MLB: 8 games; NBA: 10 games
+        min_sample_size = 3 if self.sport == 'NFL' else (8 if self.sport == 'MLB' else 10)
         if sample_size < min_sample_size:
             reasons.append(f"Insufficient sample size ({sample_size} games, need ≥{min_sample_size})")
         
         # Rule 2: Minutes/playing time check
-        # NFL: snaps; MLB: plate_appearances (2+) or innings_pitched (3+); NBA: minutes
-        if sport == 'NFL':
-            min_minutes_threshold = 5.0  # Very lenient for NFL
-        elif sport == 'MLB':
-            # Batters: 2+ PA; Pitchers: 3+ IP
-            min_minutes_threshold = 2.0  # plate_appearances or innings_pitched proxy
-        else:
-            # ENHANCEMENT: Relaxed thresholds to allow more players
-            # In high blowout risk games, starters may get pulled early, so be more lenient
-            # Bench players in blowouts get extended minutes, so also adjust threshold
+        if self.sport == 'NFL':
+            min_minutes_threshold = 5.0  # Snaps/touches threshold
+        elif self.sport == 'MLB':
+            min_minutes_threshold = 2.0  # PA or IP threshold
+        else:  # NBA
             min_minutes_threshold = 16 if (blowout_risk_high and is_starter) else 18
             if not blowout_risk_high and not is_starter:
-                # Bench players in normal games - relaxed threshold
-                min_minutes_threshold = 18  # Reduced from 22 to 18
+                min_minutes_threshold = 18
         
         if projected_minutes < min_minutes_threshold:
             reasons.append(f"Low projected minutes ({projected_minutes:.1f}, need ≥{min_minutes_threshold})")
@@ -64,46 +73,112 @@ class PassRules:
         if usage_change and abs(usage_change) > 0.25:
             reasons.append(f"Large usage change ({usage_change*100:.1f}%, threshold: 25%)")
         
-        # Rule 4: Volatility check (CV > 50% - reduced from 40% to allow more players)
-        # Players with CV > 50% will still be flagged as volatile but predictions will be generated
-        if coefficient_of_variation and coefficient_of_variation > 0.50:
-            reasons.append(f"High volatility (CV={coefficient_of_variation:.2f}, threshold: 0.50)")
+        # Rule 4: Volatility check - USE SPORT/STAT-APPROPRIATE THRESHOLDS
+        # MLB count stats (hits, HRs) naturally have high CV due to Poisson-like distribution
+        # Don't penalize them with NBA-style CV thresholds
+        if coefficient_of_variation and coefficient_of_variation > 0:
+            cv_threshold = self._get_cv_threshold(stat_type)
+            if coefficient_of_variation > cv_threshold:
+                reasons.append(f"High volatility (CV={coefficient_of_variation:.2f}, threshold: {cv_threshold:.2f})")
         
         # Rule 5: Injury uncertainty
         if has_injury_uncertainty:
             reasons.append("Uncertainty due to injuries or lineup changes")
         
-        should_pass = len(reasons) > 0
+        # Don't mark as should_pass - just note the reasons
+        # Let confidence system handle degradation
+        should_pass = False  # Changed: never hard-block, only lower confidence
         reason = "; ".join(reasons) if reasons else None
+        
+        # Calculate confidence using the new confidence calculator
+        confidence_data = self.confidence_calc.calculate_confidence(
+            sample_size=sample_size,
+            line_source=line_source,
+            coefficient_of_variation=coefficient_of_variation,
+            days_since_last_game=days_since_last_game,
+            is_synthetic_line=is_synthetic_line,
+            has_real_line=(line_source == 'sportsbook')
+        )
         
         return {
             'should_pass': should_pass,
             'reason': reason,
-            'confidence_level': PassRules._calculate_confidence(sample_size, reasons)
+            'confidence_level': confidence_data['tier'],
+            'confidence_data': confidence_data
         }
     
-    @staticmethod
-    def _calculate_confidence(sample_size: int, reasons: list) -> str:
+    def _get_cv_threshold(self, stat_type: Optional[str]) -> float:
         """
-        Calculate confidence level based on sample size and issues.
+        Get sport/stat-appropriate CV threshold.
+        
+        MLB count stats naturally have high CV due to binomial/Poisson distribution.
+        Don't use NBA-style 0.50 threshold for everything.
+        """
+        if self.sport == 'MLB':
+            # MLB stats have naturally high variance
+            mlb_thresholds = {
+                'hits': 1.2,  # Hits are very variable (0-4 per game)
+                'home_runs': 2.0,  # Home runs are rare events
+                'total_bases': 1.5,  # Also quite variable
+                'rbis': 1.5,
+                'strikeouts': 1.2,  # For pitchers
+            }
+            return mlb_thresholds.get(stat_type, 1.0)
+        elif self.sport == 'NFL':
+            # NFL also has high variance
+            return 0.80
+        else:  # NBA
+            return 0.50
+    
+    def _calculate_confidence(sample_size: int, reasons: list, sport: str = 'NBA') -> str:
+        """
+        DEPRECATED: Use ConfidenceCalculator instead.
+        
+        Kept for backward compatibility only.
         
         Returns:
-            'HIGH', 'MEDIUM', or 'LOW'
+            'HIGH', 'MEDIUM', 'LOW', or 'MODEL_ONLY'
         """
         if len(reasons) > 0:
             return 'LOW'
         
-        if sample_size >= 30:
-            return 'HIGH'
-        elif sample_size >= 20:
-            return 'MEDIUM'
-        else:
-            return 'LOW'
+        # Sport-specific thresholds
+        if sport == 'NFL':
+            if sample_size >= 20:
+                return 'HIGH'
+            elif sample_size >= 12:
+                return 'MEDIUM'
+            else:
+                return 'LOW'
+        elif sport == 'MLB':
+            if sample_size >= 40:
+                return 'HIGH'
+            elif sample_size >= 25:
+                return 'MEDIUM'
+            else:
+                return 'LOW'
+        else:  # NBA
+            if sample_size >= 30:
+                return 'HIGH'
+            elif sample_size >= 20:
+                return 'MEDIUM'
+            else:
+                return 'LOW'
     
-    @staticmethod
-    def calculate_volatility_level(coefficient_of_variation: Optional[float]) -> str:
+    def calculate_volatility_level(
+        self,
+        coefficient_of_variation: Optional[float],
+        stat_type: Optional[str] = None
+    ) -> str:
         """
-        Determine volatility level from CV.
+        Determine volatility level from CV using stat-appropriate thresholds.
+        
+        MLB count stats (hits, HRs, total_bases) have naturally high CV due to
+        Poisson/binomial distribution. Use different thresholds for different stats.
+        
+        Args:
+            coefficient_of_variation: std_dev / mean
+            stat_type: Type of stat (e.g., 'hits', 'points', 'passing_yards')
         
         Returns:
             'LOW', 'MEDIUM', or 'HIGH'
@@ -111,9 +186,18 @@ class PassRules:
         if coefficient_of_variation is None:
             return 'MEDIUM'
         
-        if coefficient_of_variation < 0.20:
+        # Get stat-appropriate threshold
+        cv_threshold = self._get_cv_threshold(stat_type)
+        
+        # Calculate LOW and MEDIUM thresholds relative to the HIGH threshold
+        # LOW: < 60% of HIGH threshold
+        # MEDIUM: 60-100% of HIGH threshold
+        # HIGH: > HIGH threshold
+        low_threshold = cv_threshold * 0.6
+        
+        if coefficient_of_variation < low_threshold:
             return 'LOW'
-        elif coefficient_of_variation < 0.35:
+        elif coefficient_of_variation < cv_threshold:
             return 'MEDIUM'
         else:
             return 'HIGH'

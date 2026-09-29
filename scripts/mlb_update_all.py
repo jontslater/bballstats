@@ -44,9 +44,13 @@ def update_schedules():
     logger.info("STEP 1: Updating MLB schedules...")
     logger.info("=" * 60)
     try:
+        import os
+        env = os.environ.copy()
+        env['PYTHONUTF8'] = '1'  # Force UTF-8 encoding on Windows
+        
         result = __import__('subprocess').run(
             [sys.executable, 'scripts/mlb_collect_schedule.py', '--days', '30'],
-            capture_output=True, text=True, cwd=project_root
+            capture_output=True, text=True, cwd=project_root, env=env, encoding='utf-8', errors='replace'
         )
         if result.returncode == 0:
             logger.info("MLB schedules updated")
@@ -63,9 +67,13 @@ def update_game_results():
     logger.info("STEP 2: Updating MLB game results...")
     logger.info("=" * 60)
     try:
+        import os
+        env = os.environ.copy()
+        env['PYTHONUTF8'] = '1'  # Force UTF-8 encoding on Windows
+        
         result = __import__('subprocess').run(
             [sys.executable, 'scripts/mlb_collect_game_results.py', '--previous-day'],
-            capture_output=True, text=True, cwd=project_root
+            capture_output=True, text=True, cwd=project_root, env=env, encoding='utf-8', errors='replace'
         )
         if result.returncode == 0:
             logger.info("MLB game results updated")
@@ -82,9 +90,13 @@ def generate_predictions():
     logger.info("STEP 3: Generating MLB predictions...")
     logger.info("=" * 60)
     try:
+        import os
+        env = os.environ.copy()
+        env['PYTHONUTF8'] = '1'  # Force UTF-8 encoding on Windows
+        
         result = __import__('subprocess').run(
             [sys.executable, 'scripts/generate_mlb_predictions.py', '--upcoming'],
-            capture_output=True, text=True, cwd=project_root
+            capture_output=True, text=True, cwd=project_root, env=env, encoding='utf-8', errors='replace'
         )
         if result.returncode == 0:
             logger.info("MLB predictions generated")
@@ -101,6 +113,13 @@ def evaluate_predictions():
     logger.info("STEP 4: Evaluating MLB predictions...")
     logger.info("=" * 60)
     try:
+        import sys
+        from pathlib import Path
+        # Ensure app module is importable
+        backend_path = Path(__file__).parent.parent / "backend"
+        if str(backend_path) not in sys.path:
+            sys.path.insert(0, str(backend_path))
+        
         from app.services.prediction_evaluator import PredictionEvaluator
         from app.database import SessionLocal
         from app.models.prediction import Prediction
@@ -136,8 +155,9 @@ def evaluate_predictions():
         logger.info("MLB prediction evaluation complete")
         return True
     except Exception as e:
-        logger.warning(f"Evaluation error: {e}")
-        return True
+        logger.error(f"Evaluation error: {e}")
+        # Return False on error so summary shows FAILED
+        return False
 
 
 def main():
@@ -155,17 +175,29 @@ def main():
     results = {}
     for name, fn in steps:
         try:
-            results[name] = fn()
+            success = fn()
+            results[name] = success
+            if not success:
+                logger.error(f"Step '{name}' reported failure")
         except Exception as e:
-            logger.error(f"Error in {name}: {e}")
+            logger.error(f"Exception in {name}: {e}")
             results[name] = False
 
     logger.info("")
+    logger.info("=" * 60)
     logger.info("MLB UPDATE SUMMARY")
+    logger.info("=" * 60)
+    all_ok = True
     for name, ok in results.items():
-        logger.info(f"  {name}: {'OK' if ok else 'FAILED'}")
+        status = 'OK' if ok else 'FAILED'
+        logger.info(f"  {name}: {status}")
+        if not ok:
+            all_ok = False
+    logger.info("=" * 60)
+    logger.info(f"Overall: {'SUCCESS' if all_ok else 'FAILED'}")
     logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    return 0 if all(results.values()) else 1
+    logger.info("")
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":

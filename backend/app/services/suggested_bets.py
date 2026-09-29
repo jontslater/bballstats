@@ -27,7 +27,7 @@ class SuggestedBetsService(BaseSportService):
         game_date: Optional[date] = None,
         limit: int = 10,
         min_probability: float = 0.60,
-        include_long_shots: bool = True
+        include_long_shots: bool = False  # FIXED: Default to False, safe tier only
     ) -> List[Dict]:
         """
         Get suggested bets ranked by quality.
@@ -85,7 +85,7 @@ class SuggestedBetsService(BaseSportService):
             primary_stats = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
 
         # For NFL, be more lenient with confidence levels and bet types since they tend to be lower
-        allowed_confidence = ['HIGH', 'MEDIUM', 'LOW'] if self.sport == 'NFL' else ['HIGH', 'MEDIUM', 'LOW']  # Include LOW for NBA too
+        allowed_confidence = ['HIGH', 'MEDIUM', 'LOW', 'MODEL_ONLY']  # Include MODEL_ONLY
         # Include all bet types for both sports to get more suggestions
         allowed_bet_types = ['safe', 'standard', 'long_shot']
 
@@ -138,7 +138,7 @@ class SuggestedBetsService(BaseSportService):
             # Calculate quality score
             score = self._calculate_bet_score(pred)
             
-            # Get probability based on bet type with fallbacks
+            # Get probability based on bet type (no fallbacks - use actual data)
             if pred.bet_type == 'safe':
                 probability = pred.safe_probability
                 line = pred.safe_line
@@ -149,68 +149,33 @@ class SuggestedBetsService(BaseSportService):
                 probability = pred.long_shot_probability
                 line = pred.long_shot_line
 
-            # Calculate fallbacks if values are missing
-            if probability is None:
-                if pred.bet_type == 'safe':
-                    probability = 0.75
-                elif pred.bet_type == 'standard':
-                    probability = 0.60
-                else:  # long_shot
-                    probability = 0.25
-
-            if line is None:
-                # Use distribution_mean as base, or reasonable defaults based on sport
-                if self.sport == 'NFL':
-                    # NFL defaults by stat type
-                    nfl_defaults = {
-                        'passing_yards': 200.0,
-                        'rushing_yards': 50.0,
-                        'receiving_yards': 40.0,
-                        'receptions': 4.0,
-                        'passing_tds': 1.5,
-                        'rushing_tds': 0.5,
-                        'receiving_tds': 0.5
-                    }
-                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else nfl_defaults.get(pred.stat_type, 10.0)
-                elif self.sport == 'MLB':
-                    # MLB defaults by stat type (realistic MLB player performance)
-                    mlb_defaults = {
-                        'hits': 1.0,
-                        'home_runs': 0.5,
-                        'total_bases': 1.5,
-                        'strikeouts': 1.0,
-                        'runs': 0.5,
-                        'rbis': 0.5,
-                        'stolen_bases': 0.2
-                    }
-                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else mlb_defaults.get(pred.stat_type, 1.0)
-                else:  # NBA
-                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else 10.0
-
-                if pred.bet_type == 'safe':
-                    line = base_value * 1.2  # 20% above mean
-                elif pred.bet_type == 'standard':
-                    line = base_value  # at mean
-                else:  # long_shot
-                    line = max(base_value * 0.8, 0.5)  # 20% below mean, but ensure minimum 0.5
-
-                # Ensure line is always positive
-                line = max(abs(line), 0.5)
-
-                # Round appropriately for stat type
-                if pred.stat_type in ['points', 'rebounds', 'assists', 'passing_yards', 'rushing_yards', 'receiving_yards', 'hits', 'home_runs', 'total_bases', 'strikeouts']:
-                    line = round(line, 1)
-                else:
-                    line = round(line, 2)
+            # Skip if missing critical data or invalid line
+            if probability is None or line is None or line <= 0:
+                continue
             
-            # Only include if meets minimum probability (for safe/standard bets)
-            # Long shots have lower probability threshold
-            if pred.bet_type == 'safe' and probability < min_probability:
-                continue
-            if pred.bet_type == 'standard' and probability < 0.40:
-                continue
-            if pred.bet_type == 'long_shot' and (probability < 0.08 or probability > 0.30):
-                continue
+            # Get stat/line-specific base rate for edge calculation
+            from app.constants.base_rates import get_base_rate
+            line_rounded = round(line, 1)
+            base_rate = get_base_rate(pred.stat_type, line_rounded, default=0.50)
+            
+            edge = probability - base_rate
+            
+            # Filter by bet type with stricter requirements for 'safe' and 'standard' tiers
+            if pred.bet_type == 'safe':
+                # Safe bets must have p >= 0.55 AND positive edge over base rate
+                if probability < 0.55 or edge <= 0:
+                    continue
+            elif pred.bet_type == 'standard':
+                # Standard bets must ALSO meet safe criteria (p >= 0.55 & edge > 0)
+                # This prevents low-probability standard bets from filling the list
+                if probability < 0.55 or edge <= 0:
+                    continue
+            elif pred.bet_type == 'long_shot':
+                # Long shots: 0.08 to 0.30 range
+                if probability < 0.08 or probability > 0.30:
+                    continue
+            
+            # Skip long shots if not included
             if not include_long_shots and pred.bet_type == 'long_shot':
                 continue
             
@@ -304,6 +269,46 @@ class SuggestedBetsService(BaseSportService):
                             print(f"⚠️  WARNING: {player.name} {pred.stat_type} line {final_line} is >5x max recent ({max_recent}). Recent: {recent_values}. Skipping extreme outlier.")
                             continue
             
+            # Build reason_strings from confidence_reasons and additional context
+            import json
+            reason_strings = []
+            
+            # Parse confidence_reasons JSON if available
+            if pred.confidence_reasons:
+                try:
+                    confidence_reasons = json.loads(pred.confidence_reasons)
+                    reason_strings.extend(confidence_reasons)
+                except:
+                    pass
+            
+            # Add sample size context (avoid duplicate if confidence_reasons already has it)
+            n_games_effective = pred.n_games_effective or pred.sample_size or 0
+            sample_size_mentioned = any('games' in str(r).lower() and ('limited' in str(r).lower() or 'sample' in str(r).lower()) 
+                                       for r in reason_strings)
+            
+            if not sample_size_mentioned:
+                if n_games_effective < 10:
+                    reason_strings.append(f"Very limited data ({int(n_games_effective)} effective games)")
+                elif n_games_effective < 20:
+                    reason_strings.append(f"Limited data ({int(n_games_effective)} effective games)")
+            
+            # Add line source note (if not already mentioned)
+            line_source_mentioned = any('line' in str(r).lower() for r in reason_strings)
+            if not line_source_mentioned:
+                if pred.line_source == 'model' or not pred.line_source:
+                    reason_strings.append("Model-generated line (no sportsbook line available)")
+                elif pred.line_source == 'sportsbook':
+                    reason_strings.append("Based on real sportsbook line")
+            
+            # Deduplicate reason_strings (case-insensitive, preserve order)
+            seen_reasons = set()
+            deduped_reasons = []
+            for reason in reason_strings:
+                reason_lower = str(reason).lower().strip()
+                if reason_lower not in seen_reasons:
+                    seen_reasons.add(reason_lower)
+                    deduped_reasons.append(reason)
+            
             scored_predictions.append({
                 'prediction_id': pred.prediction_id,
                 'player_id': pred.player_id,
@@ -316,67 +321,156 @@ class SuggestedBetsService(BaseSportService):
                 'line': final_line,
                 'probability': round(float(probability) if probability is not None else 0.5, 3),
                 'confidence_level': pred.confidence_level,
+                'confidence_tier': pred.confidence_level,  # Alias for clarity
+                'confidence_score': pred.confidence_score,
+                'n_games_effective': n_games_effective,
+                'line_source': pred.line_source or 'model',
                 'volatility_level': pred.volatility_level,
                 'score': score,
                 'reasoning': pred.reasoning,
+                'reason_strings': deduped_reasons,  # Use deduplicated reasons
                 'last_3_games': last_3_games
             })
         
         # Sort by score (highest first)
         scored_predictions.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Deduplicate: never return two bets with identical player/stat/line/direction
+        # Keep only the highest-tier (highest-score) one per unique (player_id, stat_type, line) tuple
+        seen_bets = set()
+        deduped_predictions = []
+        
+        for bet in scored_predictions:
+            # Direction is always OVER for our predictions (we're computing P(X > line))
+            bet_key = (bet['player_id'], bet['stat_type'], round(bet['line'], 1))
+            
+            if bet_key not in seen_bets:
+                seen_bets.add(bet_key)
+                deduped_predictions.append(bet)
+        
+        # Apply diversity cap: limit same stat/line combinations
+        # Don't show 10 TB OVER 0.5 - cap at 4 per stat/line combo
+        diversity_capped = []
+        stat_line_counts = {}
+        max_per_stat_line = 4
+        
+        for bet in deduped_predictions:
+            stat_line_key = (bet['stat_type'], round(bet['line'], 1))
+            count = stat_line_counts.get(stat_line_key, 0)
+            
+            if count < max_per_stat_line:
+                diversity_capped.append(bet)
+                stat_line_counts[stat_line_key] = count + 1
 
-        print(f"Returning {min(len(scored_predictions), limit)} suggested bets out of {len(scored_predictions)} scored predictions")
-        return scored_predictions[:limit]
+        print(f"Returning {min(len(diversity_capped), limit)} suggested bets out of {len(scored_predictions)} scored predictions (after deduplication and diversity cap)")
+        return diversity_capped[:limit]
     
     def _calculate_bet_score(self, prediction: Prediction) -> float:
         """
-        Calculate quality score for a bet.
+        Calculate quality score for a bet using calibrated probability and confidence.
         
         Higher score = better bet recommendation.
+        Ranks by:
+        1. Calibrated probability EDGE over stat/line-specific league base rate
+        2. Sample size penalty/bonus (shrink score for small n)
+        3. Confidence tier as multiplier
+        4. Line source (real > synthetic)
         """
         score = 0.0
         
-        # Probability component (higher is better)
+        # Get probability and stat/line-specific league base rate
         if prediction.bet_type == 'safe':
             prob = prediction.safe_probability or 0
-            score += prob * 100  # Weight: 100 points max
+            line = prediction.safe_line or 0
         elif prediction.bet_type == 'standard':
             prob = prediction.standard_probability or 0
-            score += prob * 80  # Weight: 80 points max
+            line = prediction.standard_line or 0
         else:  # long_shot
             prob = prediction.long_shot_probability or 0
-            # For long shots, reward higher probabilities (8-20% range is ideal)
-            # But don't penalize too much for lower probabilities
-            if 0.10 <= prob <= 0.20:
-                score += prob * 80  # Good long shot range
-            elif 0.08 <= prob < 0.10 or 0.20 < prob <= 0.25:
-                score += prob * 60  # Acceptable range
+            line = prediction.long_shot_line or 0
+            # If long_shot is None, skip scoring
+            if prediction.long_shot_probability is None or prediction.long_shot_line is None:
+                return 0.0
+        
+        # Stat/line-specific league base rates (empirical from data)
+        # These are P(stat > line) from league-wide data
+        from app.constants.base_rates import MLB_STAT_LINE_BASE_RATES
+        
+        league_base_rates = {
+            'MLB': MLB_STAT_LINE_BASE_RATES,
+            'NBA': {
+                ('points', 10.0): 0.52,
+                ('rebounds', 5.0): 0.51,
+                ('assists', 3.0): 0.50,
+            }
+        }
+        
+        base_rate_key = (prediction.stat_type, round(line, 1))
+        base_rate = league_base_rates.get(self.sport, {}).get(base_rate_key)
+        
+        # Fallback to generic base rate if stat/line not in table
+        if base_rate is None:
+            if prediction.bet_type == 'safe':
+                base_rate = 0.60  # Generic safe pick
+            elif prediction.bet_type == 'standard':
+                base_rate = 0.50  # Coin flip
             else:
-                score += prob * 40  # Lower score for extreme probabilities
+                base_rate = 0.20  # Long shot
         
-        # Confidence component
-        if prediction.confidence_level == 'HIGH':
-            score += 30
-        elif prediction.confidence_level == 'MEDIUM':
+        # Edge = how much better than league base rate for this exact stat/line
+        edge = prob - base_rate
+        
+        # Base score from edge (0-150 points range)
+        if edge > 0:
+            # Positive edge: scale by magnitude
+            score += min(edge * 300, 150)  # Cap at 150
+        else:
+            # Negative edge: penalize but not eliminate
+            score += max(edge * 200, -50)  # Cap penalty at -50
+        
+        # Sample size adjustment: shrink/penalty for small n
+        n_games = prediction.n_games_effective or prediction.sample_size or 0
+        if n_games >= 40:
+            score += 35
+        elif n_games >= 30:
+            score += 25
+        elif n_games >= 20:
             score += 15
-        elif prediction.confidence_level == 'LOW':
-            score += 5  # Small boost for low confidence (still better than nothing)
+        elif n_games >= 10:
+            score += 5
+        else:
+            # Stronger penalty for very small samples
+            score -= 25
         
-        # Volatility component (lower volatility = higher score)
-        if prediction.volatility_level == 'LOW':
-            score += 20
+        # Confidence tier multiplier (apply after base score)
+        confidence_tier = prediction.confidence_level or 'LOW'
+        if confidence_tier == 'HIGH':
+            score *= 1.4
+        elif confidence_tier == 'MEDIUM':
+            score *= 1.2
+        elif confidence_tier == 'LOW':
+            score *= 1.0
+        elif confidence_tier == 'MODEL_ONLY':
+            score *= 0.85
+        
+        # Line source adjustment (after multiplier)
+        if prediction.line_source == 'sportsbook':
+            score += 35  # Significant bonus for real lines
+        else:
+            # Synthetic lines: modest penalty
+            score -= 15
+        
+        # Volatility penalty (reduced)
+        if prediction.volatility_level == 'HIGH':
+            score -= 15
         elif prediction.volatility_level == 'MEDIUM':
-            score += 10
+            score -= 5
         
-        # Bonus for long shots (to ensure they appear in suggestions)
-        if prediction.bet_type == 'long_shot':
-            score += 10  # Small bonus to ensure variety
-        
-        # Penalize if there's a pass reason (shouldn't happen for suggested bets, but just in case)
+        # Pass reason penalty
         if prediction.pass_reason:
-            score -= 50
+            score -= 30
         
-        return score
+        return max(0, score)
     
     def get_suggested_parlays(
         self,
@@ -402,10 +496,10 @@ class SuggestedBetsService(BaseSportService):
         if game_date is None:
             game_date = date.today()
         
-        # Get suggested bets first (include long shots for parlay variety)
+        # Get suggested bets first (exclude long shots by default for safety)
         # Use lower threshold for NFL since predictions tend to be less confident
         min_prob_threshold = 0.50 if self.sport == 'NFL' else 0.60
-        suggested_bets = self.get_suggested_bets(game_date, limit=50, min_probability=min_prob_threshold, include_long_shots=True)
+        suggested_bets = self.get_suggested_bets(game_date, limit=50, min_probability=min_prob_threshold, include_long_shots=False)
         
         if len(suggested_bets) < min_legs:
             return []
@@ -856,7 +950,7 @@ class SuggestedBetsService(BaseSportService):
                 Prediction.bet_type == 'safe',  # Only safe bets
                 Prediction.stat_type.in_(safe_stat_types),
                 Prediction.safe_probability >= min_leg_probability,  # Very safe threshold
-                Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
+                Prediction.confidence_level.in_(['HIGH', 'MEDIUM', 'LOW', 'MODEL_ONLY'])  # Include MODEL_ONLY
             )
         ).order_by(Prediction.safe_probability.desc()).all()
         
@@ -914,8 +1008,9 @@ class SuggestedBetsService(BaseSportService):
             
             # Ensure line is valid (positive and not None)
             safe_line = pred.safe_line
-            if safe_line is None or safe_line <= 0:
-                continue  # Skip bets with invalid lines
+            probability = pred.safe_probability
+            if safe_line is None or safe_line <= 0 or probability is None:
+                continue  # Skip bets with invalid lines or probabilities
             
             # SANITY CHECK: Sport-specific maximum reasonable values
             if self.sport == 'MLB':
@@ -950,7 +1045,7 @@ class SuggestedBetsService(BaseSportService):
                 'stat_type': pred.stat_type,
                 'bet_type': 'safe',
                 'line': safe_line,
-                'probability': pred.safe_probability or 0.75,  # Ensure probability exists
+                'probability': probability,
                 'confidence_level': pred.confidence_level or 'MEDIUM',
                 'volatility_level': pred.volatility_level or 'MEDIUM',
                 'last_3_games': last_3_games
@@ -1087,7 +1182,7 @@ class SuggestedBetsService(BaseSportService):
                 Prediction.game_id == game_id,
                 Prediction.stat_type.in_(sgp_stat_types),
                 Prediction.bet_type.in_(['safe', 'standard']),  # Only safe/standard for same-game parlays
-                Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
+                Prediction.confidence_level.in_(['HIGH', 'MEDIUM', 'LOW', 'MODEL_ONLY'])  # Include MODEL_ONLY
             )
         ).all()
         

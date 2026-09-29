@@ -100,10 +100,16 @@ class FactorWeighting:
         max_adjusted = base_value * 1.50
         adjusted_value = max(min_adjusted, min(max_adjusted, adjusted_value))
         
+        # Avoid division by zero
+        if base_value > 0:
+            total_adjustment_pct = (adjusted_value / base_value - 1.0) * 100
+        else:
+            total_adjustment_pct = 0.0
+        
         return {
             'adjusted_value': adjusted_value,
             'base_value': base_value,
-            'total_adjustment_pct': (adjusted_value / base_value - 1.0) * 100,
+            'total_adjustment_pct': total_adjustment_pct,
             'weighted_adjustment': weighted_adjustment,
             'factor_contributions': factor_contributions
         }
