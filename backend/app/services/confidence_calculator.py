@@ -108,37 +108,68 @@ class ConfidenceCalculator:
             reasons.append(f"{sample_size} games (limited sample)")
         
         # 4. Calculate numeric score (independent of tier caps)
-        # Base score from sample size (granular, not just tier)
-        score += min(sample_size * 2.0, 80)  # 0-80 range based on games
+        # Base score from sample size with fractional precision
+        # Use log scale for better discrimination at low sample sizes
+        import math
+        if sample_size > 0:
+            # Log scale: 5 games = 10pts, 10 games = 20pts, 20 games = 30pts, 40 games = 40pts
+            base_sample_score = 10 * math.log1p(sample_size) / math.log(2)
+            score += min(base_sample_score, 50)  # 0-50 range
         
         # Edge bonus/penalty
         if edge_over_base_rate is not None:
-            if edge_over_base_rate > 0.10:
-                score += 15
+            if edge_over_base_rate > 0.15:
+                score += 25
+                reasons.append(f"Excellent edge over base rate (+{edge_over_base_rate:.1%})")
+            elif edge_over_base_rate > 0.10:
+                score += 18
                 reasons.append(f"Strong edge over base rate (+{edge_over_base_rate:.1%})")
             elif edge_over_base_rate > 0.05:
-                score += 10
+                score += 12
+            elif edge_over_base_rate > 0.02:
+                score += 6
+            elif edge_over_base_rate < -0.10:
+                score -= 20
+                reasons.append(f"Well below base rate ({edge_over_base_rate:.1%})")
             elif edge_over_base_rate < -0.05:
-                score -= 10
+                score -= 12
                 reasons.append(f"Below base rate ({edge_over_base_rate:.1%})")
         
-        # Variance adjustment
+        # Variance adjustment (more granular)
         if coefficient_of_variation is not None:
-            if coefficient_of_variation > 0.50:
-                score -= 15
+            if coefficient_of_variation > 0.80:
+                score -= 25
+                reasons.append(f"Very high volatility (CV={coefficient_of_variation:.2f})")
+            elif coefficient_of_variation > 0.60:
+                score -= 18
                 reasons.append(f"High volatility (CV={coefficient_of_variation:.2f})")
-            elif coefficient_of_variation > 0.35:
-                score -= 8
-            else:
-                score += 5
-        
-        # Freshness
-        if days_since_last_game is not None:
-            if days_since_last_game > 14:
+            elif coefficient_of_variation > 0.40:
                 score -= 10
-                reasons.append(f"Stale data ({days_since_last_game} days)")
-            elif days_since_last_game > 7:
+            elif coefficient_of_variation > 0.30:
                 score -= 5
+            elif coefficient_of_variation < 0.15:
+                score += 12
+                reasons.append(f"Very low volatility (CV={coefficient_of_variation:.2f})")
+            elif coefficient_of_variation < 0.25:
+                score += 6
+        
+        # Freshness (more granular)
+        if days_since_last_game is not None:
+            if days_since_last_game > 21:
+                score -= 18
+                reasons.append(f"Very stale data ({days_since_last_game} days)")
+            elif days_since_last_game > 14:
+                score -= 12
+                reasons.append(f"Stale data ({days_since_last_game} days)")
+            elif days_since_last_game > 10:
+                score -= 7
+            elif days_since_last_game > 7:
+                score -= 4
+            elif days_since_last_game <= 2:
+                score += 8
+                reasons.append(f"Very recent data ({days_since_last_game} days)")
+            elif days_since_last_game <= 4:
+                score += 4
         
         # Final score clamped
         score = max(0, min(100, score))

@@ -193,20 +193,23 @@ class BetDefinitions:
         """
         Determine recommended bet type based on calibrated probabilities.
         
-        Safe = highest likelihood line (no minimum threshold required)
-        Standard = moderate probability line
-        Long shot = lower probability line
+        Returns 'pass' if all probabilities are too low (best < 0.45).
+        Otherwise returns the best qualifying bet type.
         
         Returns:
             'safe', 'standard', 'long_shot', or 'pass'
         """
-        # Safe bets: highest likelihood (even if not "sure thing")
-        # No minimum threshold - safe just means "most likely to hit"
-        if safe_probability >= standard_probability:
+        # If all probabilities are poor, pass
+        best_prob = max(safe_probability, standard_probability, long_shot_probability)
+        if best_prob < 0.45:
+            return 'pass'
+        
+        # Safe bets: highest likelihood if >= standard
+        if safe_probability >= standard_probability and safe_probability >= 0.45:
             return 'safe'
         
         # Standard bets: moderate probability
-        if standard_probability >= 0.40:
+        if standard_probability >= 0.45:
             return 'standard'
         
         # Long shots: lower probability but reasonable

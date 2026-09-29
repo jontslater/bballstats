@@ -35,12 +35,12 @@ class CalibratedProbabilityCalculator:
             'receiving_tds': 0.46,
         },
         'MLB': {
-            # P(hits >= 1) for a starter: ~65-70%
-            # P(total_bases >= 1): ~65-70%
-            # P(home_runs >= 1): ~15-20%
-            'hits': 0.67,  # Most starters get at least 1 hit
-            'home_runs': 0.18,  # HRs are rare
-            'total_bases': 0.68,  # Similar to hits
+            # P(hits >= 1) for a starter: ~60-65%
+            # P(total_bases >= 1): ~60-65%
+            # P(home_runs >= 1): ~10-15% (very rare)
+            'hits': 0.62,  # Reduced from 0.67
+            'home_runs': 0.12,  # Reduced from 0.18 - HRs are very rare
+            'total_bases': 0.62,  # Reduced from 0.68
             'rbis': 0.48,
             'strikeouts': 0.52,  # For pitchers
         }
@@ -78,7 +78,7 @@ class CalibratedProbabilityCalculator:
         # Apply Empirical Bayes shrinkage to the mean
         if league_mean is not None:
             shrunk_mean, effective_n = self._shrink_mean_toward_prior(
-                player_mean, sample_size, league_mean, league_std or player_std
+                player_mean, league_mean, sample_size
             )
         else:
             shrunk_mean = player_mean
@@ -102,7 +102,7 @@ class CalibratedProbabilityCalculator:
         # Apply base rate adjustment
         base_hit_rate = self._get_base_hit_rate(stat_type)
         calibrated_prob = self._apply_base_rate_adjustment(
-            raw_prob, base_hit_rate, effective_n
+            raw_prob, base_hit_rate, effective_n, stat_type
         )
         
         # Clamp to valid range
@@ -119,9 +119,8 @@ class CalibratedProbabilityCalculator:
     def _shrink_mean_toward_prior(
         self,
         player_mean: float,
-        sample_size: int,
         league_mean: float,
-        league_std: float
+        sample_size: int
     ) -> Tuple[float, float]:
         """
         Apply Empirical Bayes shrinkage to player mean toward league prior.
@@ -181,20 +180,24 @@ class CalibratedProbabilityCalculator:
         self,
         raw_prob: float,
         base_hit_rate: float,
-        effective_n: float
+        effective_n: float,
+        stat_type: str = None
     ) -> float:
         """
         Adjust probability toward base rate, weighted by sample size.
         
         Small samples get pulled more toward the base rate.
-        But don't over-shrink - use lighter weight.
+        Use stat-specific weighting (home_runs need stronger shrinkage).
         """
-        # Weight base rate inversely with sample size
-        # At n=10: weight base rate 20%, at n=50+: weight base rate 2%
-        # Reduced from previous 50%/5% to avoid over-shrinking
+        # Base weight inversely proportional to sample size
+        # Default: At n=10: 20%, at n=50+: 2%
         base_weight = min(0.20, 5.0 / effective_n)
-        player_weight = 1.0 - base_weight
         
+        # Home runs need stronger shrinkage toward base rate (they're rare)
+        if stat_type == 'home_runs':
+            base_weight = min(0.40, 15.0 / effective_n)  # Double the weight
+        
+        player_weight = 1.0 - base_weight
         adjusted_prob = player_weight * raw_prob + base_weight * base_hit_rate
         
         return adjusted_prob

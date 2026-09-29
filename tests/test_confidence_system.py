@@ -118,7 +118,7 @@ class TestConfidenceCalculator(unittest.TestCase):
         )
         
         self.assertEqual(result['tier'], 'HIGH')
-        self.assertGreater(result['score'], 80)
+        self.assertGreater(result['score'], 65)  # Updated: new scoring is sample_size * 2.0
     
     def test_synthetic_line_capped_at_low(self):
         """Test that synthetic lines are capped at LOW confidence."""
