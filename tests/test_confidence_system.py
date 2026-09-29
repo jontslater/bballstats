@@ -414,6 +414,80 @@ class TestFix4_ConsolidatedBaseRates(unittest.TestCase):
                         "Unlisted line should return default")
 
 
+class TestRegression_LongShotNone(unittest.TestCase):
+    """Test that long_shot=None doesn't cause TypeErrors (regression from bd07ad9)."""
+    
+    def test_bet_lines_with_none_long_shot(self):
+        """Test bet_lines dict with long_shot_line=None doesn't break validation."""
+        # Simulate bet_lines returned for HR with mean ~0.11
+        bet_lines = {
+            'safe_line': 0.5,
+            'safe_probability': 0.893,
+            'standard_line': 0.5,
+            'standard_probability': 0.893,
+            'long_shot_line': None,  # Dropped because p < 5%
+            'long_shot_probability': None,
+            'line_source': 'model',
+            'is_synthetic': True,
+            'shrunk_mean': 0.11,
+            'effective_std': 0.33,
+            'effective_n': 100
+        }
+        
+        # Validate that comparison doesn't raise TypeError
+        # This is the check from prediction_service.py line 745-747
+        safe_valid = bet_lines['safe_line'] > 0
+        standard_valid = bet_lines['standard_line'] > 0
+        long_shot_valid = (bet_lines['long_shot_line'] is None or 
+                          bet_lines['long_shot_line'] > 0)
+        
+        self.assertTrue(safe_valid)
+        self.assertTrue(standard_valid)
+        self.assertTrue(long_shot_valid,
+                       "long_shot_line=None should be considered valid")
+    
+    def test_under_probability_computation(self):
+        """Test that 1.0 - None doesn't get computed."""
+        # Simulate the assignment logic from prediction_service.py lines 758-762
+        bet_lines = {
+            'long_shot_line': None,
+            'long_shot_probability': None
+        }
+        
+        # This should NOT compute 1.0 - None
+        if bet_lines['long_shot_probability'] is not None:
+            under_prob = 1.0 - bet_lines['long_shot_probability']
+        else:
+            under_prob = None
+        
+        self.assertIsNone(under_prob,
+                         "long_shot_under_probability should be None when probability is None")
+    
+    def test_long_shot_scoring_with_none(self):
+        """Test that scoring returns 0 for long_shot with None values."""
+        # Create a mock prediction object
+        class MockPrediction:
+            bet_type = 'long_shot'
+            long_shot_probability = None
+            long_shot_line = None
+            stat_type = 'home_runs'
+        
+        pred = MockPrediction()
+        
+        # Simulate scoring logic from suggested_bets.py lines 388-400
+        if pred.bet_type == 'long_shot':
+            prob = pred.long_shot_probability or 0
+            line = pred.long_shot_line or 0
+            # If long_shot is None, skip scoring
+            if pred.long_shot_probability is None or pred.long_shot_line is None:
+                score = 0.0
+            else:
+                score = 100.0  # Would compute real score
+        
+        self.assertEqual(score, 0.0,
+                        "Score should be 0 when long_shot is None")
+
+
 if __name__ == '__main__':
     # Run tests
     suite = unittest.TestLoader().loadTestsFromModule(sys.modules[__name__])

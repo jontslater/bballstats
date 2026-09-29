@@ -639,7 +639,8 @@ class PredictionService:
             if stale_standard:
                 self.db.delete(stale_standard)
         
-        if bet_lines['safe_line'] == bet_lines['long_shot_line']:
+        # Check if safe equals long_shot (only if long_shot exists)
+        if bet_lines['long_shot_line'] is not None and bet_lines['safe_line'] == bet_lines['long_shot_line']:
             if 'long_shot' in qualifying_bet_types:
                 qualifying_bet_types.remove('long_shot')
             
@@ -656,7 +657,10 @@ class PredictionService:
             if stale_long_shot:
                 self.db.delete(stale_long_shot)
         
-        if 'standard' in qualifying_bet_types and bet_lines['standard_line'] == bet_lines['long_shot_line']:
+        # Check if standard equals long_shot (only if both exist)
+        if ('standard' in qualifying_bet_types and 
+            bet_lines['long_shot_line'] is not None and 
+            bet_lines['standard_line'] == bet_lines['long_shot_line']):
             if 'long_shot' in qualifying_bet_types:
                 qualifying_bet_types.remove('long_shot')
             
@@ -742,9 +746,10 @@ class PredictionService:
             prediction.sample_size = base_dist.get('sample_size')
             
             # Validate lines are positive and sensible
+            # Note: long_shot_line can be None (when p < 5%), which is valid
             if (bet_lines['safe_line'] <= 0 or 
                 bet_lines['standard_line'] <= 0 or 
-                bet_lines['long_shot_line'] <= 0):
+                (bet_lines['long_shot_line'] is not None and bet_lines['long_shot_line'] <= 0)):
                 # Skip this prediction entirely - invalid line
                 print(f"⚠️  Skipping {player.name} {stat_type}: invalid line (safe={bet_lines['safe_line']}, std={bet_lines['standard_line']}, long={bet_lines['long_shot_line']})")
                 return None
@@ -755,9 +760,14 @@ class PredictionService:
             prediction.standard_line = bet_lines['standard_line']
             prediction.standard_probability = bet_lines['standard_probability']
             prediction.standard_under_probability = 1.0 - bet_lines['standard_probability']
+            
+            # long_shot can be None (no long-shot tier when p < 5%)
             prediction.long_shot_line = bet_lines['long_shot_line']
             prediction.long_shot_probability = bet_lines['long_shot_probability']
-            prediction.long_shot_under_probability = 1.0 - bet_lines['long_shot_probability']
+            if bet_lines['long_shot_probability'] is not None:
+                prediction.long_shot_under_probability = 1.0 - bet_lines['long_shot_probability']
+            else:
+                prediction.long_shot_under_probability = None
             prediction.bet_type = bet_type
             prediction.pass_reason = pass_eval['reason'] if pass_eval['should_pass'] else None
             

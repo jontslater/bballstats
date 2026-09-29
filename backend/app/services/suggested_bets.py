@@ -160,14 +160,15 @@ class SuggestedBetsService(BaseSportService):
             
             edge = probability - base_rate
             
-            # Filter by bet type with stricter requirements for 'safe' tier
+            # Filter by bet type with stricter requirements for 'safe' and 'standard' tiers
             if pred.bet_type == 'safe':
                 # Safe bets must have p >= 0.55 AND positive edge over base rate
                 if probability < 0.55 or edge <= 0:
                     continue
             elif pred.bet_type == 'standard':
-                # Standard bets: minimum 0.40 probability
-                if probability < 0.40:
+                # Standard bets must ALSO meet safe criteria (p >= 0.55 & edge > 0)
+                # This prevents low-probability standard bets from filling the list
+                if probability < 0.55 or edge <= 0:
                     continue
             elif pred.bet_type == 'long_shot':
                 # Long shots: 0.08 to 0.30 range
@@ -387,6 +388,9 @@ class SuggestedBetsService(BaseSportService):
         else:  # long_shot
             prob = prediction.long_shot_probability or 0
             line = prediction.long_shot_line or 0
+            # If long_shot is None, skip scoring
+            if prediction.long_shot_probability is None or prediction.long_shot_line is None:
+                return 0.0
         
         # Stat/line-specific league base rates (empirical from data)
         # These are P(stat > line) from league-wide data
