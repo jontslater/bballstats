@@ -266,18 +266,33 @@ class SuggestedBetsService(BaseSportService):
                 except:
                     pass
             
-            # Add sample size context
+            # Add sample size context (avoid duplicate if confidence_reasons already has it)
             n_games_effective = pred.n_games_effective or pred.sample_size or 0
-            if n_games_effective < 10:
-                reason_strings.append(f"Very limited data ({int(n_games_effective)} effective games)")
-            elif n_games_effective < 20:
-                reason_strings.append(f"Limited data ({int(n_games_effective)} effective games)")
+            sample_size_mentioned = any('games' in str(r).lower() and ('limited' in str(r).lower() or 'sample' in str(r).lower()) 
+                                       for r in reason_strings)
             
-            # Add line source note
-            if pred.line_source == 'model' or not pred.line_source:
-                reason_strings.append("Model-generated line (no sportsbook line available)")
-            elif pred.line_source == 'sportsbook':
-                reason_strings.append("Based on real sportsbook line")
+            if not sample_size_mentioned:
+                if n_games_effective < 10:
+                    reason_strings.append(f"Very limited data ({int(n_games_effective)} effective games)")
+                elif n_games_effective < 20:
+                    reason_strings.append(f"Limited data ({int(n_games_effective)} effective games)")
+            
+            # Add line source note (if not already mentioned)
+            line_source_mentioned = any('line' in str(r).lower() for r in reason_strings)
+            if not line_source_mentioned:
+                if pred.line_source == 'model' or not pred.line_source:
+                    reason_strings.append("Model-generated line (no sportsbook line available)")
+                elif pred.line_source == 'sportsbook':
+                    reason_strings.append("Based on real sportsbook line")
+            
+            # Deduplicate reason_strings (case-insensitive, preserve order)
+            seen_reasons = set()
+            deduped_reasons = []
+            for reason in reason_strings:
+                reason_lower = str(reason).lower().strip()
+                if reason_lower not in seen_reasons:
+                    seen_reasons.add(reason_lower)
+                    deduped_reasons.append(reason)
             
             scored_predictions.append({
                 'prediction_id': pred.prediction_id,
@@ -298,15 +313,28 @@ class SuggestedBetsService(BaseSportService):
                 'volatility_level': pred.volatility_level,
                 'score': score,
                 'reasoning': pred.reasoning,
-                'reason_strings': reason_strings,
+                'reason_strings': deduped_reasons,  # Use deduplicated reasons
                 'last_3_games': last_3_games
             })
         
         # Sort by score (highest first)
         scored_predictions.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Deduplicate: never return two bets with identical player/stat/line/direction
+        # Keep only the highest-tier (highest-score) one per unique (player_id, stat_type, line) tuple
+        seen_bets = set()
+        deduped_predictions = []
+        
+        for bet in scored_predictions:
+            # Direction is always OVER for our predictions (we're computing P(X > line))
+            bet_key = (bet['player_id'], bet['stat_type'], round(bet['line'], 1))
+            
+            if bet_key not in seen_bets:
+                seen_bets.add(bet_key)
+                deduped_predictions.append(bet)
 
-        print(f"Returning {min(len(scored_predictions), limit)} suggested bets out of {len(scored_predictions)} scored predictions")
-        return scored_predictions[:limit]
+        print(f"Returning {min(len(deduped_predictions), limit)} suggested bets out of {len(scored_predictions)} scored predictions (after deduplication)")
+        return deduped_predictions[:limit]
     
     def _calculate_bet_score(self, prediction: Prediction) -> float:
         """

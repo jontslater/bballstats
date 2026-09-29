@@ -10,6 +10,14 @@ Computes calibrated probabilities for betting lines using:
 from typing import Dict, Optional, Tuple, List
 from scipy import stats
 import numpy as np
+import os
+
+# Prior strength constants for MLB count stats (shrinkage toward league rate)
+# Higher values = stronger shrinkage to league average (more conservative)
+# These can be overridden via environment variables for tuning
+PRIOR_STRENGTH_HITS = float(os.environ.get('K_HITS', '10.0'))
+PRIOR_STRENGTH_TB = float(os.environ.get('K_TB', '10.0'))
+PRIOR_STRENGTH_HR = float(os.environ.get('K_HR', '30.0'))  # HRs are rare, need stronger shrinkage
 
 
 class CalibratedProbabilityCalculator:
@@ -80,12 +88,14 @@ class CalibratedProbabilityCalculator:
         """
         # For MLB count stats, use discrete Poisson/Negative Binomial model
         if self.sport == 'MLB' and stat_type in ['hits', 'home_runs', 'total_bases']:
-            # Shrinkage toward league rate
+            # Shrinkage toward league rate using module-level constants
             if league_mean is not None:
                 if stat_type == 'home_runs':
-                    prior_strength = 20.0  # Strong shrinkage for HRs
-                else:
-                    prior_strength = 10.0  # Moderate shrinkage
+                    prior_strength = PRIOR_STRENGTH_HR
+                elif stat_type == 'total_bases':
+                    prior_strength = PRIOR_STRENGTH_TB
+                else:  # hits
+                    prior_strength = PRIOR_STRENGTH_HITS
                 
                 weight_player = sample_size / (sample_size + prior_strength)
                 shrunk_rate = weight_player * player_mean + (1 - weight_player) * league_mean
@@ -111,6 +121,11 @@ class CalibratedProbabilityCalculator:
             except (ValueError, ZeroDivisionError):
                 # Fallback to 50%
                 prob = 0.5
+            
+            # Cap probability for small samples (avoid overconfidence)
+            # Never above 0.85 unless n >= 30
+            if sample_size < 30 and prob > 0.85:
+                prob = 0.85
             
             # Clamp
             prob = max(0.01, min(0.99, prob))
@@ -193,12 +208,14 @@ class CalibratedProbabilityCalculator:
         sample_size = len(stat_values)
         player_mean = sum(stat_values) / sample_size
         
-        # Shrinkage toward league rate (stronger for rare events)
+        # Shrinkage toward league rate (stronger for rare events) using module-level constants
         if league_mean is not None:
             if stat_type == 'home_runs':
-                prior_strength = 20.0  # Strong shrinkage for HRs
-            else:
-                prior_strength = 10.0  # Moderate shrinkage for hits/TB
+                prior_strength = PRIOR_STRENGTH_HR
+            elif stat_type == 'total_bases':
+                prior_strength = PRIOR_STRENGTH_TB
+            else:  # hits
+                prior_strength = PRIOR_STRENGTH_HITS
             
             weight_player = sample_size / (sample_size + prior_strength)
             shrunk_rate = weight_player * player_mean + (1 - weight_player) * league_mean

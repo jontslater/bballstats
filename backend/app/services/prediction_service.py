@@ -607,6 +607,20 @@ class PredictionService:
         # Skip standard if it equals safe line (avoid duplicates)
         if bet_lines['safe_line'] == bet_lines['standard_line']:
             qualifying_bet_types = ['safe', 'long_shot']
+            
+            # Delete any existing stale 'standard' prediction for this player/stat/game
+            # (it's a duplicate of 'safe' now but may have existed from previous generation)
+            stale_standard = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.player_id == player_id,
+                    Prediction.game_id == game_id,
+                    Prediction.stat_type == stat_type,
+                    Prediction.bet_type == 'standard',
+                    Prediction.sport == self.sport
+                )
+            ).first()
+            if stale_standard:
+                self.db.delete(stale_standard)
         
         # Step 8: Analyze lineup context for reasoning
         lineup_context = None

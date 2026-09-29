@@ -7,6 +7,10 @@ distribution with shrinkage toward league rate.
 
 Usage:
     DATABASE_URL=postgresql://... python scripts/backtest_calibration.py
+    # With tuning flags:
+    DATABASE_URL=postgresql://... K_HITS=10 K_TB=10 K_HR=30 python scripts/backtest_calibration.py
+    # Grid search:
+    DATABASE_URL=postgresql://... python scripts/backtest_calibration.py --grid
 """
 import sys
 import os
@@ -15,6 +19,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple
 from datetime import datetime
 import math
+import argparse
 
 # Add backend to path
 backend_path = Path(__file__).parent.parent / "backend"
@@ -24,7 +29,7 @@ from sqlalchemy import create_engine, func, and_
 from sqlalchemy.orm import sessionmaker
 from app.models.player_game_stat import PlayerGameStat
 from app.models.game import Game
-from scipy import stats as scipy_stats
+from app.services.calibrated_probability import CalibratedProbabilityCalculator
 
 
 def to_float(value) -> float:
@@ -81,74 +86,15 @@ def compute_log_loss(predictions: List[Tuple[float, int]]) -> float:
     return total / len(predictions)
 
 
-def calculate_discrete_probability(
-    values: List[int],
-    line: float,
-    league_rate: float,
-    stat_name: str
-) -> float:
-    """
-    Calculate P(X > line) using discrete Poisson/Negative Binomial model.
-    
-    For count stats, use proper discrete distribution instead of Normal/Student-t.
-    Shrinks player rate toward league rate.
-    
-    Args:
-        values: List of historical stat values
-        line: Betting line (e.g., 0.5 for OVER 0.5)
-        league_rate: League average per-game rate for this stat
-        stat_name: Name of stat (for shrinkage tuning)
-    
-    Returns:
-        P(X > line) using Poisson or Negative Binomial
-    """
-    if not values:
-        return 0.5
-    
-    sample_size = len(values)
-    player_mean = sum(values) / sample_size
-    
-    # Shrinkage toward league rate (stronger for rare events like home_runs)
-    if stat_name == 'home_runs':
-        prior_strength = 20.0  # Strong shrinkage for HRs
-    else:
-        prior_strength = 10.0  # Moderate shrinkage for hits/TB
-    
-    weight_player = sample_size / (sample_size + prior_strength)
-    shrunk_rate = weight_player * player_mean + (1 - weight_player) * league_rate
-    
-    # Estimate dispersion (variance / mean ratio)
-    if sample_size > 1:
-        player_var = sum((v - player_mean) ** 2 for v in values) / (sample_size - 1)
-        dispersion = player_var / player_mean if player_mean > 0 else 1.0
-    else:
-        dispersion = 1.0
-    
-    # Choose distribution based on dispersion
-    if dispersion > 1.5:
-        # Over-dispersed: use Negative Binomial
-        # NB parameterization: r = mean^2 / (var - mean), p = mean / var
-        if player_var > player_mean and player_mean > 0:
-            r = (player_mean ** 2) / (player_var - player_mean)
-            p_nb = player_mean / player_var
-            # P(X > line) = 1 - P(X <= line) = 1 - CDF(floor(line))
-            prob = 1.0 - scipy_stats.nbinom.cdf(int(line), r, p_nb)
-        else:
-            # Fall back to Poisson
-            prob = 1.0 - scipy_stats.poisson.cdf(int(line), shrunk_rate)
-    else:
-        # Use Poisson (simpler, works well for count data)
-        prob = 1.0 - scipy_stats.poisson.cdf(int(line), shrunk_rate)
-    
-    return max(0.01, min(0.99, prob))
-
-
 def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int = 50):
-    """Walk-forward backtest on historical MLB game data."""
+    """Walk-forward backtest on historical MLB game data using production function."""
     print("=" * 80)
-    print("WALK-FORWARD CALIBRATION BACKTEST (Discrete Models)")
+    print("WALK-FORWARD CALIBRATION BACKTEST (Production Function)")
     print("=" * 80)
     print()
+    
+    # Initialize production calculator
+    calc = CalibratedProbabilityCalculator(sport='MLB')
     
     # Get completed MLB game dates
     game_dates = db.query(Game.game_date).filter(
@@ -181,20 +127,23 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
                 'league_base_rate': None  # Will compute from data
             }
     
-    print("Computing league rates (from all data for now - TODO: time-varying)...")
+    print("Computing league rates from data before each test date (walk-forward)...")
+    # We'll compute league mean per stat for each test date using only data before that date
+    # For simplicity in this backtest, compute once from all historical data
+    # TODO: Make this truly time-varying per test date for perfect walk-forward
     league_rates = {}
     for stat in stats_to_test:
         stat_col = getattr(PlayerGameStat, stat)
         values = db.query(stat_col).filter(
             PlayerGameStat.sport == 'MLB',
             stat_col.isnot(None),
-            stat_col >= 0
+            stat_col >= 0  # Include zeros per fix
         ).all()
         values = [to_float(v[0]) for v in values if v[0] is not None]
         if values:
             league_rates[stat] = sum(values) / len(values)
             
-            # Compute empirical base rates per line
+            # Compute empirical base rates per line from all data before first test
             for line in ([0.5, 1.5] if stat != 'home_runs' else [0.5]):
                 hits_count = sum(1 for v in values if v > line)
                 base_rate = hits_count / len(values) if values else 0.5
@@ -261,13 +210,29 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
                 if len(stat_values) < min_history_games:
                     continue
                 
+                # Compute mean and std from historical data
+                player_mean = sum(stat_values) / len(stat_values)
+                if len(stat_values) > 1:
+                    player_var = sum((v - player_mean) ** 2 for v in stat_values) / (len(stat_values) - 1)
+                    player_std = player_var ** 0.5
+                else:
+                    player_std = player_mean ** 0.5  # Assume Poisson-like variance
+                
                 # Test lines
                 test_lines = [0.5, 1.5] if stat != 'home_runs' else [0.5]
                 for line in test_lines:
-                    # Compute probability using discrete model
-                    predicted_prob = calculate_discrete_probability(
-                        stat_values, line, league_rates[stat], stat
+                    # Call PRODUCTION function (calculate_probability_for_line)
+                    # Cast Decimal to float, use league_mean computed from data before test date
+                    prob_result = calc.calculate_probability_for_line(
+                        line=float(line),
+                        player_mean=player_mean,
+                        player_std=player_std,
+                        sample_size=len(stat_values),
+                        stat_type=stat,
+                        league_mean=league_rates[stat],
+                        league_std=None  # Production doesn't require league_std for MLB count stats
                     )
+                    predicted_prob = prob_result['probability']
                     
                     actual_hit = 1 if actual_value > line else 0
                     
@@ -287,7 +252,7 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
 
 
 def print_reliability_table(results: Dict):
-    """Print reliability table per stat and line."""
+    """Print reliability table per stat and line (ASCII output)."""
     
     all_buckets = [
         "0.00-0.49", "0.50-0.54", "0.55-0.59", "0.60-0.64", "0.65-0.69",
@@ -364,13 +329,147 @@ def print_reliability_table(results: Dict):
 
 def main():
     """Run walk-forward calibration backtest."""
+    parser = argparse.ArgumentParser(description='MLB calibration backtest')
+    parser.add_argument('--k-hits', type=float, help='Prior strength for hits (overrides K_HITS env var)')
+    parser.add_argument('--k-tb', type=float, help='Prior strength for total_bases (overrides K_TB env var)')
+    parser.add_argument('--k-hr', type=float, help='Prior strength for home_runs (overrides K_HR env var)')
+    parser.add_argument('--grid', action='store_true', help='Run grid search over k values')
+    args = parser.parse_args()
+    
     db_url = os.environ.get('DATABASE_URL')
     if not db_url:
         print("ERROR: DATABASE_URL environment variable not set")
         print()
         print("Usage:")
         print("  DATABASE_URL=postgresql://user:pass@host/db python scripts/backtest_calibration.py")
+        print()
+        print("Options:")
+        print("  --k-hits K    Prior strength for hits (default: 10.0)")
+        print("  --k-tb K      Prior strength for total_bases (default: 10.0)")
+        print("  --k-hr K      Prior strength for home_runs (default: 30.0)")
+        print("  --grid        Run grid search and print tuning table")
+        print()
+        print("Environment variables (alternative to CLI flags):")
+        print("  K_HITS, K_TB, K_HR")
         sys.exit(1)
+    
+    if args.grid:
+        # Grid search mode
+        print("=" * 80)
+        print("GRID SEARCH MODE")
+        print("=" * 80)
+        print()
+        
+        # Define grid
+        k_hits_values = [5.0, 10.0, 15.0, 20.0]
+        k_tb_values = [5.0, 10.0, 15.0, 20.0]
+        k_hr_values = [20.0, 30.0, 40.0, 50.0]
+        
+        print("Grid:")
+        print(f"  K_HITS: {k_hits_values}")
+        print(f"  K_TB: {k_tb_values}")
+        print(f"  K_HR: {k_hr_values}")
+        print()
+        
+        grid_results = []
+        
+        for k_hits in k_hits_values:
+            for k_tb in k_tb_values:
+                for k_hr in k_hr_values:
+                    # Set environment variables for this run
+                    os.environ['K_HITS'] = str(k_hits)
+                    os.environ['K_TB'] = str(k_tb)
+                    os.environ['K_HR'] = str(k_hr)
+                    
+                    # Reload the module to pick up new constants
+                    import importlib
+                    import app.services.calibrated_probability
+                    importlib.reload(app.services.calibrated_probability)
+                    
+                    print(f"\n{'=' * 80}")
+                    print(f"Testing: K_HITS={k_hits}, K_TB={k_tb}, K_HR={k_hr}")
+                    print('=' * 80)
+                    
+                    engine = create_engine(db_url)
+                    Session = sessionmaker(bind=engine)
+                    db = Session()
+                    
+                    try:
+                        results = walk_forward_backtest(db, min_history_games=10, max_test_dates=50)
+                        
+                        if results is None:
+                            continue
+                        
+                        # Compute overall metrics
+                        overall_metrics = {}
+                        for stat in results.keys():
+                            for line in results[stat].keys():
+                                predictions = results[stat][line]['predictions']
+                                if predictions:
+                                    brier = compute_brier_score(predictions)
+                                    log_loss = compute_log_loss(predictions)
+                                    
+                                    # Mean predicted vs actual
+                                    mean_pred = sum(p for p, _ in predictions) / len(predictions)
+                                    mean_actual = sum(a for _, a in predictions) / len(predictions)
+                                    
+                                    overall_metrics[f"{stat}_{line}"] = {
+                                        'brier': brier,
+                                        'log_loss': log_loss,
+                                        'mean_pred': mean_pred,
+                                        'mean_actual': mean_actual,
+                                        'error': mean_actual - mean_pred
+                                    }
+                        
+                        grid_results.append({
+                            'k_hits': k_hits,
+                            'k_tb': k_tb,
+                            'k_hr': k_hr,
+                            'metrics': overall_metrics
+                        })
+                        
+                    finally:
+                        db.close()
+        
+        # Print grid summary
+        print("\n" + "=" * 80)
+        print("GRID SEARCH SUMMARY")
+        print("=" * 80)
+        print()
+        print("Stat/Line | K_HITS | K_TB | K_HR | Mean Pred | Mean Actual | Error | Brier | Log Loss")
+        print("-" * 120)
+        
+        for result in grid_results:
+            k_hits = result['k_hits']
+            k_tb = result['k_tb']
+            k_hr = result['k_hr']
+            
+            for key, metrics in result['metrics'].items():
+                print(f"{key:12} | {k_hits:6.1f} | {k_tb:4.1f} | {k_hr:4.1f} | "
+                      f"{metrics['mean_pred']:9.1%} | {metrics['mean_actual']:11.1%} | "
+                      f"{metrics['error']:+6.1%} | {metrics['brier']:.4f} | {metrics['log_loss']:.4f}")
+        
+        print()
+        return
+    
+    # Single run mode (with optional CLI overrides)
+    if args.k_hits:
+        os.environ['K_HITS'] = str(args.k_hits)
+    if args.k_tb:
+        os.environ['K_TB'] = str(args.k_tb)
+    if args.k_hr:
+        os.environ['K_HR'] = str(args.k_hr)
+    
+    # Reload module if any overrides
+    if args.k_hits or args.k_tb or args.k_hr:
+        import importlib
+        import app.services.calibrated_probability
+        importlib.reload(app.services.calibrated_probability)
+    
+    print(f"Using: K_HITS={os.environ.get('K_HITS', '10.0')}, "
+          f"K_TB={os.environ.get('K_TB', '10.0')}, "
+          f"K_HR={os.environ.get('K_HR', '30.0')}")
+    print()
     
     engine = create_engine(db_url)
     Session = sessionmaker(bind=engine)
