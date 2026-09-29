@@ -47,8 +47,15 @@ class Prediction(Base):
     # Classification
     bet_type = Column(String(20))  # safe, standard, long_shot, pass
     pass_reason = Column(Text)  # if bet_type is "pass", why
-    confidence_level = Column(String(10))  # HIGH, MEDIUM, LOW
+    confidence_level = Column(String(10))  # HIGH, MEDIUM, LOW, MODEL_ONLY
     volatility_level = Column(String(10))  # LOW, MEDIUM, HIGH
+    
+    # Confidence details
+    line_source = Column(String(20))  # 'sportsbook' or 'model'
+    confidence_score = Column(Float)  # numerical confidence score 0-100
+    confidence_reasons = Column(Text)  # JSON array of confidence reason strings
+    data_as_of = Column(DateTime(timezone=True))  # when the data was last updated
+    n_games_effective = Column(Float)  # effective sample size after Empirical Bayes
     
     # Reasoning
     reasoning = Column(Text)  # key factors

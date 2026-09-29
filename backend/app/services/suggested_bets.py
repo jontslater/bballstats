@@ -138,7 +138,7 @@ class SuggestedBetsService(BaseSportService):
             # Calculate quality score
             score = self._calculate_bet_score(pred)
             
-            # Get probability based on bet type with fallbacks
+            # Get probability based on bet type (no fallbacks - use actual data)
             if pred.bet_type == 'safe':
                 probability = pred.safe_probability
                 line = pred.safe_line
@@ -149,59 +149,9 @@ class SuggestedBetsService(BaseSportService):
                 probability = pred.long_shot_probability
                 line = pred.long_shot_line
 
-            # Calculate fallbacks if values are missing
-            if probability is None:
-                if pred.bet_type == 'safe':
-                    probability = 0.75
-                elif pred.bet_type == 'standard':
-                    probability = 0.60
-                else:  # long_shot
-                    probability = 0.25
-
-            if line is None:
-                # Use distribution_mean as base, or reasonable defaults based on sport
-                if self.sport == 'NFL':
-                    # NFL defaults by stat type
-                    nfl_defaults = {
-                        'passing_yards': 200.0,
-                        'rushing_yards': 50.0,
-                        'receiving_yards': 40.0,
-                        'receptions': 4.0,
-                        'passing_tds': 1.5,
-                        'rushing_tds': 0.5,
-                        'receiving_tds': 0.5
-                    }
-                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else nfl_defaults.get(pred.stat_type, 10.0)
-                elif self.sport == 'MLB':
-                    # MLB defaults by stat type (realistic MLB player performance)
-                    mlb_defaults = {
-                        'hits': 1.0,
-                        'home_runs': 0.5,
-                        'total_bases': 1.5,
-                        'strikeouts': 1.0,
-                        'runs': 0.5,
-                        'rbis': 0.5,
-                        'stolen_bases': 0.2
-                    }
-                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else mlb_defaults.get(pred.stat_type, 1.0)
-                else:  # NBA
-                    base_value = pred.distribution_mean if pred.distribution_mean and pred.distribution_mean > 0 else 10.0
-
-                if pred.bet_type == 'safe':
-                    line = base_value * 1.2  # 20% above mean
-                elif pred.bet_type == 'standard':
-                    line = base_value  # at mean
-                else:  # long_shot
-                    line = max(base_value * 0.8, 0.5)  # 20% below mean, but ensure minimum 0.5
-
-                # Ensure line is always positive
-                line = max(abs(line), 0.5)
-
-                # Round appropriately for stat type
-                if pred.stat_type in ['points', 'rebounds', 'assists', 'passing_yards', 'rushing_yards', 'receiving_yards', 'hits', 'home_runs', 'total_bases', 'strikeouts']:
-                    line = round(line, 1)
-                else:
-                    line = round(line, 2)
+            # Skip if missing critical data
+            if probability is None or line is None:
+                continue
             
             # Only include if meets minimum probability (for safe/standard bets)
             # Long shots have lower probability threshold
@@ -330,53 +280,85 @@ class SuggestedBetsService(BaseSportService):
     
     def _calculate_bet_score(self, prediction: Prediction) -> float:
         """
-        Calculate quality score for a bet.
+        Calculate quality score for a bet using calibrated probability and confidence.
         
         Higher score = better bet recommendation.
+        Ranks by:
+        1. Calibrated probability and edge
+        2. Confidence tier as multiplier
+        3. Line source (real > synthetic)
         """
         score = 0.0
         
-        # Probability component (higher is better)
+        # Base score from probability
         if prediction.bet_type == 'safe':
             prob = prediction.safe_probability or 0
-            score += prob * 100  # Weight: 100 points max
+            # Safe bets: reward higher probabilities (65%+ ideal)
+            if prob >= 0.75:
+                score += 90  # Excellent safe bet
+            elif prob >= 0.65:
+                score += 70  # Good safe bet
+            else:
+                score += prob * 60  # Adequate
         elif prediction.bet_type == 'standard':
             prob = prediction.standard_probability or 0
-            score += prob * 80  # Weight: 80 points max
+            # Standard bets: 45-60% range
+            if 0.50 <= prob <= 0.60:
+                score += 80  # Sweet spot
+            elif prob >= 0.45:
+                score += prob * 70
+            else:
+                score += prob * 50
         else:  # long_shot
             prob = prediction.long_shot_probability or 0
-            # For long shots, reward higher probabilities (8-20% range is ideal)
-            # But don't penalize too much for lower probabilities
-            if 0.10 <= prob <= 0.20:
-                score += prob * 80  # Good long shot range
-            elif 0.08 <= prob < 0.10 or 0.20 < prob <= 0.25:
-                score += prob * 60  # Acceptable range
+            # Long shots: 10-25% range ideal
+            if 0.15 <= prob <= 0.25:
+                score += 60  # Good long shot
+            elif 0.10 <= prob < 0.15 or 0.25 < prob <= 0.30:
+                score += prob * 50
             else:
-                score += prob * 40  # Lower score for extreme probabilities
+                score += prob * 30
         
-        # Confidence component
-        if prediction.confidence_level == 'HIGH':
-            score += 30
-        elif prediction.confidence_level == 'MEDIUM':
-            score += 15
-        elif prediction.confidence_level == 'LOW':
-            score += 5  # Small boost for low confidence (still better than nothing)
+        # Confidence tier multiplier
+        confidence_tier = prediction.confidence_level or 'LOW'
+        if confidence_tier == 'HIGH':
+            score *= 1.3
+        elif confidence_tier == 'MEDIUM':
+            score *= 1.1
+        elif confidence_tier == 'LOW':
+            score *= 0.9
+        elif confidence_tier == 'MODEL_ONLY':
+            score *= 0.7
         
-        # Volatility component (lower volatility = higher score)
-        if prediction.volatility_level == 'LOW':
+        # Line source bonus (real sportsbook lines are more reliable)
+        if prediction.line_source == 'sportsbook':
             score += 20
+        else:
+            # Synthetic lines: penalize heavily
+            score -= 20
+            # Cap synthetic lines at lower tier
+            score = min(score, 60)
+        
+        # Sample size factor
+        if prediction.sample_size:
+            if prediction.sample_size >= 30:
+                score += 10
+            elif prediction.sample_size >= 20:
+                score += 5
+            elif prediction.sample_size < 10:
+                score -= 10
+        
+        # Volatility penalty
+        if prediction.volatility_level == 'HIGH':
+            score -= 15
         elif prediction.volatility_level == 'MEDIUM':
-            score += 10
+            score -= 5
         
-        # Bonus for long shots (to ensure they appear in suggestions)
-        if prediction.bet_type == 'long_shot':
-            score += 10  # Small bonus to ensure variety
-        
-        # Penalize if there's a pass reason (shouldn't happen for suggested bets, but just in case)
+        # Pass reason penalty
         if prediction.pass_reason:
-            score -= 50
+            score -= 30
         
-        return score
+        return max(0, score)
     
     def get_suggested_parlays(
         self,
@@ -914,8 +896,9 @@ class SuggestedBetsService(BaseSportService):
             
             # Ensure line is valid (positive and not None)
             safe_line = pred.safe_line
-            if safe_line is None or safe_line <= 0:
-                continue  # Skip bets with invalid lines
+            probability = pred.safe_probability
+            if safe_line is None or safe_line <= 0 or probability is None:
+                continue  # Skip bets with invalid lines or probabilities
             
             # SANITY CHECK: Sport-specific maximum reasonable values
             if self.sport == 'MLB':
@@ -950,7 +933,7 @@ class SuggestedBetsService(BaseSportService):
                 'stat_type': pred.stat_type,
                 'bet_type': 'safe',
                 'line': safe_line,
-                'probability': pred.safe_probability or 0.75,  # Ensure probability exists
+                'probability': probability,
                 'confidence_level': pred.confidence_level or 'MEDIUM',
                 'volatility_level': pred.volatility_level or 'MEDIUM',
                 'last_3_games': last_3_games
