@@ -604,6 +604,10 @@ class PredictionService:
         # updates all existing rows. The API layer will filter out unqualified bets.
         qualifying_bet_types = ['safe', 'standard', 'long_shot']  # Always generate all three
         
+        # Skip standard if it equals safe line (avoid duplicates)
+        if bet_lines['safe_line'] == bet_lines['standard_line']:
+            qualifying_bet_types = ['safe', 'long_shot']
+        
         # Step 8: Analyze lineup context for reasoning
         lineup_context = None
         try:
