@@ -127,11 +127,8 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
                 'league_base_rate': None  # Will compute from data
             }
     
-    print("Computing league rates from data before each test date (walk-forward)...")
-    # We'll compute league mean per stat for each test date using only data before that date
-    # For simplicity in this backtest, compute once from all historical data
-    # TODO: Make this truly time-varying per test date for perfect walk-forward
-    league_rates = {}
+    print("Computing initial league rates for reference (will be walk-forward per test date)...")
+    # Display overall league stats for reference
     for stat in stats_to_test:
         stat_col = getattr(PlayerGameStat, stat)
         values = db.query(stat_col).filter(
@@ -141,21 +138,21 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
         ).all()
         values = [to_float(v[0]) for v in values if v[0] is not None]
         if values:
-            league_rates[stat] = sum(values) / len(values)
+            overall_mean = sum(values) / len(values)
             
-            # Compute empirical base rates per line from all data before first test
+            # Compute empirical base rates per line from all data for reference
             for line in ([0.5, 1.5] if stat != 'home_runs' else [0.5]):
                 hits_count = sum(1 for v in values if v > line)
                 base_rate = hits_count / len(values) if values else 0.5
                 results[stat][line]['league_base_rate'] = base_rate
-                print(f"  {stat} OVER {line}: mean={league_rates[stat]:.3f}, base_rate={base_rate:.1%}")
+                print(f"  {stat} OVER {line}: overall_mean={overall_mean:.3f}, base_rate={base_rate:.1%}")
         else:
-            league_rates[stat] = 0.5
             for line in ([0.5, 1.5] if stat != 'home_runs' else [0.5]):
                 results[stat][line]['league_base_rate'] = 0.5
     
     print()
     print(f"Running walk-forward test on up to {max_test_dates} dates...")
+    print("(League means computed only from data before each test date)")
     print()
     
     total_predictions = 0
@@ -164,6 +161,24 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
     for test_date in game_dates:
         if dates_processed >= max_test_dates:
             break
+        
+        # Compute league rates ONLY from games before this test date (true walk-forward)
+        league_rates_for_date = {}
+        for stat in stats_to_test:
+            stat_col = getattr(PlayerGameStat, stat)
+            pre_test_values = db.query(stat_col).join(Game).filter(
+                PlayerGameStat.sport == 'MLB',
+                stat_col.isnot(None),
+                stat_col >= 0,
+                Game.game_date < test_date,
+                Game.game_status.in_(['final', 'finished'])
+            ).all()
+            pre_test_values = [to_float(v[0]) for v in pre_test_values if v[0] is not None]
+            
+            if pre_test_values:
+                league_rates_for_date[stat] = sum(pre_test_values) / len(pre_test_values)
+            else:
+                league_rates_for_date[stat] = 0.5  # Fallback if no prior data
         
         # Get games on test date
         test_games = db.query(Game).filter(
@@ -222,14 +237,14 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
                 test_lines = [0.5, 1.5] if stat != 'home_runs' else [0.5]
                 for line in test_lines:
                     # Call PRODUCTION function (calculate_probability_for_line)
-                    # Cast Decimal to float, use league_mean computed from data before test date
+                    # Use league_mean computed ONLY from data before test date (walk-forward)
                     prob_result = calc.calculate_probability_for_line(
                         line=float(line),
                         player_mean=player_mean,
                         player_std=player_std,
                         sample_size=len(stat_values),
                         stat_type=stat,
-                        league_mean=league_rates[stat],
+                        league_mean=league_rates_for_date[stat],  # Walk-forward league mean
                         league_std=None  # Production doesn't require league_std for MLB count stats
                     )
                     predicted_prob = prob_result['probability']

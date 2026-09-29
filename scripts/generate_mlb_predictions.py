@@ -39,6 +39,18 @@ def generate_predictions_for_game(db: Session, game_id: int):
     print(f"\nGenerating MLB predictions for Game {game_id}")
     print(f"   {game.away_team.name} @ {game.home_team.name} on {game.game_date}")
     print("=" * 60)
+    
+    # Delete predictions for stats we no longer generate (at_bats, plate_appearances, rbis with bad lines)
+    from app.models.prediction import Prediction
+    stale_stats = ['at_bats', 'plate_appearances', 'rbis']
+    deleted_count = db.query(Prediction).filter(
+        Prediction.game_id == game_id,
+        Prediction.sport == 'MLB',
+        Prediction.stat_type.in_(stale_stats)
+    ).delete(synchronize_session=False)
+    if deleted_count > 0:
+        print(f"Cleaned up {deleted_count} stale predictions for {stale_stats}")
+        db.commit()
 
     pred_service = PredictionService(db, sport='MLB')
 

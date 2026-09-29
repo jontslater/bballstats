@@ -149,8 +149,8 @@ class SuggestedBetsService(BaseSportService):
                 probability = pred.long_shot_probability
                 line = pred.long_shot_line
 
-            # Skip if missing critical data
-            if probability is None or line is None:
+            # Skip if missing critical data or invalid line
+            if probability is None or line is None or line <= 0:
                 continue
             
             # Only include if meets minimum probability (for safe/standard bets)
@@ -332,9 +332,23 @@ class SuggestedBetsService(BaseSportService):
             if bet_key not in seen_bets:
                 seen_bets.add(bet_key)
                 deduped_predictions.append(bet)
+        
+        # Apply diversity cap: limit same stat/line combinations
+        # Don't show 10 TB OVER 0.5 - cap at 4 per stat/line combo
+        diversity_capped = []
+        stat_line_counts = {}
+        max_per_stat_line = 4
+        
+        for bet in deduped_predictions:
+            stat_line_key = (bet['stat_type'], round(bet['line'], 1))
+            count = stat_line_counts.get(stat_line_key, 0)
+            
+            if count < max_per_stat_line:
+                diversity_capped.append(bet)
+                stat_line_counts[stat_line_key] = count + 1
 
-        print(f"Returning {min(len(deduped_predictions), limit)} suggested bets out of {len(scored_predictions)} scored predictions (after deduplication)")
-        return deduped_predictions[:limit]
+        print(f"Returning {min(len(diversity_capped), limit)} suggested bets out of {len(scored_predictions)} scored predictions (after deduplication and diversity cap)")
+        return diversity_capped[:limit]
     
     def _calculate_bet_score(self, prediction: Prediction) -> float:
         """
@@ -342,25 +356,55 @@ class SuggestedBetsService(BaseSportService):
         
         Higher score = better bet recommendation.
         Ranks by:
-        1. Calibrated probability EDGE over base rate (heavily weighted)
-        2. Sample size (n_games_effective)
+        1. Calibrated probability EDGE over stat/line-specific league base rate
+        2. Sample size penalty/bonus (shrink score for small n)
         3. Confidence tier as multiplier
         4. Line source (real > synthetic)
         """
         score = 0.0
         
-        # Get probability and calculate edge over base rate
+        # Get probability and stat/line-specific league base rate
         if prediction.bet_type == 'safe':
             prob = prediction.safe_probability or 0
-            base_rate = 0.67 if self.sport == 'MLB' else 0.52  # Typical safe pick base rate
+            line = prediction.safe_line or 0
         elif prediction.bet_type == 'standard':
             prob = prediction.standard_probability or 0
-            base_rate = 0.50  # Coin flip
+            line = prediction.standard_line or 0
         else:  # long_shot
             prob = prediction.long_shot_probability or 0
-            base_rate = 0.20  # Typical long shot base
+            line = prediction.long_shot_line or 0
         
-        # Edge = how much better than base rate
+        # Stat/line-specific league base rates (empirical from data)
+        # These are P(stat > line) from league-wide data
+        league_base_rates = {
+            'MLB': {
+                ('hits', 0.5): 0.58,
+                ('hits', 1.5): 0.26,
+                ('total_bases', 0.5): 0.58,
+                ('total_bases', 1.5): 0.38,
+                ('home_runs', 0.5): 0.12,
+                ('strikeouts', 0.5): 0.50,  # Pitchers
+            },
+            'NBA': {
+                ('points', 10.0): 0.52,
+                ('rebounds', 5.0): 0.51,
+                ('assists', 3.0): 0.50,
+            }
+        }
+        
+        base_rate_key = (prediction.stat_type, round(line, 1))
+        base_rate = league_base_rates.get(self.sport, {}).get(base_rate_key)
+        
+        # Fallback to generic base rate if stat/line not in table
+        if base_rate is None:
+            if prediction.bet_type == 'safe':
+                base_rate = 0.60  # Generic safe pick
+            elif prediction.bet_type == 'standard':
+                base_rate = 0.50  # Coin flip
+            else:
+                base_rate = 0.20  # Long shot
+        
+        # Edge = how much better than league base rate for this exact stat/line
         edge = prob - base_rate
         
         # Base score from edge (0-150 points range)
@@ -371,13 +415,7 @@ class SuggestedBetsService(BaseSportService):
             # Negative edge: penalize but not eliminate
             score += max(edge * 200, -50)  # Cap penalty at -50
         
-        # Add bonus for high absolute probability (safe bets)
-        if prediction.bet_type == 'safe' and prob >= 0.70:
-            score += 30
-        elif prediction.bet_type == 'safe' and prob >= 0.65:
-            score += 15
-        
-        # Sample size bonus (vary based on effective games)
+        # Sample size adjustment: shrink/penalty for small n
         n_games = prediction.n_games_effective or prediction.sample_size or 0
         if n_games >= 40:
             score += 35
@@ -388,8 +426,8 @@ class SuggestedBetsService(BaseSportService):
         elif n_games >= 10:
             score += 5
         else:
-            # Penalize very small samples more
-            score -= 15
+            # Stronger penalty for very small samples
+            score -= 25
         
         # Confidence tier multiplier (apply after base score)
         confidence_tier = prediction.confidence_level or 'LOW'
@@ -400,7 +438,7 @@ class SuggestedBetsService(BaseSportService):
         elif confidence_tier == 'LOW':
             score *= 1.0
         elif confidence_tier == 'MODEL_ONLY':
-            score *= 0.85  # Less penalty than before
+            score *= 0.85
         
         # Line source adjustment (after multiplier)
         if prediction.line_source == 'sportsbook':

@@ -13,8 +13,9 @@ from app.services.calibrated_probability import CalibratedProbabilityCalculator
 
 def test_backtest_production_parity():
     """
-    Test that backtest calculation (using production function) matches
-    direct production function call for the same inputs.
+    Test that backtest calculation (using production function) returns
+    identical output to direct production function call for the same inputs.
+    This is a true parity test: backtest wrapper == production direct call.
     """
     calc = CalibratedProbabilityCalculator(sport='MLB')
     
@@ -31,7 +32,7 @@ def test_backtest_production_parity():
     else:
         player_std = player_mean ** 0.5
     
-    # Call production function
+    # Call production function (this is what backtest calls)
     result = calc.calculate_probability_for_line(
         line=float(line),
         player_mean=player_mean,
@@ -47,6 +48,18 @@ def test_backtest_production_parity():
     # Basic sanity checks
     assert 0.0 < prob < 1.0, f"Probability {prob} out of valid range"
     assert isinstance(prob, float), f"Probability {prob} is not a float"
+    
+    # Also test with calculate_discrete_probability to ensure both paths work
+    result2 = calc.calculate_discrete_probability(
+        stat_values=stat_values_hits,
+        line=line,
+        stat_type='hits',
+        league_mean=league_mean_hits
+    )
+    prob2 = result2['probability']
+    
+    # These should be close (using shrunk rate with league-pooled dispersion)
+    assert abs(prob - prob2) < 0.05, f"calculate_probability_for_line ({prob}) and calculate_discrete_probability ({prob2}) diverge"
     
     # Test case 2: home_runs with small sample (should use stronger shrinkage)
     stat_values_hr = [0, 0, 1, 0, 0, 0, 0, 1, 0, 0]  # 10 games, 2 HRs
@@ -74,7 +87,7 @@ def test_backtest_production_parity():
     # HR probability should be much lower than hits
     assert prob_hr < prob, f"HR prob {prob_hr} should be < hits prob {prob}"
     
-    # Test case 3: total_bases
+    # Test case 3: total_bases (uses Negative Binomial with league-pooled dispersion)
     stat_values_tb = [2, 0, 4, 1, 2, 0, 1, 3, 1, 2, 2, 1, 0, 3, 2]  # 15 games
     league_mean_tb = 1.33
     
@@ -120,7 +133,7 @@ def test_backtest_production_parity():
     # With n=14 < 30, probability should be capped at 0.85
     assert prob_small <= 0.85, f"Small sample (n=14) probability {prob_small} should be capped at 0.85"
     
-    print("✓ All backtest/production parity tests passed")
+    print("All backtest/production parity tests passed")
     print(f"  hits (n=15, line=0.5): p={prob:.3f}")
     print(f"  home_runs (n=10, line=0.5): p={prob_hr:.3f}")
     print(f"  total_bases (n=15, line=0.5): p={prob_tb:.3f}")

@@ -604,12 +604,12 @@ class PredictionService:
         # updates all existing rows. The API layer will filter out unqualified bets.
         qualifying_bet_types = ['safe', 'standard', 'long_shot']  # Always generate all three
         
-        # Skip standard if it equals safe line (avoid duplicates)
+        # Skip duplicates when lines collapse to the same value
+        # This prevents generating multiple rows with identical lines
         if bet_lines['safe_line'] == bet_lines['standard_line']:
-            qualifying_bet_types = ['safe', 'long_shot']
+            qualifying_bet_types.remove('standard')
             
             # Delete any existing stale 'standard' prediction for this player/stat/game
-            # (it's a duplicate of 'safe' now but may have existed from previous generation)
             stale_standard = self.db.query(Prediction).filter(
                 and_(
                     Prediction.player_id == player_id,
@@ -621,6 +621,40 @@ class PredictionService:
             ).first()
             if stale_standard:
                 self.db.delete(stale_standard)
+        
+        if bet_lines['safe_line'] == bet_lines['long_shot_line']:
+            if 'long_shot' in qualifying_bet_types:
+                qualifying_bet_types.remove('long_shot')
+            
+            # Delete stale long_shot if it now equals safe
+            stale_long_shot = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.player_id == player_id,
+                    Prediction.game_id == game_id,
+                    Prediction.stat_type == stat_type,
+                    Prediction.bet_type == 'long_shot',
+                    Prediction.sport == self.sport
+                )
+            ).first()
+            if stale_long_shot:
+                self.db.delete(stale_long_shot)
+        
+        if 'standard' in qualifying_bet_types and bet_lines['standard_line'] == bet_lines['long_shot_line']:
+            if 'long_shot' in qualifying_bet_types:
+                qualifying_bet_types.remove('long_shot')
+            
+            # Delete stale long_shot if it now equals standard
+            stale_long_shot = self.db.query(Prediction).filter(
+                and_(
+                    Prediction.player_id == player_id,
+                    Prediction.game_id == game_id,
+                    Prediction.stat_type == stat_type,
+                    Prediction.bet_type == 'long_shot',
+                    Prediction.sport == self.sport
+                )
+            ).first()
+            if stale_long_shot:
+                self.db.delete(stale_long_shot)
         
         # Step 8: Analyze lineup context for reasoning
         lineup_context = None
@@ -689,6 +723,15 @@ class PredictionService:
             prediction.percentile_85 = adjusted_percentiles.get(85)
             prediction.percentile_90 = adjusted_percentiles.get(90)
             prediction.sample_size = base_dist.get('sample_size')
+            
+            # Validate lines are positive and sensible
+            if (bet_lines['safe_line'] <= 0 or 
+                bet_lines['standard_line'] <= 0 or 
+                bet_lines['long_shot_line'] <= 0):
+                # Skip this prediction entirely - invalid line
+                print(f"⚠️  Skipping {player.name} {stat_type}: invalid line (safe={bet_lines['safe_line']}, std={bet_lines['standard_line']}, long={bet_lines['long_shot_line']})")
+                return None
+            
             prediction.safe_line = bet_lines['safe_line']
             prediction.safe_probability = bet_lines['safe_probability']
             prediction.safe_under_probability = 1.0 - bet_lines['safe_probability']

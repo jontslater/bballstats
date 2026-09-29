@@ -73,6 +73,25 @@ class BetDefinitions:
             
             # Round to nearest half-integer for discrete grid
             standard_line = round(shrunk_mean * 2) / 2
+            
+            # Ensure minimum sensible line per stat type
+            min_line = {
+                'home_runs': 0.5,
+                'hits': 0.5,
+                'total_bases': 0.5,
+                'strikeouts': 0.5,
+                'rbis': 0.5
+            }
+            if self.sport == 'MLB':
+                stat_min = min_line.get(stat_type, 0.5)
+                standard_line = max(standard_line, stat_min)
+                
+                # Avoid whole-number (x.0) OVER lines for hits/TB/RBIs
+                # Use x.5 lines instead for better granularity
+                if stat_type in ['hits', 'total_bases', 'rbis']:
+                    if standard_line > 0 and standard_line % 1.0 == 0:
+                        standard_line += 0.5
+            
             line_source = 'model'
             is_synthetic = True
         

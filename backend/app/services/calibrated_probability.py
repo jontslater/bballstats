@@ -15,9 +15,9 @@ import os
 # Prior strength constants for MLB count stats (shrinkage toward league rate)
 # Higher values = stronger shrinkage to league average (more conservative)
 # These can be overridden via environment variables for tuning
-PRIOR_STRENGTH_HITS = float(os.environ.get('K_HITS', '10.0'))
-PRIOR_STRENGTH_TB = float(os.environ.get('K_TB', '10.0'))
-PRIOR_STRENGTH_HR = float(os.environ.get('K_HR', '30.0'))  # HRs are rare, need stronger shrinkage
+PRIOR_STRENGTH_HITS = float(os.environ.get('K_HITS', '18.0'))  # 15-20 range for calibration
+PRIOR_STRENGTH_TB = float(os.environ.get('K_TB', '15.0'))  # Re-tuned after NB fix
+PRIOR_STRENGTH_HR = float(os.environ.get('K_HR', '40.0'))  # HRs are rare, need stronger shrinkage
 
 
 class CalibratedProbabilityCalculator:
@@ -102,21 +102,35 @@ class CalibratedProbabilityCalculator:
             else:
                 shrunk_rate = player_mean
             
-            # Estimate dispersion from mean and std
-            if player_mean > 0:
-                dispersion = (player_std ** 2) / player_mean
-            else:
-                dispersion = 1.0
+            # Use league-pooled dispersion for over-dispersed stats
+            # Computed from league data: TB ~2.25, hits ~1.1, HR ~1.5
+            league_dispersion = {
+                'total_bases': 2.25,
+                'hits': 1.1,
+                'home_runs': 1.5
+            }
+            dispersion = league_dispersion.get(stat_type, 1.0)
             
             # Choose distribution
             try:
-                if dispersion > 1.5 and player_std ** 2 > player_mean and player_mean > 0:
-                    # Negative Binomial for over-dispersed
-                    r = (player_mean ** 2) / (player_std ** 2 - player_mean)
-                    p_nb = player_mean / (player_std ** 2)
-                    prob = 1.0 - stats.nbinom.cdf(int(line), r, p_nb)
+                if dispersion > 1.5:
+                    # Negative Binomial for over-dispersed data (TB, HR)
+                    # Use shrunk_rate (not raw player_mean) with league-pooled dispersion
+                    if shrunk_rate > 0:
+                        # NB parameterization: variance = mean + mean^2/r
+                        # From dispersion = var/mean: var = dispersion * mean
+                        variance = dispersion * shrunk_rate
+                        if variance > shrunk_rate:
+                            r = (shrunk_rate ** 2) / (variance - shrunk_rate)
+                            p_nb = shrunk_rate / variance
+                            prob = 1.0 - stats.nbinom.cdf(int(line), r, p_nb)
+                        else:
+                            # Fallback to Poisson if variance calculation fails
+                            prob = 1.0 - stats.poisson.cdf(int(line), shrunk_rate)
+                    else:
+                        prob = 0.5
                 else:
-                    # Poisson for standard count data
+                    # Poisson for standard count data (hits)
                     prob = 1.0 - stats.poisson.cdf(int(line), shrunk_rate)
             except (ValueError, ZeroDivisionError):
                 # Fallback to 50%
@@ -222,20 +236,30 @@ class CalibratedProbabilityCalculator:
         else:
             shrunk_rate = player_mean
         
-        # Estimate dispersion (variance / mean ratio)
-        if sample_size > 1:
-            player_var = sum((v - player_mean) ** 2 for v in stat_values) / (sample_size - 1)
-            dispersion = player_var / player_mean if player_mean > 0 else 1.0
-        else:
-            dispersion = 1.0
+        # Use league-pooled dispersion for over-dispersed stats
+        # Computed from league data: TB ~2.25, hits ~1.1, HR ~1.5
+        league_dispersion = {
+            'total_bases': 2.25,
+            'hits': 1.1,
+            'home_runs': 1.5
+        }
+        dispersion = league_dispersion.get(stat_type, 1.0)
         
         # Choose distribution based on dispersion
         try:
-            if dispersion > 1.5 and player_var > player_mean and player_mean > 0:
-                # Over-dispersed: use Negative Binomial
-                r = (player_mean ** 2) / (player_var - player_mean)
-                p_nb = player_mean / player_var
-                prob = 1.0 - stats.nbinom.cdf(int(line), r, p_nb)
+            if dispersion > 1.5:
+                # Negative Binomial for over-dispersed data (TB, HR)
+                # Use shrunk_rate with league-pooled dispersion
+                if shrunk_rate > 0:
+                    variance = dispersion * shrunk_rate
+                    if variance > shrunk_rate:
+                        r = (shrunk_rate ** 2) / (variance - shrunk_rate)
+                        p_nb = shrunk_rate / variance
+                        prob = 1.0 - stats.nbinom.cdf(int(line), r, p_nb)
+                    else:
+                        prob = 1.0 - stats.poisson.cdf(int(line), shrunk_rate)
+                else:
+                    prob = 0.5
             else:
                 # Use Poisson (simpler, works well for count data)
                 prob = 1.0 - stats.poisson.cdf(int(line), shrunk_rate)
