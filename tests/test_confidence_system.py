@@ -252,13 +252,21 @@ class TestBetDefinitions(unittest.TestCase):
         )
         self.assertEqual(bet_type, 'standard')
         
-        # Long shot: even with all probabilities poor, long_shot in range qualifies
+        # Long shot: long_shot_probability in range AND is the best option
+        bet_type = self.bet_defs.determine_bet_type(
+            safe_probability=0.15,
+            standard_probability=0.18,
+            long_shot_probability=0.20
+        )
+        self.assertEqual(bet_type, 'long_shot')
+        
+        # Pass: long_shot in range but NOT the best option (standard is higher)
         bet_type = self.bet_defs.determine_bet_type(
             safe_probability=0.30,
             standard_probability=0.35,
             long_shot_probability=0.20
         )
-        self.assertEqual(bet_type, 'long_shot')
+        self.assertEqual(bet_type, 'pass')  # None qualify: best is 0.35 < 0.45
         
         # Pass: all probabilities poor and long_shot out of range
         bet_type = self.bet_defs.determine_bet_type(
@@ -268,13 +276,13 @@ class TestBetDefinitions(unittest.TestCase):
         )
         self.assertEqual(bet_type, 'pass')
         
-        # Pass
+        # Pass: all probabilities poor
         bet_type = self.bet_defs.determine_bet_type(
-            safe_probability=0.50,
+            safe_probability=0.40,
             standard_probability=0.35,
             long_shot_probability=0.05
         )
-        self.assertEqual(bet_type, 'pass')
+        self.assertEqual(bet_type, 'pass')  # Best is 0.40 < 0.45
 
 
 if __name__ == '__main__':
