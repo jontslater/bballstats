@@ -85,7 +85,7 @@ class SuggestedBetsService(BaseSportService):
             primary_stats = [s for s in bettable_stat_types if s in ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']]
 
         # For NFL, be more lenient with confidence levels and bet types since they tend to be lower
-        allowed_confidence = ['HIGH', 'MEDIUM', 'LOW'] if self.sport == 'NFL' else ['HIGH', 'MEDIUM', 'LOW']  # Include LOW for NBA too
+        allowed_confidence = ['HIGH', 'MEDIUM', 'LOW', 'MODEL_ONLY']  # Include MODEL_ONLY
         # Include all bet types for both sports to get more suggestions
         allowed_bet_types = ['safe', 'standard', 'long_shot']
 
@@ -254,6 +254,31 @@ class SuggestedBetsService(BaseSportService):
                             print(f"⚠️  WARNING: {player.name} {pred.stat_type} line {final_line} is >5x max recent ({max_recent}). Recent: {recent_values}. Skipping extreme outlier.")
                             continue
             
+            # Build reason_strings from confidence_reasons and additional context
+            import json
+            reason_strings = []
+            
+            # Parse confidence_reasons JSON if available
+            if pred.confidence_reasons:
+                try:
+                    confidence_reasons = json.loads(pred.confidence_reasons)
+                    reason_strings.extend(confidence_reasons)
+                except:
+                    pass
+            
+            # Add sample size context
+            n_games_effective = pred.n_games_effective or pred.sample_size or 0
+            if n_games_effective < 10:
+                reason_strings.append(f"Very limited data ({int(n_games_effective)} effective games)")
+            elif n_games_effective < 20:
+                reason_strings.append(f"Limited data ({int(n_games_effective)} effective games)")
+            
+            # Add line source note
+            if pred.line_source == 'model' or not pred.line_source:
+                reason_strings.append("Model-generated line (no sportsbook line available)")
+            elif pred.line_source == 'sportsbook':
+                reason_strings.append("Based on real sportsbook line")
+            
             scored_predictions.append({
                 'prediction_id': pred.prediction_id,
                 'player_id': pred.player_id,
@@ -266,9 +291,14 @@ class SuggestedBetsService(BaseSportService):
                 'line': final_line,
                 'probability': round(float(probability) if probability is not None else 0.5, 3),
                 'confidence_level': pred.confidence_level,
+                'confidence_tier': pred.confidence_level,  # Alias for clarity
+                'confidence_score': pred.confidence_score,
+                'n_games_effective': n_games_effective,
+                'line_source': pred.line_source or 'model',
                 'volatility_level': pred.volatility_level,
                 'score': score,
                 'reasoning': pred.reasoning,
+                'reason_strings': reason_strings,
                 'last_3_games': last_3_games
             })
         
@@ -285,78 +315,80 @@ class SuggestedBetsService(BaseSportService):
         Higher score = better bet recommendation.
         Ranks by:
         1. Calibrated probability and edge
-        2. Confidence tier as multiplier
-        3. Line source (real > synthetic)
+        2. Sample size (n_games_effective)
+        3. Confidence tier as multiplier
+        4. Line source (real > synthetic)
         """
         score = 0.0
         
-        # Base score from probability
+        # Base score from probability (weighted heavily)
         if prediction.bet_type == 'safe':
             prob = prediction.safe_probability or 0
             # Safe bets: reward higher probabilities (65%+ ideal)
             if prob >= 0.75:
-                score += 90  # Excellent safe bet
+                score += 100  # Excellent safe bet
             elif prob >= 0.65:
-                score += 70  # Good safe bet
+                score += 80  # Good safe bet
             else:
-                score += prob * 60  # Adequate
+                score += prob * 70  # Adequate
         elif prediction.bet_type == 'standard':
             prob = prediction.standard_probability or 0
             # Standard bets: 45-60% range
             if 0.50 <= prob <= 0.60:
-                score += 80  # Sweet spot
+                score += 90  # Sweet spot
             elif prob >= 0.45:
-                score += prob * 70
+                score += prob * 80
             else:
-                score += prob * 50
+                score += prob * 60
         else:  # long_shot
             prob = prediction.long_shot_probability or 0
             # Long shots: 10-25% range ideal
             if 0.15 <= prob <= 0.25:
-                score += 60  # Good long shot
+                score += 70  # Good long shot
             elif 0.10 <= prob < 0.15 or 0.25 < prob <= 0.30:
-                score += prob * 50
+                score += prob * 60
             else:
-                score += prob * 30
+                score += prob * 40
+        
+        # Sample size bonus (even for MODEL_ONLY this matters)
+        n_games = prediction.n_games_effective or prediction.sample_size or 0
+        if n_games >= 30:
+            score += 25
+        elif n_games >= 20:
+            score += 15
+        elif n_games >= 10:
+            score += 5
+        else:
+            # Penalize very small samples
+            score -= 10
         
         # Confidence tier multiplier
         confidence_tier = prediction.confidence_level or 'LOW'
         if confidence_tier == 'HIGH':
-            score *= 1.3
+            score *= 1.4
         elif confidence_tier == 'MEDIUM':
-            score *= 1.1
+            score *= 1.2
         elif confidence_tier == 'LOW':
-            score *= 0.9
+            score *= 1.0
         elif confidence_tier == 'MODEL_ONLY':
-            score *= 0.7
+            score *= 0.8  # Penalize but don't eliminate
         
-        # Line source bonus (real sportsbook lines are more reliable)
+        # Line source adjustment (after multiplier)
         if prediction.line_source == 'sportsbook':
-            score += 20
+            score += 30  # Significant bonus for real lines
         else:
-            # Synthetic lines: penalize heavily
-            score -= 20
-            # Cap synthetic lines at lower tier
-            score = min(score, 60)
-        
-        # Sample size factor
-        if prediction.sample_size:
-            if prediction.sample_size >= 30:
-                score += 10
-            elif prediction.sample_size >= 20:
-                score += 5
-            elif prediction.sample_size < 10:
-                score -= 10
+            # Synthetic lines: smaller penalty
+            score -= 10
         
         # Volatility penalty
         if prediction.volatility_level == 'HIGH':
-            score -= 15
+            score -= 20
         elif prediction.volatility_level == 'MEDIUM':
-            score -= 5
+            score -= 8
         
         # Pass reason penalty
         if prediction.pass_reason:
-            score -= 30
+            score -= 40
         
         return max(0, score)
     
@@ -838,7 +870,7 @@ class SuggestedBetsService(BaseSportService):
                 Prediction.bet_type == 'safe',  # Only safe bets
                 Prediction.stat_type.in_(safe_stat_types),
                 Prediction.safe_probability >= min_leg_probability,  # Very safe threshold
-                Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
+                Prediction.confidence_level.in_(['HIGH', 'MEDIUM', 'LOW', 'MODEL_ONLY'])  # Include MODEL_ONLY
             )
         ).order_by(Prediction.safe_probability.desc()).all()
         
@@ -1070,7 +1102,7 @@ class SuggestedBetsService(BaseSportService):
                 Prediction.game_id == game_id,
                 Prediction.stat_type.in_(sgp_stat_types),
                 Prediction.bet_type.in_(['safe', 'standard']),  # Only safe/standard for same-game parlays
-                Prediction.confidence_level.in_(['HIGH', 'MEDIUM'])
+                Prediction.confidence_level.in_(['HIGH', 'MEDIUM', 'LOW', 'MODEL_ONLY'])  # Include MODEL_ONLY
             )
         ).all()
         

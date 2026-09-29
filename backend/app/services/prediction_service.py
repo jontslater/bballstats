@@ -599,28 +599,10 @@ class PredictionService:
         
         # Step 7: Determine which bet types qualify using CALIBRATED probabilities
         # No more flat 0.75/0.60/0.25 - use realistic thresholds
-        qualifying_bet_types = []
-        
-        # Safe bets: genuinely high probability (≥65%)
-        if bet_lines['safe_probability'] >= 0.65:
-            qualifying_bet_types.append('safe')
-        
-        # Standard bets: moderate probability (≥45%)
-        if bet_lines['standard_probability'] >= 0.45:
-            qualifying_bet_types.append('standard')
-        
-        # Long shots: lower probability but reasonable (10-35%)
-        if 0.10 <= bet_lines['long_shot_probability'] <= 0.35:
-            qualifying_bet_types.append('long_shot')
-        
-        # If nothing qualifies, use bet_defs logic
-        if not qualifying_bet_types:
-            bet_type = self.bet_defs.determine_bet_type(
-                safe_probability=bet_lines['safe_probability'],
-                standard_probability=bet_lines['standard_probability'],
-                long_shot_probability=bet_lines['long_shot_probability']
-            )
-            qualifying_bet_types = [bet_type] if bet_type != 'pass' else []
+        # Note: We ALWAYS generate all three bet types (safe, standard, long_shot) for each prediction
+        # Even if a bet type doesn't qualify (low probability), we still save it so regeneration
+        # updates all existing rows. The API layer will filter out unqualified bets.
+        qualifying_bet_types = ['safe', 'standard', 'long_shot']  # Always generate all three
         
         # Step 8: Analyze lineup context for reasoning
         lineup_context = None
@@ -1269,14 +1251,110 @@ class PredictionService:
     
     def _get_league_averages(self, stat_type: str) -> tuple:
         """
-        Get league average and std for a stat type.
+        Get league average and std for a stat type from historical data.
         
         Returns:
             (league_mean, league_std) or (None, None) if not available
         """
-        # TODO: Query from database or config
-        # For now, return None to skip shrinkage (will use player data only)
-        return (None, None)
+        # Check cache first
+        cache_key = f'{self.sport}_{stat_type}'
+        if not hasattr(self, '_league_avg_cache'):
+            self._league_avg_cache = {}
+        
+        if cache_key in self._league_avg_cache:
+            return self._league_avg_cache[cache_key]
+        
+        try:
+            from app.models.player_game_stat import PlayerGameStat
+            from sqlalchemy import func
+            
+            # Map stat_type to database column
+            stat_column_map = {
+                # NBA
+                'points': PlayerGameStat.points,
+                'rebounds': PlayerGameStat.rebounds,
+                'assists': PlayerGameStat.assists,
+                'three_pointers_made': PlayerGameStat.three_pointers_made,
+                # NFL
+                'passing_yards': PlayerGameStat.passing_yards,
+                'rushing_yards': PlayerGameStat.rushing_yards,
+                'receiving_yards': PlayerGameStat.receiving_yards,
+                'receptions': PlayerGameStat.receptions,
+                'passing_tds': PlayerGameStat.passing_tds,
+                'rushing_tds': PlayerGameStat.rushing_tds,
+                'receiving_tds': PlayerGameStat.receiving_tds,
+                # MLB
+                'hits': PlayerGameStat.hits,
+                'home_runs': PlayerGameStat.home_runs,
+                'total_bases': PlayerGameStat.total_bases,
+                'strikeouts': PlayerGameStat.strikeouts,
+                'runs': PlayerGameStat.runs,
+                'rbis': PlayerGameStat.rbis,
+            }
+            
+            stat_column = stat_column_map.get(stat_type)
+            if stat_column is None:
+                # Fallback defaults
+                self._league_avg_cache[cache_key] = (None, None)
+                return (None, None)
+            
+            # Query last 100 games worth of data for this sport
+            from app.models.game import Game
+            from datetime import date, timedelta
+            
+            cutoff_date = date.today() - timedelta(days=180)  # Last 6 months
+            
+            result = self.db.query(
+                func.avg(stat_column).label('mean'),
+                func.stddev(stat_column).label('std')
+            ).join(Game).filter(
+                Game.sport == self.sport,
+                Game.game_status == 'finished',
+                Game.game_date >= cutoff_date,
+                stat_column.isnot(None),
+                stat_column > 0
+            ).first()
+            
+            if result and result.mean is not None:
+                league_mean = float(result.mean)
+                league_std = float(result.std) if result.std else league_mean * 0.3
+                self._league_avg_cache[cache_key] = (league_mean, league_std)
+                return (league_mean, league_std)
+            
+        except Exception as e:
+            print(f"Warning: Could not load league averages for {stat_type}: {e}")
+        
+        # Fallback defaults by sport and stat type
+        fallback_averages = {
+            'NBA': {
+                'points': (20.0, 8.0),
+                'rebounds': (6.0, 3.0),
+                'assists': (4.0, 3.0),
+                'three_pointers_made': (1.5, 1.5),
+            },
+            'NFL': {
+                'passing_yards': (200.0, 80.0),
+                'rushing_yards': (50.0, 30.0),
+                'receiving_yards': (40.0, 25.0),
+                'receptions': (4.0, 2.5),
+                'passing_tds': (1.5, 1.0),
+                'rushing_tds': (0.5, 0.5),
+                'receiving_tds': (0.5, 0.5),
+            },
+            'MLB': {
+                'hits': (1.0, 1.0),
+                'home_runs': (0.3, 0.5),
+                'total_bases': (1.5, 1.5),
+                'strikeouts': (1.0, 1.0),
+                'runs': (0.5, 0.7),
+                'rbis': (0.5, 0.7),
+            }
+        }
+        
+        sport_defaults = fallback_averages.get(self.sport, {})
+        result = sport_defaults.get(stat_type, (None, None))
+        self._league_avg_cache[cache_key] = result
+        return result
     
     def _get_days_since_last_game(self, player_id: int, current_game_date: date) -> Optional[int]:
         """
