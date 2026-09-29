@@ -194,12 +194,18 @@ class BetDefinitions:
         Determine recommended bet type based on calibrated probabilities.
         
         Returns 'pass' if all probabilities are too low (best < 0.45).
-        Otherwise returns the best qualifying bet type.
+        Long shots allowed even if best < 0.45 (they're intentionally risky).
         
         Returns:
             'safe', 'standard', 'long_shot', or 'pass'
         """
-        # If all probabilities are poor, pass
+        # Long shots: check first (allowed even if best_prob < 0.45)
+        if 0.10 <= long_shot_probability <= 0.35:
+            # Long shot qualifies if it's the best option
+            if long_shot_probability >= safe_probability and long_shot_probability >= standard_probability:
+                return 'long_shot'
+        
+        # If all probabilities are poor, pass (unless long_shot already qualified)
         best_prob = max(safe_probability, standard_probability, long_shot_probability)
         if best_prob < 0.45:
             return 'pass'
@@ -211,10 +217,6 @@ class BetDefinitions:
         # Standard bets: moderate probability
         if standard_probability >= 0.45:
             return 'standard'
-        
-        # Long shots: lower probability but reasonable
-        if 0.10 <= long_shot_probability <= 0.35:
-            return 'long_shot'
         
         # Default to pass if nothing qualifies
         return 'pass'

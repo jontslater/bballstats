@@ -118,7 +118,7 @@ class TestConfidenceCalculator(unittest.TestCase):
         )
         
         self.assertEqual(result['tier'], 'HIGH')
-        self.assertGreater(result['score'], 65)  # Updated: new scoring is sample_size * 2.0
+        self.assertGreater(result['score'], 50)  # Log scale: 35 games → ~55-60 pts
     
     def test_synthetic_line_capped_at_low(self):
         """Test that synthetic lines are capped at LOW confidence."""

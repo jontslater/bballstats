@@ -2,12 +2,12 @@
 Calibrated Probability Calculator
 
 Computes calibrated probabilities for betting lines using:
-- Student-t distribution for small samples
-- Normal distribution for large samples
+- Poisson/Negative Binomial for count stats (hits, home_runs, total_bases)
+- Student-t distribution for continuous stats with small samples
+- Normal distribution for continuous stats with large samples
 - Empirical Bayes shrinkage toward league priors
-- Base rate adjustment
 """
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 from scipy import stats
 import numpy as np
 
@@ -114,6 +114,76 @@ class CalibratedProbabilityCalculator:
             'effective_std': round(effective_std, 2),
             'effective_n': effective_n,
             'raw_probability': round(raw_prob, 3)
+        }
+    
+    def calculate_discrete_probability(
+        self,
+        stat_values: List[int],
+        line: float,
+        stat_type: str,
+        league_mean: Optional[float] = None
+    ) -> Dict[str, any]:
+        """
+        Calculate P(X > line) using discrete Poisson/Negative Binomial model.
+        
+        For count stats (hits, home_runs, total_bases), use proper discrete distribution
+        instead of Normal/Student-t approximation.
+        
+        Args:
+            stat_values: List of historical stat values (integers)
+            line: Betting line (e.g., 0.5 for OVER 0.5)
+            stat_type: Type of stat
+            league_mean: League average per-game rate
+        
+        Returns:
+            Dict with 'probability', 'shrunk_rate', 'dispersion'
+        """
+        if not stat_values:
+            return {'probability': 0.5, 'shrunk_rate': 0.5, 'dispersion': 1.0}
+        
+        sample_size = len(stat_values)
+        player_mean = sum(stat_values) / sample_size
+        
+        # Shrinkage toward league rate (stronger for rare events)
+        if league_mean is not None:
+            if stat_type == 'home_runs':
+                prior_strength = 20.0  # Strong shrinkage for HRs
+            else:
+                prior_strength = 10.0  # Moderate shrinkage for hits/TB
+            
+            weight_player = sample_size / (sample_size + prior_strength)
+            shrunk_rate = weight_player * player_mean + (1 - weight_player) * league_mean
+        else:
+            shrunk_rate = player_mean
+        
+        # Estimate dispersion (variance / mean ratio)
+        if sample_size > 1:
+            player_var = sum((v - player_mean) ** 2 for v in stat_values) / (sample_size - 1)
+            dispersion = player_var / player_mean if player_mean > 0 else 1.0
+        else:
+            dispersion = 1.0
+        
+        # Choose distribution based on dispersion
+        try:
+            if dispersion > 1.5 and player_var > player_mean and player_mean > 0:
+                # Over-dispersed: use Negative Binomial
+                r = (player_mean ** 2) / (player_var - player_mean)
+                p_nb = player_mean / player_var
+                prob = 1.0 - stats.nbinom.cdf(int(line), r, p_nb)
+            else:
+                # Use Poisson (simpler, works well for count data)
+                prob = 1.0 - stats.poisson.cdf(int(line), shrunk_rate)
+        except (ValueError, ZeroDivisionError):
+            # Fallback to simple calculation
+            prob = 0.5
+        
+        # Clamp to valid range
+        prob = max(0.01, min(0.99, prob))
+        
+        return {
+            'probability': round(prob, 3),
+            'shrunk_rate': round(shrunk_rate, 3),
+            'dispersion': round(dispersion, 2)
         }
     
     def _shrink_mean_toward_prior(
@@ -237,9 +307,9 @@ class CalibratedProbabilityCalculator:
         else:
             # Synthesize line from player mean
             shrunk_mean, _ = self._shrink_mean_toward_prior(
-                player_mean, sample_size,
+                player_mean,
                 league_mean or player_mean,
-                league_std or player_std
+                sample_size
             )
             synthetic_line = round(shrunk_mean, 1)
             
