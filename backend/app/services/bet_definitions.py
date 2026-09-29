@@ -37,9 +37,13 @@ class BetDefinitions:
         1. Determine target line (real if available, else synthetic from mean)
         2. Generate candidate lines on discrete grid (0.5, 1.5, 2.5, ... for counts)
         3. Calculate calibrated probability for each candidate
-        4. Choose safe = highest line with p >= 0.65
-        5. Choose long_shot = line with p in 0.15-0.30 range
+        4. Choose safe = line with HIGHEST probability (not requiring p>=0.65)
+        5. Choose long_shot = line with p in 0.15-0.30 range, capped at plausible max
         6. Standard = real line or mean-based line
+        
+        Safe picks are NOT "sure things" - they're just the highest-likelihood option.
+        Ranking by edge and sample size will differentiate quality.
+        Thin-sample picks are flagged via tier/reasons, not hidden.
         
         Args:
             adjusted_mean: Adjusted mean (μ) after all adjustments
@@ -86,21 +90,26 @@ class BetDefinitions:
         # Ensure minimum line is 0.5
         candidates = [c for c in candidates if c >= 0.5]
         
-        # Find safe line: highest line with p >= 0.65
+        # Find safe line: highest line with best probability (not requiring p>=0.65)
+        # Safe = highest probability pick, even if not a "sure thing"
         safe_line = None
         safe_probability = None
-        for line in sorted(candidates, reverse=True):
-            if line > standard_line * 0.5:  # Safe line should be <= standard
+        best_safe_prob = 0.0
+        
+        for line in sorted(candidates):
+            if line > standard_line * 0.8:  # Safe should be easier than standard
                 continue
             
             prob_data = self.calibrator.calculate_probability_for_line(
                 line, adjusted_mean, adjusted_std, sample_size, stat_type,
                 league_mean, league_std
             )
-            if prob_data['probability'] >= 0.65:
+            
+            # Track the line with highest probability (safe = highest likelihood)
+            if prob_data['probability'] > best_safe_prob:
+                best_safe_prob = prob_data['probability']
                 safe_line = line
                 safe_probability = prob_data['probability']
-                break
         
         # If no safe line found, use lowest candidate
         if safe_line is None:
@@ -184,20 +193,23 @@ class BetDefinitions:
         """
         Determine recommended bet type based on calibrated probabilities.
         
-        Uses realistic thresholds (no flat 0.75/0.60/0.25 fallbacks).
+        Safe = highest likelihood line (no minimum threshold required)
+        Standard = moderate probability line
+        Long shot = lower probability line
         
         Returns:
             'safe', 'standard', 'long_shot', or 'pass'
         """
-        # Safe bets: genuinely high probability (≥65%)
-        if safe_probability >= 0.65:
+        # Safe bets: highest likelihood (even if not "sure thing")
+        # No minimum threshold - safe just means "most likely to hit"
+        if safe_probability >= standard_probability:
             return 'safe'
         
-        # Standard bets: moderate probability (≥45%)
-        if standard_probability >= 0.45:
+        # Standard bets: moderate probability
+        if standard_probability >= 0.40:
             return 'standard'
         
-        # Long shots: lower probability but reasonable (10-35%)
+        # Long shots: lower probability but reasonable
         if 0.10 <= long_shot_probability <= 0.35:
             return 'long_shot'
         
