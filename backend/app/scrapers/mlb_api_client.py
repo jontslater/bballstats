@@ -54,7 +54,13 @@ class MLBAPIClient:
     ) -> List[Dict]:
         """
         Get MLB games for a date or date range.
-        Returns list of games with game_id, home/away info, scores, status.
+
+        Calls statsapi.schedule() with no gameType filter so the Stats API
+        returns regular season (R) and postseason series (F/D/L/W). Passing
+        gameType=R would drop playoff games; gameTypes=P is not an umbrella
+        (it returns 0 rows on statsapi.mlb.com).
+
+        Returns list of games with game_id, game_type, home/away info, scores, status.
         """
         self._rate_limit()
         statsapi = self._ensure_import()
@@ -68,6 +74,7 @@ class MLBAPIClient:
             start_dt = end_dt = date.today().strftime('%m/%d/%Y')
 
         try:
+            # Do not pass game_type/gameTypes — unfiltered schedule includes postseason.
             games = statsapi.schedule(
                 start_date=start_dt,
                 end_date=end_dt,

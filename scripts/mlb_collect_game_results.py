@@ -153,12 +153,20 @@ def collect_games_for_date(
 
             game_date_obj = datetime.strptime(g.get('game_date', str(game_date)), '%Y-%m-%d').date()
 
-            existing = db.query(Game).filter(
-                Game.sport == 'MLB',
-                Game.game_date == game_date_obj,
-                Game.home_team_id == home_team.team_id,
-                Game.away_team_id == away_team.team_id
-            ).first()
+            box_id = f"MLB_{game_id}" if game_id else None
+            existing = None
+            if box_id:
+                existing = db.query(Game).filter(
+                    Game.sport == 'MLB',
+                    Game.espn_game_id == box_id
+                ).first()
+            if not existing:
+                existing = db.query(Game).filter(
+                    Game.sport == 'MLB',
+                    Game.game_date == game_date_obj,
+                    Game.home_team_id == home_team.team_id,
+                    Game.away_team_id == away_team.team_id
+                ).first()
 
             if existing:
                 game = existing
@@ -167,6 +175,8 @@ def collect_games_for_date(
                 if home_score is not None:
                     game.home_score = home_score
                 game.game_status = 'finished'
+                if box_id and not game.espn_game_id:
+                    game.espn_game_id = box_id
             else:
                 game = Game(
                     sport='MLB',
@@ -176,7 +186,8 @@ def collect_games_for_date(
                     away_team_id=away_team.team_id,
                     home_score=home_score,
                     away_score=away_score,
-                    game_status='finished'
+                    game_status='finished',
+                    espn_game_id=box_id,
                 )
                 db.add(game)
                 db.flush()
