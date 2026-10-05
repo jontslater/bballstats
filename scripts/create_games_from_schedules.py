@@ -19,7 +19,7 @@ from app.database import SessionLocal
 from app.models import GameSchedule, Game, Season
 
 
-def create_games_from_schedules(days_ahead: int = 7):
+def create_games_from_schedules(days_ahead: int = 7, sport: str = None):
     """
     Create Game records from GameSchedule records for upcoming games.
     
@@ -36,45 +36,58 @@ def create_games_from_schedules(days_ahead: int = 7):
         end_date = today + timedelta(days=days_ahead)
         
         # Get all scheduled games that don't have Game records yet
-        schedules = db.query(GameSchedule).filter(
-            and_(
-                GameSchedule.game_date >= today,
-                GameSchedule.game_date <= end_date,
-                GameSchedule.status.in_(['scheduled', 'in_progress']),
-                GameSchedule.game_id.is_(None)  # No Game record linked yet
-            )
-        ).all()
+        filters = [
+            GameSchedule.game_date >= today,
+            GameSchedule.game_date <= end_date,
+            GameSchedule.status.in_(['scheduled', 'in_progress']),
+            GameSchedule.game_id.is_(None),  # No Game record linked yet
+        ]
+        if sport:
+            filters.append(GameSchedule.sport == sport)
+
+        schedules = db.query(GameSchedule).filter(and_(*filters)).all()
         
         created = 0
         updated = 0
         
         for schedule in schedules:
-            # Check if Game already exists for this schedule
-            existing_game = db.query(Game).filter(
-                and_(
+            external_id = schedule.external_game_id or schedule.nba_game_id
+
+            existing_game = None
+            if external_id:
+                existing_game = db.query(Game).filter(
                     Game.sport == schedule.sport,
-                    Game.game_date == schedule.game_date,
-                    Game.home_team_id == schedule.home_team_id,
-                    Game.away_team_id == schedule.away_team_id
-                )
-            ).first()
+                    Game.espn_game_id == external_id,
+                ).first()
+            if not existing_game:
+                existing_game = db.query(Game).filter(
+                    and_(
+                        Game.sport == schedule.sport,
+                        Game.game_date == schedule.game_date,
+                        Game.home_team_id == schedule.home_team_id,
+                        Game.away_team_id == schedule.away_team_id
+                    )
+                ).first()
             
             if existing_game:
                 # Link the schedule to the existing game
                 schedule.game_id = existing_game.game_id
+                if external_id and not existing_game.espn_game_id:
+                    existing_game.espn_game_id = external_id
                 updated += 1
             else:
                 # Create new Game record (inherit sport from season)
                 season = db.query(Season).filter(Season.season_id == schedule.season_id).first()
-                sport = season.sport if season else schedule.sport
+                game_sport = season.sport if season else schedule.sport
                 
                 game = Game(
-                    sport=sport,
+                    sport=game_sport,
                     game_date=schedule.game_date,
                     season_id=schedule.season_id,
                     home_team_id=schedule.home_team_id,
                     away_team_id=schedule.away_team_id,
-                    game_status=schedule.status
+                    game_status=schedule.status,
+                    espn_game_id=external_id,
                 )
                 db.add(game)
                 db.flush()  # Get the game_id

@@ -6,7 +6,7 @@ Generates suggested bets and parlays based on prediction quality and confidence.
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc
 from typing import List, Dict, Optional
-from datetime import date, timedelta
+from datetime import date
 from app.models.prediction import Prediction
 from app.models.game import Game
 from app.models.player import Player
@@ -16,11 +16,30 @@ from app.services.base_sport_service import BaseSportService
 from itertools import combinations
 
 
+# Suggested bets are only for games that can still be bet. Finished / eliminated
+# series games must not be padded in from other dates.
+SUGGESTABLE_GAME_STATUSES = ('scheduled', 'in_progress')
+
+
 class SuggestedBetsService(BaseSportService):
     """Generate suggested bets and parlays."""
 
     def __init__(self, db: Session, sport: str = 'NBA'):
         super().__init__(db, sport)
+
+    def _games_for_suggestions(self, game_date: date) -> List[Game]:
+        """
+        Games actually scheduled on game_date that have not finished.
+
+        Returns [] when the date has no qualifying games. Callers must SKIP
+        rather than search neighboring dates — a ±7 day fallback previously
+        served finished/eliminated series as "today's" picks.
+        """
+        return self.db.query(Game).filter(
+            Game.game_date == game_date,
+            Game.sport == self.sport,
+            Game.game_status.in_(SUGGESTABLE_GAME_STATUSES),
+        ).all()
     
     def get_suggested_bets(
         self,
@@ -38,33 +57,17 @@ class SuggestedBetsService(BaseSportService):
             min_probability: Minimum probability threshold for safe bets
         
         Returns:
-            List of suggested bet dictionaries
+            List of suggested bet dictionaries. Empty if the date has no
+            scheduled/in-progress games (do not treat as "search nearby dates").
         """
         if game_date is None:
             game_date = date.today()
             print(f"No date provided, using today: {game_date}")
 
-        # Get predictions for the date that are recommended (not 'pass')
-        # Include finished games for historical viewing
-        games = self.db.query(Game).filter(
-            Game.game_date == game_date,
-            Game.sport == self.sport
-        ).all()
-
-        # If no games found for exact date, try a broader search (last 7 days)
-        if not games:
-            print(f"No games found for {game_date}, trying broader search")
-            start_date = game_date - timedelta(days=7)
-            end_date = game_date + timedelta(days=7)
-            games = self.db.query(Game).filter(
-                Game.game_date >= start_date,
-                Game.game_date <= end_date,
-                Game.sport == self.sport
-            ).order_by(Game.game_date.desc()).limit(20).all()
-            print(f"Broader search found {len(games)} games")
+        games = self._games_for_suggestions(game_date)
 
         if not games:
-            print(f"No games found for {game_date} even with broader search")
+            print(f"No scheduled/in-progress {self.sport} games for {game_date}; returning no suggestions")
             return []
 
         game_ids = [g.game_id for g in games]
@@ -156,6 +159,10 @@ class SuggestedBetsService(BaseSportService):
             # Get stat/line-specific base rate for edge calculation
             from app.constants.base_rates import get_base_rate
             line_rounded = round(line, 1)
+            # Pitcher K OVER 0.5 is ~league-wide 85-90% for starters; the stored
+            # base rate is 0.50 so the implied edge is meaningless. Skip it.
+            if self.sport == 'MLB' and pred.stat_type == 'strikeouts' and line_rounded <= 0.5:
+                continue
             base_rate = get_base_rate(pred.stat_type, line_rounded, default=0.50)
             
             edge = probability - base_rate
@@ -915,13 +922,7 @@ class SuggestedBetsService(BaseSportService):
         if game_date is None:
             game_date = date.today()
         
-        # Get games for the date (include finished games for historical viewing)
-        games = self.db.query(Game).filter(
-            and_(
-                Game.game_date == game_date,
-                Game.sport == self.sport  # Filter by sport
-            )
-        ).all()
+        games = self._games_for_suggestions(game_date)
         
         if not games:
             return []

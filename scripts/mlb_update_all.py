@@ -6,7 +6,7 @@ Usage:
     python scripts/mlb_update_all.py
 
 This script will:
-1. Update MLB game schedules (next 30 days)
+1. Update MLB game schedules (next 30 days, including postseason) and Game rows
 2. Update MLB game results (previous day)
 3. Generate MLB predictions for upcoming games
 4. Evaluate MLB predictions for finished games
@@ -52,11 +52,22 @@ def update_schedules():
             [sys.executable, 'scripts/mlb_collect_schedule.py', '--days', '30'],
             capture_output=True, text=True, cwd=project_root, env=env, encoding='utf-8', errors='replace'
         )
-        if result.returncode == 0:
-            logger.info("MLB schedules updated")
-            return True
-        logger.error(f"Schedule update failed: {result.stderr}")
-        return False
+        if result.returncode != 0:
+            logger.error(f"Schedule update failed: {result.stderr}")
+            return False
+        logger.info("MLB schedules updated")
+        # Safety net: GameSchedule → Game (predictions/suggested bets query games).
+        # mlb_collect_schedule now writes Game rows itself; this catches leftovers.
+        from scripts.create_games_from_schedules import create_games_from_schedules
+        game_result = create_games_from_schedules(days_ahead=30, sport='MLB')
+        if not game_result.get('success'):
+            logger.error(f"Creating Game records from schedules failed: {game_result.get('error')}")
+            return False
+        logger.info(
+            f"Game records from schedules: created={game_result.get('created', 0)} "
+            f"linked={game_result.get('updated', 0)}"
+        )
+        return True
     except Exception as e:
         logger.error(f"Error: {e}")
         return False
