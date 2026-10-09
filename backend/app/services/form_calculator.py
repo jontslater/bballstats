@@ -19,6 +19,7 @@ class FormCalculator:
     
     def __init__(self, db: Session):
         self.db = db
+        self._form_cache: Dict[tuple, Dict] = {}
     
     def calculate_player_form(
         self,
@@ -45,9 +46,13 @@ class FormCalculator:
             if not season:
                 raise ValueError("No current season found.")
             season_id = season.season_id
+
+        cache_key = (player_id, season_id, last_n_games)
+        if cache_key in self._form_cache:
+            return self._form_cache[cache_key]
         
-        # Get recent games with game dates for time weighting
-        recent_stats_query = self.db.query(PlayerGameStat).join(
+        # Get recent games with game dates for time weighting (one join, no per-row Game lookup)
+        recent_rows = self.db.query(PlayerGameStat, Game.game_date).join(
             Game, PlayerGameStat.game_id == Game.game_id
         ).filter(
             and_(
@@ -57,19 +62,18 @@ class FormCalculator:
                 PlayerGameStat.minutes_played > 0
             )
         ).order_by(desc(Game.game_date)).limit(last_n_games).all()
-        
-        # Get game dates separately
-        stats_with_dates = []
-        for stat in recent_stats_query:
-            game = self.db.query(Game).filter(Game.game_id == stat.game_id).first()
-            game_date = game.game_date if game else date.today()
-            stats_with_dates.append((stat, game_date))
+
+        stats_with_dates = [
+            (stat, game_date or date.today()) for stat, game_date in recent_rows
+        ]
         
         if not stats_with_dates:
-            return {
+            result = {
                 "games": 0,
                 "trend": "insufficient_data"
             }
+            self._form_cache[cache_key] = result
+            return result
         
         # Apply time-weighted exponential decay
         # More recent games get higher weight
@@ -124,7 +128,7 @@ class FormCalculator:
         std_dev_rebounds = statistics.stdev(all_rebounds) if len(all_rebounds) > 1 else 0
         std_dev_assists = statistics.stdev(all_assists) if len(all_assists) > 1 else 0
         
-        return {
+        result = {
             "games": len(stats_with_dates),
             "avg_points": round(sum(all_points) / len(all_points), 2) if all_points else 0,
             "avg_rebounds": round(sum(all_rebounds) / len(all_rebounds), 2) if all_rebounds else 0,
@@ -144,6 +148,8 @@ class FormCalculator:
             "min_points": min(all_points) if all_points else 0,
             "max_points": max(all_points) if all_points else 0
         }
+        self._form_cache[cache_key] = result
+        return result
     
     def calculate_shooting_streak(
         self,

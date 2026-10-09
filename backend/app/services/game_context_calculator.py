@@ -16,6 +16,7 @@ class GameContextCalculator:
     
     def __init__(self, db: Session):
         self.db = db
+        self._context_cache: Dict[tuple, Dict] = {}
     
     def calculate_rest_days(
         self,
@@ -715,6 +716,10 @@ class GameContextCalculator:
         Returns:
             Dict with all context factors
         """
+        cache_key = (game_id, team_id)
+        if cache_key in self._context_cache:
+            return self._context_cache[cache_key]
+
         game = self.db.query(Game).filter(Game.game_id == game_id).first()
         if not game:
             return {}
@@ -728,7 +733,7 @@ class GameContextCalculator:
         travel = self.calculate_travel_impact(team_id, game_id)
         blowout = self.calculate_blowout_risk(game_id)
         
-        return {
+        context = {
             'rest_days': rest_days,
             'rest_days_factor': rest_days_factor,
             'relative_rest_factor': relative_rest_factor,
@@ -739,4 +744,6 @@ class GameContextCalculator:
             'blowout': blowout,
             'is_home': (game.home_team_id == team_id)
         }
+        self._context_cache[cache_key] = context
+        return context
 

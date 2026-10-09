@@ -45,7 +45,7 @@ class PredictionService:
         self.sport_config = get_sport_config(sport)
         
         self.dist_engine = DistributionEngine(db)
-        self.adjustments = PredictionAdjustments(db)
+        self.adjustments = PredictionAdjustments(db, sport=sport)
         self.pass_rules = PassRules(sport=sport)  # Pass sport to PassRules
         self.redist_engine = RedistributionEngine(db)
         self.context_calc = GameContextCalculator(db)
@@ -712,7 +712,6 @@ class PredictionService:
                     Prediction.game_id == game_id,
                     Prediction.stat_type == stat_type,
                     Prediction.bet_type == bet_type,
-                    Prediction.sport == self.sport
                 )
             ).first()
             
@@ -733,6 +732,7 @@ class PredictionService:
                 not adjusted_percentiles):
                 return None  # Can't save prediction with None values
             
+            prediction.sport = self.sport
             prediction.distribution_mean = mean_adjustments['adjusted_mean']
             prediction.distribution_std_dev = variance_adjustments['adjusted_std']
             prediction.percentile_10 = adjusted_percentiles.get(10)
@@ -803,6 +803,20 @@ class PredictionService:
                 self.db.add(prediction)
             
             predictions_created.append(prediction)
+
+        # Drop leftover bet-type rows from a prior run so regen does not accumulate
+        # duplicate player/game/stat predictions.
+        leftover = self.db.query(Prediction).filter(
+            and_(
+                Prediction.player_id == player_id,
+                Prediction.game_id == game_id,
+                Prediction.stat_type == stat_type,
+                Prediction.sport == self.sport,
+            )
+        )
+        if qualifying_bet_types:
+            leftover = leftover.filter(~Prediction.bet_type.in_(qualifying_bet_types))
+        leftover.delete(synchronize_session=False)
         
         # Return the primary prediction (safe > standard > long_shot) for backward compatibility
         primary_bet_type = 'safe' if 'safe' in qualifying_bet_types else \
@@ -942,6 +956,13 @@ class PredictionService:
         else:
             return "Baseline prediction based on historical performance"
     
+    def replace_predictions_for_game(self, game_id: int) -> int:
+        """Delete existing predictions for this game/sport so a re-run upserts cleanly."""
+        return self.db.query(Prediction).filter(
+            Prediction.game_id == game_id,
+            Prediction.sport == self.sport,
+        ).delete(synchronize_session=False)
+
     def generate_predictions_for_game(
         self,
         game_id: int,
