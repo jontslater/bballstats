@@ -17,7 +17,8 @@ from itertools import combinations
 
 
 # Suggested bets are only for games that can still be bet. Finished / eliminated
-# series games must not be padded in from other dates.
+# series games must not be padded in from other dates. Cancelled/void/postponed
+# (dropped if-necessary, Unknown, series-clinched) are intentionally excluded.
 SUGGESTABLE_GAME_STATUSES = ('scheduled', 'in_progress')
 
 
