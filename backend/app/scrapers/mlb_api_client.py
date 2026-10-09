@@ -73,17 +73,15 @@ class MLBAPIClient:
         else:
             start_dt = end_dt = date.today().strftime('%m/%d/%Y')
 
-        try:
-            # Do not pass game_type/gameTypes — unfiltered schedule includes postseason.
-            games = statsapi.schedule(
-                start_date=start_dt,
-                end_date=end_dt,
-                sportId=1  # MLB
-            )
-            return games if games else []
-        except Exception as e:
-            print(f"  MLB API schedule error: {e}")
-            return []
+        # Do not pass game_type/gameTypes — unfiltered schedule includes postseason.
+        # Let exceptions propagate: an empty list means "no games", not "API failed".
+        # Schedule reconcile must not treat a failed fetch as "drop every game".
+        games = statsapi.schedule(
+            start_date=start_dt,
+            end_date=end_dt,
+            sportId=1  # MLB
+        )
+        return games if games else []
 
     def get_box_score_data(self, game_id: int) -> Optional[Dict]:
         """

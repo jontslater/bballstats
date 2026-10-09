@@ -6,8 +6,9 @@ Usage:
     python scripts/mlb_update_all.py
 
 This script will:
-1. Update MLB game schedules (next 30 days, including postseason) and Game rows
-2. Update MLB game results (previous day)
+1. Update MLB game schedules (last 7 days + next 30 days, including postseason)
+   and cancel dropped if-necessary / Unknown games in that window
+2. Update MLB game results (lookback 7 days through today, not only previous day)
 3. Generate MLB predictions for upcoming games
 4. Evaluate MLB predictions for finished games
 
@@ -49,7 +50,7 @@ def update_schedules():
         env['PYTHONUTF8'] = '1'  # Force UTF-8 encoding on Windows
         
         result = __import__('subprocess').run(
-            [sys.executable, 'scripts/mlb_collect_schedule.py', '--days', '30'],
+            [sys.executable, 'scripts/mlb_collect_schedule.py', '--days', '30', '--lookback-days', '7'],
             capture_output=True, text=True, cwd=project_root, env=env, encoding='utf-8', errors='replace'
         )
         if result.returncode != 0:
@@ -75,7 +76,7 @@ def update_schedules():
 
 def update_game_results():
     logger.info("=" * 60)
-    logger.info("STEP 2: Updating MLB game results...")
+    logger.info("STEP 2: Updating MLB game results (lookback 7 days through today)...")
     logger.info("=" * 60)
     try:
         import os
@@ -83,7 +84,7 @@ def update_game_results():
         env['PYTHONUTF8'] = '1'  # Force UTF-8 encoding on Windows
         
         result = __import__('subprocess').run(
-            [sys.executable, 'scripts/mlb_collect_game_results.py', '--previous-day'],
+            [sys.executable, 'scripts/mlb_collect_game_results.py', '--lookback-days', '7'],
             capture_output=True, text=True, cwd=project_root, env=env, encoding='utf-8', errors='replace'
         )
         if result.returncode == 0:
