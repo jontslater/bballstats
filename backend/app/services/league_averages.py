@@ -16,8 +16,10 @@ from app.models.season import Season
 class LeagueAverages:
     """Calculate league-wide averages."""
     
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, pace_calculator: Optional[PaceCalculator] = None):
         self.db = db
+        self._pace_calc = pace_calculator or PaceCalculator(db)
+        self._league_pace_cache: Dict[int, float] = {}
     
     def calculate_league_avg_pace(self, season_id: Optional[int] = None) -> float:
         """
@@ -31,18 +33,19 @@ class LeagueAverages:
             if not season:
                 return 100.0  # Default fallback
             season_id = season.season_id
+
+        if season_id in self._league_pace_cache:
+            return self._league_pace_cache[season_id]
         
-        # Get all team paces
-        from app.services.pace_calculator import PaceCalculator
-        pace_calc = PaceCalculator(self.db)
-        
-        all_paces = pace_calc.calculate_all_team_paces(season_id)
+        all_paces = self._pace_calc.calculate_all_team_paces(season_id)
         
         if not all_paces:
+            self._league_pace_cache[season_id] = 100.0
             return 100.0  # Default fallback
         
-        avg_pace = sum(all_paces.values()) / len(all_paces)
-        return round(avg_pace, 2)
+        avg_pace = round(sum(all_paces.values()) / len(all_paces), 2)
+        self._league_pace_cache[season_id] = avg_pace
+        return avg_pace
     
     def calculate_league_avg_points_by_position(
         self,

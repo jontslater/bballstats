@@ -27,12 +27,13 @@ from app.models.team import Team
 class PredictionAdjustments:
     """Apply contextual adjustments to predictions."""
     
-    def __init__(self, db_session, team_defense_calculator=None, pace_calculator=None, injury_context=None):
+    def __init__(self, db_session, team_defense_calculator=None, pace_calculator=None, injury_context=None, sport: str = 'NBA'):
         self.db = db_session
+        self.sport = sport
         self.team_defense = team_defense_calculator
         self.pace_calc = pace_calculator or PaceCalculator(db_session)
         self.injury_ctx = injury_context or InjuryContext(db_session)
-        self.league_avg = LeagueAverages(db_session)
+        self.league_avg = LeagueAverages(db_session, pace_calculator=self.pace_calc)
         self.form_calc = FormCalculator(db_session)
         self.player_matchup = PlayerMatchupService(db_session)
         self.teammate_chemistry = TeammateChemistryService(db_session)
@@ -78,18 +79,21 @@ class PredictionAdjustments:
         )
         minutes_factor *= foul_trouble_factor
         
-        # Pace Factor (with recent trend consideration)
-        team_pace = self.pace_calc.calculate_team_pace(opponent_team_id, season_id) or 100.0
-        # Get recent pace (last 10 games) if available
-        recent_pace = self.pace_calc.calculate_recent_team_pace(opponent_team_id, season_id, last_n_games=10)
-        
-        # Use recent pace if available, otherwise use season average
-        pace_to_use = recent_pace if recent_pace else team_pace
-        
-        # Get league average pace (calculated from actual data)
-        league_avg_pace = self.league_avg.calculate_league_avg_pace(season_id)
-        pace_factor = pace_to_use / league_avg_pace if league_avg_pace > 0 else 1.0
-        pace_factor = self.clamp(pace_factor, 0.85, 1.20)
+        # Pace Factor (NBA possessions only). MLB/NFL have no FGA/FTA/TO pace;
+        # the old path scanned every team game — and league-average pace scanned
+        # every team — on each player/stat prediction.
+        if self.sport == 'NBA':
+            team_pace = self.pace_calc.calculate_team_pace(opponent_team_id, season_id) or 100.0
+            recent_pace = self.pace_calc.calculate_recent_team_pace(opponent_team_id, season_id, last_n_games=10)
+            pace_to_use = recent_pace if recent_pace else team_pace
+            league_avg_pace = self.league_avg.calculate_league_avg_pace(season_id)
+            pace_factor = pace_to_use / league_avg_pace if league_avg_pace > 0 else 1.0
+            pace_factor = self.clamp(pace_factor, 0.85, 1.20)
+        else:
+            team_pace = 100.0
+            recent_pace = None
+            league_avg_pace = 100.0
+            pace_factor = 1.0
         
         # Defense Factor (Opponent vs Position)
         # IMPORTANT: This applies to ALL stat types (points, rebounds, assists)
@@ -221,10 +225,14 @@ class PredictionAdjustments:
                 )
 
         # ENHANCEMENT: Advanced Analytics Factor
-        # Use sophisticated NBA metrics (PER, TS%, USG%, etc.) for better predictions
-        advanced_analytics_factor = self.advanced_analytics.get_advanced_performance_multiplier(
-            player_id, stat_type, season_id, recent_games=10
-        )
+        # Use sophisticated NBA metrics (PER, TS%, USG%, etc.) for better predictions.
+        # Skip for non-NBA: the helper N+1-scans teammate box scores per recent game.
+        if self.sport == 'NBA':
+            advanced_analytics_factor = self.advanced_analytics.get_advanced_performance_multiplier(
+                player_id, stat_type, season_id, recent_games=10
+            )
+        else:
+            advanced_analytics_factor = 1.0
 
         # ENHANCEMENT: Situational Performance Factor
         # Consider how player performs in current game situation (clutch, blowout, pace, etc.)
@@ -707,6 +715,9 @@ class PredictionAdjustments:
         """
         from app.models.season import Season
         
+        if self.sport != 'NBA':
+            return 1.0
+
         if season_id is None:
             season = self.db.query(Season).filter(Season.is_current == True).first()
             if not season:

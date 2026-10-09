@@ -14,9 +14,12 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "backend"))
 
+from typing import Optional
+
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import Game, Player, PlayerGameStat
+from app.models.prediction import Prediction
 from app.services.prediction_service import PredictionService
 from app.config.sport_config import get_sport_config
 
@@ -27,7 +30,19 @@ BATTER_STATS = ['hits', 'home_runs', 'total_bases']
 PITCHER_STATS = ['strikeouts']
 
 
-def generate_predictions_for_game(db: Session, game_id: int):
+def replace_existing_mlb_predictions(db: Session, game_id: int) -> int:
+    """Remove prior MLB prediction rows for a game so a re-run does not duplicate."""
+    return db.query(Prediction).filter(
+        Prediction.game_id == game_id,
+        Prediction.sport == 'MLB',
+    ).delete(synchronize_session=False)
+
+
+def generate_predictions_for_game(
+    db: Session,
+    game_id: int,
+    pred_service: Optional[PredictionService] = None,
+):
     game = db.query(Game).filter(Game.game_id == game_id).first()
     if not game:
         print(f"Game {game_id} not found")
@@ -39,20 +54,14 @@ def generate_predictions_for_game(db: Session, game_id: int):
     print(f"\nGenerating MLB predictions for Game {game_id}")
     print(f"   {game.away_team.name} @ {game.home_team.name} on {game.game_date}")
     print("=" * 60)
-    
-    # Delete predictions for stats we no longer generate (at_bats, plate_appearances, rbis with bad lines)
-    from app.models.prediction import Prediction
-    stale_stats = ['at_bats', 'plate_appearances', 'rbis']
-    deleted_count = db.query(Prediction).filter(
-        Prediction.game_id == game_id,
-        Prediction.sport == 'MLB',
-        Prediction.stat_type.in_(stale_stats)
-    ).delete(synchronize_session=False)
+
+    # Re-runs used to INSERT another player/game/stat row. Replace first.
+    deleted_count = replace_existing_mlb_predictions(db, game_id)
     if deleted_count > 0:
-        print(f"Cleaned up {deleted_count} stale predictions for {stale_stats}")
+        print(f"Replaced {deleted_count} existing MLB predictions for this game")
         db.commit()
 
-    pred_service = PredictionService(db, sport='MLB')
+    pred_service = pred_service or PredictionService(db, sport='MLB')
 
     players_with_stats = db.query(PlayerGameStat.player_id).filter(
         PlayerGameStat.sport == 'MLB',
@@ -138,8 +147,10 @@ def main():
     db = SessionLocal()
     exit_code = 0
     try:
+        # One service per run so pace/form/context caches survive across games.
+        pred_service = PredictionService(db, sport='MLB')
         if args.game_id:
-            exit_code = generate_predictions_for_game(db, args.game_id) or 0
+            exit_code = generate_predictions_for_game(db, args.game_id, pred_service) or 0
         elif args.date:
             d = datetime.strptime(args.date, '%Y-%m-%d').date()
             games = db.query(Game).filter(
@@ -148,7 +159,7 @@ def main():
                 Game.game_status.in_(['scheduled', 'in_progress'])
             ).all()
             for g in games:
-                result = generate_predictions_for_game(db, g.game_id) or 0
+                result = generate_predictions_for_game(db, g.game_id, pred_service) or 0
                 if result != 0:
                     exit_code = result
         elif args.future_dates:
@@ -167,7 +178,7 @@ def main():
                 if not games:
                     print(f"No scheduled games found for {d}")
                 for g in games:
-                    result = generate_predictions_for_game(db, g.game_id) or 0
+                    result = generate_predictions_for_game(db, g.game_id, pred_service) or 0
                     if result != 0:
                         exit_code = result
         elif args.upcoming:
@@ -180,7 +191,7 @@ def main():
                 Game.game_status == 'scheduled'
             ).all()
             for g in games:
-                result = generate_predictions_for_game(db, g.game_id) or 0
+                result = generate_predictions_for_game(db, g.game_id, pred_service) or 0
                 if result != 0:
                     exit_code = result
         else:
