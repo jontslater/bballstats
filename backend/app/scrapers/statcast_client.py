@@ -73,7 +73,8 @@ class StatcastClient:
         next_day = game_date + timedelta(days=1)
         params = {
             "all": "true",
-            "hfGT": "R|",
+            # Regular + postseason (Wild Card, LDS, LCS, WS)
+            "hfGT": "R|F|D|L|W|",
             "hfSea": f"{season}|",
             "player_type": "batter",
             "game_date_gt": game_date.isoformat(),
@@ -129,6 +130,9 @@ class StatcastClient:
         is_bip = launch_speed is not None and events in HIT_EVENTS
         tb = TB_BY_EVENT.get(events, 0)
         is_hit = events in {"single", "double", "triple", "home_run"}
+        is_hr = events == "home_run"
+        woba_value = self._to_float(row.get("woba_value"))
+        woba_denom = self._to_float(row.get("woba_denom"))
 
         return {
             "batter_id": batter_id,
@@ -136,6 +140,9 @@ class StatcastClient:
             "events": events,
             "is_bip": is_bip,
             "is_hit": is_hit,
+            "is_hr": is_hr,
+            "woba_value": woba_value if woba_value is not None else 0.0,
+            "woba_denom": woba_denom if woba_denom is not None else 0.0,
             "total_bases": tb,
             "launch_speed": launch_speed,
             "launch_speed_angle": lsa,

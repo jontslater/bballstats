@@ -34,6 +34,9 @@ def rollup_batted_ball_rows(rows: Iterable[Dict], game_date: date, season: int) 
                 "sum_est_ba": 0.0,
                 "sum_est_slg": 0.0,
                 "sum_est_woba": 0.0,
+                "sum_woba_value": 0.0,
+                "sum_woba_denom": 0.0,
+                "hr_on_bip": 0,
                 "hard_hit_count": 0,
                 "barrel_count": 0,
                 "launch_speed_sum": 0.0,
@@ -46,6 +49,10 @@ def rollup_batted_ball_rows(rows: Iterable[Dict], game_date: date, season: int) 
         bucket["sum_est_ba"] += float(row.get("est_ba") or 0.0)
         bucket["sum_est_slg"] += float(row.get("est_slg") or 0.0)
         bucket["sum_est_woba"] += float(row.get("est_woba") or 0.0)
+        bucket["sum_woba_value"] += float(row.get("woba_value") or 0.0)
+        bucket["sum_woba_denom"] += float(row.get("woba_denom") or 0.0)
+        if row.get("is_hr"):
+            bucket["hr_on_bip"] += 1
         ls = row.get("launch_speed")
         if ls is not None:
             bucket["launch_speed_sum"] += float(ls)
@@ -85,6 +92,9 @@ def upsert_daily_rollups(db: Session, rollups: Dict[int, Dict]) -> int:
                 "sum_est_ba",
                 "sum_est_slg",
                 "sum_est_woba",
+                "sum_woba_value",
+                "sum_woba_denom",
+                "hr_on_bip",
                 "hard_hit_count",
                 "barrel_count",
                 "launch_speed_sum",
@@ -106,6 +116,9 @@ def upsert_daily_rollups(db: Session, rollups: Dict[int, Dict]) -> int:
                     sum_est_ba=payload["sum_est_ba"],
                     sum_est_slg=payload["sum_est_slg"],
                     sum_est_woba=payload["sum_est_woba"],
+                    sum_woba_value=payload["sum_woba_value"],
+                    sum_woba_denom=payload["sum_woba_denom"],
+                    hr_on_bip=payload["hr_on_bip"],
                     hard_hit_count=payload["hard_hit_count"],
                     barrel_count=payload["barrel_count"],
                     launch_speed_sum=payload["launch_speed_sum"],
@@ -188,11 +201,29 @@ def get_luck_metrics_for_mlbam(
     return metrics_from_totals(totals)
 
 
-def link_player_mlbam_id(db: Session, player: Player, mlbam_id: int) -> None:
+def link_player_mlbam_id(db: Session, player: Player, mlbam_id: int) -> bool:
+    """
+    Attach MLBAM id to player when unambiguous. Never overwrite an existing different id
+    or steal an id already assigned to another player.
+    """
     if not mlbam_id or mlbam_id <= 0:
-        return
+        return False
+    conflict = (
+        db.query(Player)
+        .filter(
+            Player.sport == "MLB",
+            Player.mlbam_id == mlbam_id,
+            Player.player_id != player.player_id,
+        )
+        .first()
+    )
+    if conflict:
+        return False
+    if player.mlbam_id and player.mlbam_id != mlbam_id:
+        return False
     if player.mlbam_id != mlbam_id:
         player.mlbam_id = mlbam_id
     db.query(MlbStatcastDaily).filter(MlbStatcastDaily.mlbam_id == mlbam_id).update(
         {MlbStatcastDaily.player_id: player.player_id}, synchronize_session=False
     )
+    return True

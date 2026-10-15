@@ -29,6 +29,18 @@ def migrate(db):
             "CREATE INDEX IF NOT EXISTS ix_players_mlbam_id ON players (mlbam_id);"
         )
     )
+    statcast_columns = [
+        ("sum_woba_value", "DOUBLE PRECISION"),
+        ("sum_woba_denom", "DOUBLE PRECISION"),
+        ("hr_on_bip", "INTEGER"),
+    ]
+    for col_name, col_type in statcast_columns:
+        db.execute(
+            text(
+                f"ALTER TABLE mlb_statcast_daily ADD COLUMN IF NOT EXISTS "
+                f"{col_name} {col_type} DEFAULT 0;"
+            )
+        )
     db.commit()
     Base.metadata.create_all(bind=engine, tables=[MlbStatcastDaily.__table__])
     print("MLB Statcast schema migration complete.")

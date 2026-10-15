@@ -103,6 +103,7 @@ class CalibratedProbabilityCalculator:
         league_std: Optional[float] = None,
         luck_metrics: Optional[Dict[str, Any]] = None,
         luck_adjustment_enabled: Optional[bool] = None,
+        luck_weight: Optional[float] = None,
     ) -> Dict[str, float]:
         """
         Calculate calibrated probability of exceeding a line.
@@ -132,6 +133,7 @@ class CalibratedProbabilityCalculator:
                     stat_type,
                     luck_metrics,
                     enabled=luck_adjustment_enabled,
+                    luck_weight=luck_weight,
                 )
 
             # Shrinkage toward league rate using module-level constants

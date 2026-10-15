@@ -38,6 +38,11 @@ def main():
     parser.add_argument("--days", type=int, help="Backfill last N days through today")
     parser.add_argument("--skip-existing", action="store_true", default=True)
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-fetch dates even if rows exist (needed after game-type filter fixes)",
+    )
+    parser.add_argument(
         "--leaderboard-only",
         action="store_true",
         help="Fetch season expected-stats CSV (for inspection; not stored yet)",
@@ -70,7 +75,7 @@ def main():
             start_date=start,
             end_date=end,
             season=args.season,
-            skip_existing=args.skip_existing,
+            skip_existing=False if args.force else args.skip_existing,
         )
         print(
             f"Statcast ingest complete: days={stats['days']} rows={stats['rows']} "

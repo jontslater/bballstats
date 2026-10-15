@@ -1,9 +1,8 @@
 """
 Statcast-based 'luck' adjustment for MLB hitter count-stat rate estimates.
 
-Players whose actual results trail expected contact quality (xBA, xSLG, xwOBA)
-get a modest upward rate nudge; overperformers are nudged down. Disabled by default
-via MLB_LUCK_ADJUSTMENT until backtests justify enabling in production.
+Contact-quality gaps (xBA/xSLG/xwOBA vs actual on batted balls) are translated into
+per-game mean shifts using BIP-per-game scaling and a multiplicative ratio blend.
 """
 from __future__ import annotations
 
@@ -12,7 +11,8 @@ from typing import Any, Dict, Optional, Tuple
 
 MLB_LUCK_WEIGHT = float(os.environ.get("MLB_LUCK_WEIGHT", "0.35"))
 MLB_LUCK_MIN_BIP = int(os.environ.get("MLB_LUCK_MIN_BIP", "25"))
-MLB_LUCK_MAX_DELTA = float(os.environ.get("MLB_LUCK_MAX_DELTA", "0.12"))
+MLB_LUCK_MAX_REL = float(os.environ.get("MLB_LUCK_MAX_REL", "0.10"))
+MLB_LUCK_BIP_PER_GAME = float(os.environ.get("MLB_LUCK_BIP_PER_GAME", "2.35"))
 
 
 def is_mlb_luck_adjustment_enabled() -> bool:
@@ -26,9 +26,7 @@ def is_mlb_luck_adjustment_enabled() -> bool:
 
 def luck_signal_for_stat(stat_type: str, metrics: Dict[str, float]) -> float:
     """
-    Signed luck signal: positive => underperforming vs expected (due to regress up).
-
-    Metrics are on batted balls in play (not per plate appearance).
+    Signed contact luck (per BIP): positive => underperforming vs expected (regress up).
     """
     ba = metrics.get("ba", 0.0)
     xba = metrics.get("xba", ba)
@@ -46,17 +44,24 @@ def luck_signal_for_stat(stat_type: str, metrics: Dict[str, float]) -> float:
     return 0.0
 
 
+def _contact_ratio(actual: float, expected: float, floor: float) -> float:
+    actual = max(actual, floor)
+    expected = max(expected, floor)
+    return expected / actual
+
+
 def apply_luck_to_mean(
     player_mean: float,
     stat_type: str,
     luck_metrics: Optional[Dict[str, Any]],
     *,
     enabled: Optional[bool] = None,
+    luck_weight: Optional[float] = None,
 ) -> Tuple[float, Dict[str, Any]]:
     """
-    Blend luck signal into per-game mean before Poisson/NB calibration.
+    Blend luck into per-game mean before Poisson/NB calibration.
 
-    Returns (adjusted_mean, debug_info).
+    Uses multiplicative contact ratios scaled by confidence and BIP-per-game vs league prior.
     """
     debug: Dict[str, Any] = {"applied": False}
     if luck_metrics is None:
@@ -73,20 +78,48 @@ def apply_luck_to_mean(
         debug["reason"] = "disabled"
         return player_mean, debug
 
-    signal = luck_signal_for_stat(stat_type, luck_metrics)
+    if luck_weight is None:
+        weight = float(os.environ.get("MLB_LUCK_WEIGHT", str(MLB_LUCK_WEIGHT)))
+    else:
+        weight = luck_weight
     confidence = min(1.0, bip / 80.0)
-    raw_delta = MLB_LUCK_WEIGHT * signal * confidence
-    delta = max(-MLB_LUCK_MAX_DELTA, min(MLB_LUCK_MAX_DELTA, raw_delta))
-    adjusted = max(0.01, player_mean + delta)
+    game_days = max(int(luck_metrics.get("game_days") or 1), 1)
+    bip_per_game = float(luck_metrics.get("bip_per_game") or (bip / game_days))
+    bip_scale = min(1.25, bip_per_game / MLB_LUCK_BIP_PER_GAME)
+
+    ba = luck_metrics.get("ba", 0.0)
+    xba = luck_metrics.get("xba", ba)
+    slg = luck_metrics.get("slg", 0.0)
+    xslg = luck_metrics.get("xslg", slg)
+    woba = luck_metrics.get("woba", 0.0)
+    xwoba = luck_metrics.get("xwoba", woba)
+
+    if stat_type == "hits":
+        ratio = _contact_ratio(ba, xba, floor=0.12)
+    elif stat_type == "total_bases":
+        ratio = _contact_ratio(slg, xslg, floor=0.15)
+    elif stat_type == "home_runs":
+        ratio = _contact_ratio(woba, xwoba, floor=0.08)
+    else:
+        return player_mean, debug
+
+    excess = ratio - 1.0
+    rel_change = weight * confidence * bip_scale * excess
+    rel_change = max(-MLB_LUCK_MAX_REL, min(MLB_LUCK_MAX_REL, rel_change))
+    adjusted = max(0.01, player_mean * (1.0 + rel_change))
 
     debug.update(
         {
             "applied": True,
             "bip": bip,
-            "signal": round(signal, 4),
-            "delta": round(delta, 4),
+            "game_days": game_days,
+            "bip_per_game": round(bip_per_game, 3),
+            "signal": round(luck_signal_for_stat(stat_type, luck_metrics), 4),
+            "ratio": round(ratio, 4),
+            "rel_change": round(rel_change, 4),
             "player_mean": round(player_mean, 4),
             "adjusted_mean": round(adjusted, 4),
+            "luck_weight": weight,
         }
     )
     return adjusted, debug
@@ -95,6 +128,7 @@ def apply_luck_to_mean(
 def aggregate_daily_rows(rows) -> Dict[int, Dict[str, float]]:
     """Aggregate ORM daily rows into cumulative luck metrics keyed by mlbam_id."""
     totals: Dict[int, Dict[str, float]] = {}
+    game_days: Dict[int, set] = {}
     for row in rows:
         key = row.mlbam_id
         bucket = totals.setdefault(
@@ -103,21 +137,31 @@ def aggregate_daily_rows(rows) -> Dict[int, Dict[str, float]]:
                 "bip": 0,
                 "hits_on_bip": 0,
                 "total_bases_on_bip": 0,
+                "hr_on_bip": 0,
                 "sum_est_ba": 0.0,
                 "sum_est_slg": 0.0,
                 "sum_est_woba": 0.0,
+                "sum_woba_value": 0.0,
+                "sum_woba_denom": 0.0,
                 "hard_hit_count": 0,
                 "barrel_count": 0,
             },
         )
+        game_days.setdefault(key, set()).add(row.game_date)
         bucket["bip"] += row.bip or 0
         bucket["hits_on_bip"] += row.hits_on_bip or 0
         bucket["total_bases_on_bip"] += row.total_bases_on_bip or 0
+        bucket["hr_on_bip"] += getattr(row, "hr_on_bip", 0) or 0
         bucket["sum_est_ba"] += row.sum_est_ba or 0.0
         bucket["sum_est_slg"] += row.sum_est_slg or 0.0
         bucket["sum_est_woba"] += row.sum_est_woba or 0.0
+        bucket["sum_woba_value"] += getattr(row, "sum_woba_value", 0.0) or 0.0
+        bucket["sum_woba_denom"] += getattr(row, "sum_woba_denom", 0.0) or 0.0
         bucket["hard_hit_count"] += row.hard_hit_count or 0
         bucket["barrel_count"] += row.barrel_count or 0
+
+    for key, days in game_days.items():
+        totals[key]["game_days"] = len(days)
     return totals
 
 
@@ -127,14 +171,24 @@ def metrics_from_totals(totals: Dict[str, float]) -> Optional[Dict[str, float]]:
         return None
     hits = int(totals.get("hits_on_bip") or 0)
     tb = int(totals.get("total_bases_on_bip") or 0)
+    game_days = max(int(totals.get("game_days") or 1), 1)
+    sum_woba_value = float(totals.get("sum_woba_value") or 0.0)
+    sum_woba_denom = float(totals.get("sum_woba_denom") or 0.0)
+    if sum_woba_denom > 0:
+        woba = sum_woba_value / sum_woba_denom
+    else:
+        woba = hits / bip
     return {
         "bip": bip,
+        "game_days": game_days,
+        "bip_per_game": bip / game_days,
         "ba": hits / bip,
         "xba": (totals.get("sum_est_ba") or 0.0) / bip,
         "slg": tb / bip,
         "xslg": (totals.get("sum_est_slg") or 0.0) / bip,
-        "woba": (totals.get("sum_est_woba") or 0.0) / bip,
+        "woba": woba,
         "xwoba": (totals.get("sum_est_woba") or 0.0) / bip,
+        "hr_on_bip": int(totals.get("hr_on_bip") or 0),
         "hard_hit_pct": (totals.get("hard_hit_count") or 0) / bip,
         "barrel_pct": (totals.get("barrel_count") or 0) / bip,
     }
