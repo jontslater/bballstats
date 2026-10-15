@@ -30,6 +30,7 @@ from sqlalchemy.orm import sessionmaker
 from app.models.player_game_stat import PlayerGameStat
 from app.models.game import Game
 from app.services.calibrated_probability import CalibratedProbabilityCalculator
+from app.services.mlb_statcast_service import get_luck_metrics_for_player
 
 
 def to_float(value) -> float:
@@ -86,10 +87,22 @@ def compute_log_loss(predictions: List[Tuple[float, int]]) -> float:
     return total / len(predictions)
 
 
-def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int = 50):
+def walk_forward_backtest(
+    db,
+    min_history_games: int = 10,
+    max_test_dates: int = 50,
+    use_luck_adjustment: bool = False,
+    season_filter: int = None,
+    label: str = None,
+):
     """Walk-forward backtest on historical MLB game data using production function."""
+    title = label or (
+        "WALK-FORWARD CALIBRATION BACKTEST (luck ON)"
+        if use_luck_adjustment
+        else "WALK-FORWARD CALIBRATION BACKTEST (Production Function)"
+    )
     print("=" * 80)
-    print("WALK-FORWARD CALIBRATION BACKTEST (Production Function)")
+    print(title)
     print("=" * 80)
     print()
     
@@ -97,10 +110,15 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
     calc = CalibratedProbabilityCalculator(sport='MLB')
     
     # Get completed MLB game dates
-    game_dates = db.query(Game.game_date).filter(
+    date_query = db.query(Game.game_date).filter(
         Game.sport == 'MLB',
         Game.game_status.in_(['final', 'finished'])  # Handle both statuses
-    ).distinct().order_by(Game.game_date.desc()).limit(max_test_dates * 2).all()
+    )
+    if season_filter:
+        date_query = date_query.filter(
+            func.extract('year', Game.game_date) == season_filter
+        )
+    game_dates = date_query.distinct().order_by(Game.game_date.desc()).limit(max_test_dates * 2).all()
     
     if not game_dates:
         print("WARNING: No completed MLB games found in database.")
@@ -238,6 +256,15 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
                 for line in test_lines:
                     # Call PRODUCTION function (calculate_probability_for_line)
                     # Use league_mean computed ONLY from data before test date (walk-forward)
+                    luck_metrics = None
+                    if use_luck_adjustment:
+                        luck_metrics = get_luck_metrics_for_player(
+                            db,
+                            player_id,
+                            before_date=test_date,
+                            season=season_filter or test_date.year,
+                        )
+
                     prob_result = calc.calculate_probability_for_line(
                         line=float(line),
                         player_mean=player_mean,
@@ -245,7 +272,9 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
                         sample_size=len(stat_values),
                         stat_type=stat,
                         league_mean=league_rates_for_date[stat],  # Walk-forward league mean
-                        league_std=None  # Production doesn't require league_std for MLB count stats
+                        league_std=None,  # Production doesn't require league_std for MLB count stats
+                        luck_metrics=luck_metrics,
+                        luck_adjustment_enabled=use_luck_adjustment,
                     )
                     predicted_prob = prob_result['probability']
                     
@@ -264,6 +293,27 @@ def walk_forward_backtest(db, min_history_games: int = 10, max_test_dates: int =
     print()
     
     return results
+
+
+def summarize_pick_band(results: Dict, low: float = 0.62, high: float = 0.70) -> Dict:
+    """Hit rate for predictions with probability in [low, high)."""
+    summary = {}
+    for stat in results.keys():
+        for line in results[stat].keys():
+            preds = results[stat][line]['predictions']
+            band = [(p, a) for p, a in preds if low <= p < high]
+            if not band:
+                summary[f"{stat}_{line}"] = {"count": 0, "hit_rate": None, "avg_prob": None}
+                continue
+            count = len(band)
+            hits = sum(a for _, a in band)
+            avg_prob = sum(p for p, _ in band) / count
+            summary[f"{stat}_{line}"] = {
+                "count": count,
+                "hit_rate": hits / count,
+                "avg_prob": avg_prob,
+            }
+    return summary
 
 
 def print_reliability_table(results: Dict):
@@ -342,6 +392,36 @@ def print_reliability_table(results: Dict):
             print()
 
 
+def print_luck_comparison(baseline: Dict, adjusted: Dict):
+    print("=" * 80)
+    print("BASELINE vs LUCK-ADJUSTED SUMMARY")
+    print("=" * 80)
+    print()
+    for stat in baseline.keys():
+        for line in baseline[stat].keys():
+            key = f"{stat} OVER {line}"
+            b_preds = baseline[stat][line]['predictions']
+            a_preds = adjusted[stat][line]['predictions']
+            if not b_preds:
+                continue
+            b_brier = compute_brier_score(b_preds)
+            a_brier = compute_brier_score(a_preds)
+            b_ll = compute_log_loss(b_preds)
+            a_ll = compute_log_loss(a_preds)
+            print(f"{key}")
+            print(f"  Brier:    baseline {b_brier:.4f}  |  luck {a_brier:.4f}  (delta {a_brier - b_brier:+.4f})")
+            print(f"  Log loss: baseline {b_ll:.4f}  |  luck {a_ll:.4f}  (delta {a_ll - b_ll:+.4f})")
+            b_band = summarize_pick_band(baseline)[f"{stat}_{line}"]
+            a_band = summarize_pick_band(adjusted)[f"{stat}_{line}"]
+            if b_band["count"]:
+                print(
+                    f"  Picks {b_band['count']} in 62-70% band: "
+                    f"baseline hit {b_band['hit_rate']:.1%} (avg p {b_band['avg_prob']:.1%}) | "
+                    f"luck hit {a_band['hit_rate']:.1%} (avg p {a_band['avg_prob']:.1%})"
+                )
+            print()
+
+
 def main():
     """Run walk-forward calibration backtest."""
     parser = argparse.ArgumentParser(description='MLB calibration backtest')
@@ -349,6 +429,9 @@ def main():
     parser.add_argument('--k-tb', type=float, help='Prior strength for total_bases (overrides K_TB env var)')
     parser.add_argument('--k-hr', type=float, help='Prior strength for home_runs (overrides K_HR env var)')
     parser.add_argument('--grid', action='store_true', help='Run grid search over k values')
+    parser.add_argument('--compare-luck', action='store_true', help='Run baseline vs luck-adjusted walk-forward')
+    parser.add_argument('--season', type=int, default=2026, help='Limit backtest to one season year (default 2026)')
+    parser.add_argument('--max-dates', type=int, default=50, help='Max walk-forward test dates')
     args = parser.parse_args()
     
     db_url = os.environ.get('DATABASE_URL')
@@ -493,12 +576,54 @@ def main():
     db = Session()
     
     try:
-        results = walk_forward_backtest(db, min_history_games=10, max_test_dates=50)
+        if args.compare_luck:
+            os.environ['MLB_LUCK_ADJUSTMENT'] = '0'
+            baseline = walk_forward_backtest(
+                db,
+                min_history_games=10,
+                max_test_dates=args.max_dates,
+                use_luck_adjustment=False,
+                season_filter=args.season,
+                label="BASELINE (luck OFF)",
+            )
+            os.environ['MLB_LUCK_ADJUSTMENT'] = '1'
+            adjusted = walk_forward_backtest(
+                db,
+                min_history_games=10,
+                max_test_dates=args.max_dates,
+                use_luck_adjustment=True,
+                season_filter=args.season,
+                label="LUCK-ADJUSTED (luck ON)",
+            )
+            if baseline is None or adjusted is None:
+                sys.exit(1)
+            print_luck_comparison(baseline, adjusted)
+            print_reliability_table(baseline)
+            print_reliability_table(adjusted)
+            results = adjusted
+        else:
+            results = walk_forward_backtest(
+                db,
+                min_history_games=10,
+                max_test_dates=args.max_dates,
+                use_luck_adjustment=False,
+                season_filter=args.season,
+            )
         
         if results is None:
             sys.exit(1)
         
-        print_reliability_table(results)
+        if not args.compare_luck:
+            print_reliability_table(results)
+        
+        band = summarize_pick_band(results)
+        print("Pick band 62-70% summary:")
+        for key, metrics in band.items():
+            if metrics["count"]:
+                print(
+                    f"  {key}: n={metrics['count']} hit_rate={metrics['hit_rate']:.1%} "
+                    f"avg_prob={metrics['avg_prob']:.1%}"
+                )
         
         print("=" * 80)
         print("INTERPRETATION")

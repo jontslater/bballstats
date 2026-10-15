@@ -18,6 +18,8 @@ class Player(Base):
     weight = Column(Integer)  # pounds
     birth_date = Column(Date)
     current_team_id = Column(Integer, ForeignKey("teams.team_id"), nullable=True)
+    # MLB Advanced Media / Stats API person id (Statcast, Savant)
+    mlbam_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

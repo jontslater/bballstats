@@ -7,10 +7,12 @@ Computes calibrated probabilities for betting lines using:
 - Normal distribution for continuous stats with large samples
 - Empirical Bayes shrinkage toward league priors
 """
-from typing import Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple, List
 from scipy import stats
 import numpy as np
 import os
+
+from app.services.mlb_luck_adjustment import apply_luck_to_mean
 
 # Prior strength constants for MLB count stats (shrinkage toward league rate)
 # Higher values = stronger shrinkage to league average (more conservative)
@@ -98,7 +100,9 @@ class CalibratedProbabilityCalculator:
         sample_size: int,
         stat_type: str,
         league_mean: Optional[float] = None,
-        league_std: Optional[float] = None
+        league_std: Optional[float] = None,
+        luck_metrics: Optional[Dict[str, Any]] = None,
+        luck_adjustment_enabled: Optional[bool] = None,
     ) -> Dict[str, float]:
         """
         Calculate calibrated probability of exceeding a line.
@@ -120,6 +124,16 @@ class CalibratedProbabilityCalculator:
         """
         # For MLB count stats, use discrete Poisson/Negative Binomial model
         if self.sport == 'MLB' and stat_type in ['hits', 'home_runs', 'total_bases']:
+            rate_mean = player_mean
+            luck_debug = None
+            if luck_metrics is not None:
+                rate_mean, luck_debug = apply_luck_to_mean(
+                    player_mean,
+                    stat_type,
+                    luck_metrics,
+                    enabled=luck_adjustment_enabled,
+                )
+
             # Shrinkage toward league rate using module-level constants
             if league_mean is not None:
                 if stat_type == 'home_runs':
@@ -130,9 +144,9 @@ class CalibratedProbabilityCalculator:
                     prior_strength = PRIOR_STRENGTH_HITS
                 
                 weight_player = sample_size / (sample_size + prior_strength)
-                shrunk_rate = weight_player * player_mean + (1 - weight_player) * league_mean
+                shrunk_rate = weight_player * rate_mean + (1 - weight_player) * league_mean
             else:
-                shrunk_rate = player_mean
+                shrunk_rate = rate_mean
             
             # Use league-pooled dispersion for over-dispersed stats
             # Computed from league data: TB ~2.25, hits ~1.1, HR ~1.5
@@ -179,13 +193,16 @@ class CalibratedProbabilityCalculator:
             # Clamp
             prob = max(0.01, min(0.99, prob))
             
-            return {
+            result = {
                 'probability': round(prob, 3),
                 'shrunk_mean': round(shrunk_rate, 2),
                 'effective_std': round(player_std, 2),
                 'effective_n': sample_size,
                 'raw_probability': round(prob, 3)
             }
+            if luck_debug is not None:
+                result['luck_adjustment'] = luck_debug
+            return result
         
         # For continuous stats or non-MLB, use Normal/Student-t
         # Apply Empirical Bayes shrinkage to the mean

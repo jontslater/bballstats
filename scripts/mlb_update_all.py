@@ -97,6 +97,37 @@ def update_game_results():
         return False
 
 
+def update_statcast_rollups():
+    """Optional Statcast ingest for luck adjustment (disabled unless env set)."""
+    import os
+    if os.environ.get("MLB_STATCAST_INGEST", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        logger.info("Skipping Statcast ingest (set MLB_STATCAST_INGEST=1 to enable)")
+        return True
+    logger.info("=" * 60)
+    logger.info("STEP 2b: Updating MLB Statcast batted-ball rollups (7-day lookback)...")
+    logger.info("=" * 60)
+    try:
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        result = __import__("subprocess").run(
+            [sys.executable, "scripts/mlb_collect_statcast.py", "--days", "7"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            env=env,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0:
+            logger.info(result.stdout.strip() or "Statcast rollups updated")
+            return True
+        logger.error(f"Statcast ingest failed: {result.stderr}")
+        return False
+    except Exception as e:
+        logger.error(f"Statcast ingest error: {e}")
+        return False
+
+
 def generate_predictions():
     logger.info("=" * 60)
     logger.info("STEP 3: Generating MLB predictions...")
@@ -181,6 +212,7 @@ def main():
     steps = [
         ("MLB Schedules", update_schedules),
         ("MLB Game Results", update_game_results),
+        ("MLB Statcast Rollups", update_statcast_rollups),
         ("MLB Predictions", generate_predictions),
         ("MLB Evaluate Predictions", evaluate_predictions),
     ]

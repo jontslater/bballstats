@@ -561,6 +561,16 @@ class PredictionService:
         # Step 5: Calculate bet lines using calibrated probability
         # Get league averages for this stat type (optional, for shrinkage)
         league_mean, league_std = self._get_league_averages(stat_type)
+
+        luck_metrics = None
+        if self.sport == 'MLB' and stat_type in ('hits', 'total_bases', 'home_runs'):
+            from app.services.mlb_statcast_service import get_luck_metrics_for_player
+            luck_metrics = get_luck_metrics_for_player(
+                self.db,
+                player_id,
+                before_date=game.game_date,
+                season=int(game.game_date.year) if game.game_date else None,
+            )
         
         # TODO: Check if real betting line exists (from betting_lines table)
         # For now, we'll pass None to synthesize from the player's distribution
@@ -573,7 +583,8 @@ class PredictionService:
             stat_type=stat_type,
             real_line=real_line,
             league_mean=league_mean,
-            league_std=league_std
+            league_std=league_std,
+            luck_metrics=luck_metrics,
         )
         
         # Step 6: Evaluate pass rules with new confidence calculation

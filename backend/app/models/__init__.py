@@ -9,6 +9,7 @@ from .season import Season
 from .player import Player
 from .game import Game
 from .player_game_stat import PlayerGameStat
+from .mlb_statcast_daily import MlbStatcastDaily
 from .injury import Injury
 from .team_position_defense import TeamPositionDefense
 from .player_team_matchup import PlayerTeamMatchup
@@ -27,6 +28,7 @@ __all__ = [
     "Player",
     "Game",
     "PlayerGameStat",
+    "MlbStatcastDaily",
     "Injury",
     "TeamPositionDefense",
     "PlayerTeamMatchup",
