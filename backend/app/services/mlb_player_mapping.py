@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from app.models import Player, Team
+from app.models import MlbStatcastDaily, Player, Team
 from app.scrapers.mlb_api_client import MLB_TEAM_ID_TO_ABBREV
 
 # Reverse: our abbrev -> MLB API team id
@@ -230,5 +230,18 @@ def backfill_mlbam_ids(
         stats["matched"] += 1
 
     if not dry_run:
+        db.commit()
+        mapped_players = (
+            db.query(Player)
+            .filter(Player.sport == "MLB", Player.mlbam_id.isnot(None))
+            .all()
+        )
+        for player in mapped_players:
+            db.query(MlbStatcastDaily).filter(
+                MlbStatcastDaily.mlbam_id == player.mlbam_id
+            ).update(
+                {MlbStatcastDaily.player_id: player.player_id},
+                synchronize_session=False,
+            )
         db.commit()
     return stats
