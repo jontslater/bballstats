@@ -180,8 +180,10 @@ class MLBAPIClient:
         singles = max(0, h - double - triple - hr)
         total_bases = singles + 2 * double + 3 * triple + 4 * hr
 
+        person_id = self._safe_int(item.get('personId'))
         return {
             'player_name': name,
+            'mlbam_id': person_id if person_id and person_id > 0 else None,
             'team_abbreviation': team_abbrev,
             'is_batter': True,
             'is_pitcher': False,
@@ -206,8 +208,10 @@ class MLBAPIClient:
         bb = self._safe_int(item.get('bb')) or 0
         if ip is None and so == 0 and h_allowed == 0:
             return None
+        person_id = self._safe_int(item.get('personId'))
         return {
             'player_name': name,
+            'mlbam_id': person_id if person_id and person_id > 0 else None,
             'team_abbreviation': team_abbrev,
             'is_batter': False,
             'is_pitcher': True,

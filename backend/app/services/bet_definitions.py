@@ -3,7 +3,7 @@ Bet Definitions
 
 Defines safe, standard, and long shot bet lines and probabilities using calibrated methods.
 """
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from app.services.calibrated_probability import CalibratedProbabilityCalculator
 
 
@@ -28,7 +28,8 @@ class BetDefinitions:
         stat_type: str,
         real_line: Optional[float] = None,
         league_mean: Optional[float] = None,
-        league_std: Optional[float] = None
+        league_std: Optional[float] = None,
+        luck_metrics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, any]:
         """
         Calculate bet lines and calibrated probabilities.
@@ -98,7 +99,7 @@ class BetDefinitions:
         # Calculate probability for standard line
         standard_data = self.calibrator.calculate_probability_for_line(
             standard_line, adjusted_mean, adjusted_std, sample_size, stat_type,
-            league_mean, league_std
+            league_mean, league_std, luck_metrics=luck_metrics,
         )
         
         # Generate candidate lines on discrete grid
@@ -121,7 +122,7 @@ class BetDefinitions:
             
             prob_data = self.calibrator.calculate_probability_for_line(
                 line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                league_mean, league_std
+                league_mean, league_std, luck_metrics=luck_metrics,
             )
             
             # Track the line with highest probability (safe = highest likelihood)
@@ -135,7 +136,7 @@ class BetDefinitions:
             safe_line = min(candidates) if candidates else 0.5
             safe_data = self.calibrator.calculate_probability_for_line(
                 safe_line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                league_mean, league_std
+                league_mean, league_std, luck_metrics=luck_metrics,
             )
             safe_probability = safe_data['probability']
         
@@ -155,7 +156,7 @@ class BetDefinitions:
             if test_line <= long_shot_max:
                 test_prob = self.calibrator.calculate_probability_for_line(
                     test_line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                    league_mean, league_std
+                    league_mean, league_std, luck_metrics=luck_metrics,
                 )
                 if test_prob['probability'] < 0.05:
                     # Skip HR long_shot entirely - too unlikely
@@ -177,7 +178,7 @@ class BetDefinitions:
                 
                 prob_data = self.calibrator.calculate_probability_for_line(
                     line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                    league_mean, league_std
+                    league_mean, league_std, luck_metrics=luck_metrics,
                 )
                 prob = prob_data['probability']
                 

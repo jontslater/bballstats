@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.models import Game, Player, PlayerGameStat, Season, Team
 from app.scrapers.mlb_api_client import MLBAPIClient
 from app.services.mlb_schedule import find_mlb_team, mlb_external_game_id, _lookup_existing_game
+from app.services.mlb_statcast_service import link_player_mlbam_id
 
 MLB_RESULTS_LOOKBACK_DAYS = 7
 MLB_FINAL_API_STATUSES = ('Final', 'Game Over', 'Completed Early')
@@ -26,8 +27,45 @@ def get_or_create_mlb_player(
     position: str = None,
     is_batter: bool = False,
     is_pitcher: bool = False,
+    mlbam_id: int = None,
 ):
-    """Get or create MLB player by name and team."""
+    """
+    Get or create MLB player.
+
+    When mlbam_id is present, it is authoritative: do not fall back to short
+    box-score name matching (avoids 'Marsh' / 'Murphy, C' collisions).
+    """
+    player = None
+    if mlbam_id and mlbam_id > 0:
+        player = db.query(Player).filter(
+            Player.sport == 'MLB',
+            Player.mlbam_id == mlbam_id,
+        ).first()
+        if not player:
+            if not position:
+                if is_pitcher:
+                    position = 'P'
+                elif is_batter:
+                    position = 'DH'
+                else:
+                    position = 'P'
+            player = Player(
+                sport='MLB',
+                name=player_name,
+                position=position,
+                current_team_id=team.team_id,
+                mlbam_id=mlbam_id,
+            )
+            db.add(player)
+            db.flush()
+        else:
+            if player.current_team_id != team.team_id:
+                player.current_team_id = team.team_id
+            if position and player.position == 'P' and is_batter and not is_pitcher:
+                player.position = position if position != 'P' else 'DH'
+        link_player_mlbam_id(db, player, mlbam_id)
+        return player
+
     player = db.query(Player).filter(
         Player.sport == 'MLB',
         Player.name == player_name
@@ -46,7 +84,7 @@ def get_or_create_mlb_player(
             sport='MLB',
             name=player_name,
             position=position,
-            current_team_id=team.team_id
+            current_team_id=team.team_id,
         )
         db.add(player)
         db.flush()
@@ -182,7 +220,8 @@ def upsert_mlb_final_game(
                     db, ps['player_name'], team,
                     position=position,
                     is_batter=is_batter,
-                    is_pitcher=is_pitcher
+                    is_pitcher=is_pitcher,
+                    mlbam_id=ps.get('mlbam_id'),
                 )
 
                 existing_stat = db.query(PlayerGameStat).filter(
