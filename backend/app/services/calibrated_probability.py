@@ -19,6 +19,25 @@ PRIOR_STRENGTH_HITS = float(os.environ.get('K_HITS', '18.0'))  # 15-20 range for
 PRIOR_STRENGTH_TB = float(os.environ.get('K_TB', '15.0'))  # Re-tuned after NB fix
 PRIOR_STRENGTH_HR = float(os.environ.get('K_HR', '40.0'))  # HRs are rare, need stronger shrinkage
 
+# NFL count-stat shrinkage (receptions, attempts, etc.)
+PRIOR_STRENGTH_NFL_RECEPTIONS = float(os.environ.get('K_NFL_REC', '12.0'))
+PRIOR_STRENGTH_NFL_ATTEMPTS = float(os.environ.get('K_NFL_ATT', '15.0'))
+PRIOR_STRENGTH_NFL_COMPLETIONS = float(os.environ.get('K_NFL_CMP', '15.0'))
+PRIOR_STRENGTH_NFL_ANYTIME_TD = float(os.environ.get('K_NFL_ATD', '25.0'))
+
+NFL_COUNT_STATS = {
+    'receptions', 'completions', 'attempts', 'pass_attempts',
+    'rushing_attempts', 'anytime_td',
+}
+NFL_COUNT_DISPERSION = {
+    'receptions': 1.35,
+    'completions': 1.25,
+    'attempts': 1.20,
+    'pass_attempts': 1.20,
+    'rushing_attempts': 1.30,
+    'anytime_td': 1.60,
+}
+
 # High-end compression to fix overshoot at p >= 0.65
 # Compresses probabilities above knee_point by shrinking excess over base rate
 # Set via environment for tuning (defaults calibrated from desktop backtest)
@@ -44,9 +63,14 @@ class CalibratedProbabilityCalculator:
             'rushing_yards': 0.49,
             'receiving_yards': 0.48,
             'receptions': 0.51,
+            'completions': 0.50,
+            'attempts': 0.50,
+            'pass_attempts': 0.50,
+            'rushing_attempts': 0.49,
             'passing_tds': 0.48,
             'rushing_tds': 0.47,
             'receiving_tds': 0.46,
+            'anytime_td': 0.35,
         },
         'MLB': {
             # P(hits >= 1) for a starter: ~60-65%
@@ -118,6 +142,51 @@ class CalibratedProbabilityCalculator:
         Returns:
             Dict with 'probability', 'shrunk_mean', 'effective_std', 'effective_n'
         """
+        # NFL count stats: Poisson / Negative Binomial with shrinkage
+        if self.sport == 'NFL' and stat_type in NFL_COUNT_STATS:
+            if league_mean is not None:
+                if stat_type == 'anytime_td':
+                    prior_strength = PRIOR_STRENGTH_NFL_ANYTIME_TD
+                elif stat_type in ('attempts', 'pass_attempts'):
+                    prior_strength = PRIOR_STRENGTH_NFL_ATTEMPTS
+                elif stat_type == 'completions':
+                    prior_strength = PRIOR_STRENGTH_NFL_COMPLETIONS
+                else:
+                    prior_strength = PRIOR_STRENGTH_NFL_RECEPTIONS
+                weight_player = sample_size / (sample_size + prior_strength)
+                shrunk_rate = weight_player * player_mean + (1 - weight_player) * league_mean
+            else:
+                shrunk_rate = player_mean
+
+            dispersion = NFL_COUNT_DISPERSION.get(stat_type, 1.25)
+            try:
+                if stat_type == 'anytime_td':
+                    # P(>=1 TD) from Poisson rate = mean TDs per game
+                    prob = 1.0 - stats.poisson.cdf(0, max(shrunk_rate, 0.001))
+                elif dispersion > 1.35:
+                    variance = dispersion * max(shrunk_rate, 0.001)
+                    if variance > shrunk_rate:
+                        r = (shrunk_rate ** 2) / (variance - shrunk_rate)
+                        p_nb = shrunk_rate / variance
+                        prob = 1.0 - stats.nbinom.cdf(int(line), r, p_nb)
+                    else:
+                        prob = 1.0 - stats.poisson.cdf(int(line), shrunk_rate)
+                else:
+                    prob = 1.0 - stats.poisson.cdf(int(line), max(shrunk_rate, 0.001))
+            except (ValueError, ZeroDivisionError):
+                prob = 0.5
+
+            if sample_size < 30 and prob > 0.85:
+                prob = 0.85
+            prob = max(0.01, min(0.99, prob))
+            return {
+                'probability': round(prob, 3),
+                'shrunk_mean': round(shrunk_rate, 2),
+                'effective_std': round(player_std, 2),
+                'effective_n': sample_size,
+                'raw_probability': round(prob, 3),
+            }
+
         # For MLB count stats, use discrete Poisson/Negative Binomial model
         if self.sport == 'MLB' and stat_type in ['hits', 'home_runs', 'total_bases']:
             # Shrinkage toward league rate using module-level constants

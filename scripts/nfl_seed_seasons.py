@@ -24,16 +24,22 @@ from app.models import Season
 # Playoffs: January - February
 NFL_SEASONS = [
     {
-        "season_year": "2023",
-        "start_date": date(2023, 9, 7),  # Regular season start
-        "end_date": date(2024, 2, 11),  # Super Bowl date
-        "is_current": False
+        "season_year": "2024",
+        "start_date": date(2024, 9, 5),
+        "end_date": date(2025, 2, 9),
+        "is_current": False,
     },
     {
-        "season_year": "2024",
-        "start_date": date(2024, 9, 5),  # Regular season start
-        "end_date": date(2025, 2, 9),  # Super Bowl date (approximate)
-        "is_current": True  # Update this based on current date
+        "season_year": "2025",
+        "start_date": date(2025, 9, 4),
+        "end_date": date(2026, 2, 8),
+        "is_current": False,
+    },
+    {
+        "season_year": "2026",
+        "start_date": date(2026, 9, 10),
+        "end_date": date(2027, 2, 14),
+        "is_current": True,
     },
 ]
 
@@ -45,7 +51,8 @@ def seed_seasons():
     try:
         # Check if NFL seasons already exist
         existing_nfl_count = db.query(Season).filter(Season.sport == 'NFL').count()
-        if existing_nfl_count > 0:
+        non_interactive = __import__("os").environ.get("NFL_SEED_NONINTERACTIVE") == "1"
+        if existing_nfl_count > 0 and not non_interactive:
             print(f"⚠️  {existing_nfl_count} NFL seasons already exist in database.")
             response = input("Do you want to continue? This will skip existing seasons. (y/n): ")
             if response.lower() != 'y':

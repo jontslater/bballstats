@@ -173,8 +173,14 @@ class DistributionEngine:
                     value = stat.interceptions
                 elif stat_type == 'completions':
                     value = stat.completions
-                elif stat_type == 'attempts':
+                elif stat_type in ('attempts', 'pass_attempts'):
                     value = stat.pass_attempts
+                elif stat_type == 'anytime_td':
+                    value = (
+                        (stat.passing_tds or 0)
+                        + (stat.rushing_tds or 0)
+                        + (stat.receiving_tds or 0)
+                    )
                 elif stat_type == 'rushing_yards':
                     value = stat.rushing_yards
                 elif stat_type == 'rushing_tds':
@@ -220,12 +226,32 @@ class DistributionEngine:
                 else:
                     raise ValueError(f"Unknown MLB stat_type: {stat_type}")
             
-            # Only add non-null values
+            # Only add non-null values; for NFL role stats skip DNP zeros
             if value is not None:
+                if sport == 'NFL' and stat_type in (
+                    'passing_yards', 'passing_tds', 'completions', 'attempts', 'pass_attempts', 'interceptions'
+                ):
+                    if (stat.pass_attempts or 0) <= 0 and (value or 0) == 0:
+                        continue
+                if sport == 'NFL' and stat_type in (
+                    'rushing_yards', 'rushing_tds', 'rushing_attempts'
+                ):
+                    if (stat.rushing_attempts or 0) <= 0 and (value or 0) == 0:
+                        continue
+                if sport == 'NFL' and stat_type in (
+                    'receptions', 'receiving_yards', 'receiving_tds', 'targets'
+                ):
+                    if (stat.targets or 0) <= 0 and (stat.receptions or 0) <= 0 and (value or 0) == 0:
+                        continue
                 stat_values.append(value)
         
-        # For NFL/MLB, use lower min_games (MLB: 10)
-        effective_min_games = 10 if sport == 'MLB' else min_games
+        # For NFL/MLB, use lower min_games (MLB: 10, NFL: 5)
+        if sport == 'MLB':
+            effective_min_games = 10
+        elif sport == 'NFL':
+            effective_min_games = min(min_games, 5)
+        else:
+            effective_min_games = min_games
         if len(stat_values) < effective_min_games:
             return None
         
@@ -340,6 +366,17 @@ class DistributionEngine:
         # Filter by time played
         if sport == 'NBA':
             query = query.filter(PlayerGameStat.minutes_played > 0)
+        elif sport == 'NFL':
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    PlayerGameStat.pass_attempts > 0,
+                    PlayerGameStat.rushing_attempts > 0,
+                    PlayerGameStat.targets > 0,
+                    PlayerGameStat.receptions > 0,
+                    PlayerGameStat.snaps_played > 0,
+                )
+            )
         elif sport == 'MLB':
             # Include batters (at_bats > 0) or pitchers (innings_pitched > 0)
             from sqlalchemy import or_
@@ -391,9 +428,13 @@ class DistributionEngine:
                            (stat.innings_pitched and stat.innings_pitched >= 5):
                             is_starter = True
                     else:  # NFL
-                        if stat.snaps_played and stat.snaps_played >= 40:  # ~60% of snaps
+                        if stat.snaps_played and stat.snaps_played >= 40:
                             is_starter = True
-                        elif stat.minutes_played and stat.minutes_played >= 40:
+                        elif (
+                            (stat.pass_attempts or 0) >= 15
+                            or (stat.rushing_attempts or 0) >= 8
+                            or (stat.targets or 0) >= 4
+                        ):
                             is_starter = True
                 
                 if is_starter:
@@ -419,8 +460,14 @@ class DistributionEngine:
                 # Batters: plate_appearances; Pitchers: innings_pitched
                 time_value = stat.plate_appearances if stat.plate_appearances else (stat.innings_pitched or 0)
             else:  # NFL
-                # Prefer snaps, fallback to estimated minutes
-                time_value = stat.snaps_played if stat.snaps_played else (stat.minutes_played or 0)
+                if stat.snaps_played:
+                    time_value = stat.snaps_played
+                else:
+                    time_value = (
+                        (stat.pass_attempts or 0)
+                        + (stat.rushing_attempts or 0)
+                        + (stat.targets or 0)
+                    )
             
             if time_value > 0:
                 weighted_sum += time_value * weight

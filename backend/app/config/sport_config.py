@@ -31,7 +31,7 @@ SPORT_CONFIGS: Dict[str, Dict] = {
             'passing_yards', 'passing_tds', 'interceptions', 'completions', 'attempts',
             'rushing_yards', 'rushing_tds', 'rushing_attempts',
             'receptions', 'receiving_yards', 'receiving_tds', 'targets',
-            'snaps_played', 'snap_percentage'
+            'snaps_played', 'snap_percentage', 'anytime_td',
         ],
         'positions': ['QB', 'RB', 'WR', 'TE', 'K', 'DEF'],
         'time_unit': 'snaps_played',
@@ -55,14 +55,16 @@ SPORT_CONFIGS: Dict[str, Dict] = {
             'receiving_tds': 'Receiving TDs',
             'targets': 'Targets',
             'snaps_played': 'Snaps Played',
-            'snap_percentage': 'Snap %'
+            'snap_percentage': 'Snap %',
+            'anytime_td': 'Anytime TD',
         },
         'position_default_stats': {
-            'QB': ['passing_yards', 'passing_tds', 'rushing_yards'],
-            'RB': ['rushing_yards', 'rushing_tds', 'receptions', 'receiving_yards'],
-            'WR': ['receptions', 'receiving_yards', 'receiving_tds', 'targets'],
-            'TE': ['receptions', 'receiving_yards', 'receiving_tds', 'targets']
-        }
+            'QB': ['passing_yards', 'completions', 'attempts', 'rushing_yards'],
+            'RB': ['rushing_yards', 'rushing_attempts', 'receptions', 'receiving_yards'],
+            'WR': ['receptions', 'receiving_yards', 'targets'],
+            'TE': ['receptions', 'receiving_yards', 'targets'],
+        },
+        'high_variance_stats': ['anytime_td', 'passing_tds', 'rushing_tds', 'receiving_tds'],
     },
     'MLB': {
         'stat_types': [
@@ -170,9 +172,12 @@ def get_bettable_stat_types(sport: str) -> List[str]:
         bettable_stats = ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']
         return [s for s in all_stats if s in bettable_stats]
     elif sport == 'NFL':
-        # Exclude snaps_played and snap_percentage (not bettable)
-        excluded = ['snaps_played', 'snap_percentage']
-        return [s for s in all_stats if s not in excluded]
+        excluded = ['snaps_played', 'snap_percentage', 'interceptions']
+        primary = [
+            'passing_yards', 'rushing_yards', 'receiving_yards', 'receptions',
+            'completions', 'attempts', 'rushing_attempts', 'anytime_td',
+        ]
+        return [s for s in primary if s in all_stats or s == 'anytime_td']
     elif sport == 'MLB':
         # Bettable: hits, home_runs, total_bases, strikeouts
         bettable_stats = ['hits', 'home_runs', 'total_bases', 'strikeouts']

@@ -14,6 +14,7 @@ from app.models.team import Team
 from app.services.prediction_history_helper import get_last_n_games_for_stat
 from app.services.base_sport_service import BaseSportService
 from itertools import combinations
+from app.services.nfl_data import american_break_even_odds
 
 
 # Suggested bets are only for games that can still be bet. Finished / eliminated
@@ -77,12 +78,18 @@ class SuggestedBetsService(BaseSportService):
         # Get predictions with high confidence and good probabilities
         # Include all bet types: safe, standard, and long_shot
         # Use sport-appropriate bettable stat types (excludes minutes, snaps, etc.)
-        from app.config.sport_config import get_bettable_stat_types
+        from app.config.sport_config import get_bettable_stat_types, get_sport_config
         bettable_stat_types = get_bettable_stat_types(self.sport)
         
         # For suggested bets, focus on primary bettable stats
         if self.sport == 'NFL':
-            primary_stats = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']]
+            primary_stats = [
+                s for s in bettable_stat_types
+                if s in [
+                    'passing_yards', 'rushing_yards', 'receiving_yards', 'receptions',
+                    'completions', 'attempts', 'rushing_attempts',
+                ]
+            ]
         elif self.sport == 'MLB':
             primary_stats = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
         else:  # NBA
@@ -317,6 +324,12 @@ class SuggestedBetsService(BaseSportService):
                     seen_reasons.add(reason_lower)
                     deduped_reasons.append(reason)
             
+            prob_f = round(float(probability) if probability is not None else 0.5, 3)
+            break_even = american_break_even_odds(prob_f)
+            high_variance = pred.stat_type in (
+                get_sport_config(self.sport).get('high_variance_stats') or []
+            )
+
             scored_predictions.append({
                 'prediction_id': pred.prediction_id,
                 'player_id': pred.player_id,
@@ -327,7 +340,9 @@ class SuggestedBetsService(BaseSportService):
                 'stat_type': pred.stat_type,
                 'bet_type': pred.bet_type,
                 'line': final_line,
-                'probability': round(float(probability) if probability is not None else 0.5, 3),
+                'probability': prob_f,
+                'break_even_american_odds': break_even,
+                'high_variance': high_variance,
                 'confidence_level': pred.confidence_level,
                 'confidence_tier': pred.confidence_level,  # Alias for clarity
                 'confidence_score': pred.confidence_score,

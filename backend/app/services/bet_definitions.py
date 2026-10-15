@@ -264,9 +264,14 @@ class BetDefinitions:
                 'rushing_yards': 200.0,
                 'receiving_yards': 200.0,
                 'receptions': 15.0,
+                'completions': 35.0,
+                'attempts': 50.0,
+                'pass_attempts': 50.0,
+                'rushing_attempts': 30.0,
                 'passing_tds': 5.0,
                 'rushing_tds': 4.0,
                 'receiving_tds': 3.0,
+                'anytime_td': 1.5,
             }
             return nfl_maxes.get(stat_type, max(mean * 3, 20.0))
         else:  # NBA

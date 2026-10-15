@@ -88,8 +88,11 @@ class PredictionService:
             # (Questionable players are risky and may not play)
             injury_status = self.injury_context.get_player_injury_status(player_id)
             if injury_status:
-                if injury_status['status'] in ['Out', 'Doubtful', 'Questionable']:
-                    return None  # Player is out or questionable, don't generate prediction
+                blocked = ['Out', 'Doubtful']
+                if self.sport != 'NFL':
+                    blocked.append('Questionable')
+                if injury_status['status'] in blocked:
+                    return None
             
             # Check if player is on the correct team for this game
             if player.current_team_id not in [game.home_team_id, game.away_team_id]:
@@ -107,7 +110,7 @@ class PredictionService:
             team_id = game.home_team_id if player.current_team_id == game.home_team_id else game.away_team_id
             is_lineup_confirmed = self.lineup_service.is_lineup_confirmed(game_id, team_id)
             
-            if is_lineup_confirmed:
+            if is_lineup_confirmed and self.sport == 'NBA':
                 # Lineup is confirmed - check if player is a starter
                 is_confirmed_starter = self.lineup_service.is_player_starter(game_id, player_id)
                 
@@ -371,9 +374,19 @@ class PredictionService:
         # For NFL, use current season (2025) if available, otherwise fallback to previous seasons
         # For NBA, use the game's season
         if self.sport == 'NFL':
-            # Prefer using the game's season (2025) if we have data
-            # Otherwise use previous seasons as fallback
-            season_ids_for_dist = [season_id]  # Use the game's season (2025)
+            season_ids_for_dist = [season_id]
+            season_row = self.db.query(Season).filter(Season.season_id == season_id).first()
+            if season_row:
+                try:
+                    prev_year = str(int(season_row.season_year) - 1)
+                    prev_season = self.db.query(Season).filter(
+                        Season.sport == 'NFL',
+                        Season.season_year == prev_year,
+                    ).first()
+                    if prev_season and prev_season.season_id not in season_ids_for_dist:
+                        season_ids_for_dist.append(prev_season.season_id)
+                except ValueError:
+                    pass
         else:
             season_ids_for_dist = [season_id]
         
@@ -1411,6 +1424,10 @@ class PredictionService:
                 'passing_tds': PlayerGameStat.passing_tds,
                 'rushing_tds': PlayerGameStat.rushing_tds,
                 'receiving_tds': PlayerGameStat.receiving_tds,
+                'completions': PlayerGameStat.completions,
+                'attempts': PlayerGameStat.pass_attempts,
+                'pass_attempts': PlayerGameStat.pass_attempts,
+                'rushing_attempts': PlayerGameStat.rushing_attempts,
                 # MLB - use ACTUAL columns from model
                 'hits': PlayerGameStat.hits,
                 'home_runs': PlayerGameStat.home_runs,
