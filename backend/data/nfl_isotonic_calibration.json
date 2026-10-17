@@ -1,74 +1,99 @@
 {
   "meta": {
-    "train": "2024 + 2025 weeks 1-8",
-    "val": "2025 weeks 9-18 + 2026",
+    "train": "2024 + all 2025 (through week 18)",
+    "val": "2026 weeks 1\u20136 only",
     "method": "symmetric_alpha_plus_high_bucket",
-    "model": "production_v4"
+    "model": "production_v5",
+    "bettable_props": [
+      "receptions",
+      "receiving_yards",
+      "rushing_yards",
+      "passing_yards"
+    ]
   },
   "stats": {
     "receptions": {
       "enabled": true,
       "high_enabled": true,
-      "alpha": 0.95,
+      "alpha": 0.9,
       "high_knee": 0.52,
-      "high_factor": 0.75,
-      "brier_raw": 0.10689,
-      "brier_cal": 0.10594,
-      "val_brier": 0.10594
+      "high_factor": 0.85,
+      "brier_raw": 0.11327,
+      "brier_cal": 0.11175,
+      "val_brier": 0.11175,
+      "bettable": true,
+      "oos_brier_raw": 0.11865,
+      "oos_brier_posthoc": 0.11693
     },
     "receiving_yards": {
       "enabled": true,
       "high_enabled": true,
-      "alpha": 0.95,
+      "alpha": 0.9,
       "high_knee": 0.52,
-      "high_factor": 0.45,
-      "brier_raw": 0.09344,
-      "brier_cal": 0.09197,
-      "val_brier": 0.09197
+      "high_factor": 0.65,
+      "brier_raw": 0.10019,
+      "brier_cal": 0.09852,
+      "val_brier": 0.09852,
+      "bettable": true,
+      "oos_brier_raw": 0.10432,
+      "oos_brier_posthoc": 0.10269
     },
     "rushing_yards": {
-      "enabled": true,
-      "high_enabled": true,
-      "alpha": 0.95,
-      "high_knee": 0.55,
-      "high_factor": 0.85,
-      "brier_raw": 0.06817,
-      "brier_cal": 0.06741,
-      "val_brier": 0.06741
+      "enabled": false,
+      "high_enabled": false,
+      "alpha": 1.0,
+      "brier_raw": 0.05983,
+      "brier_cal": 0.05983,
+      "val_brier": 0.05983,
+      "bettable": true,
+      "oos_brier_raw": 0.06237,
+      "oos_brier_posthoc": 0.06237
     },
     "passing_yards": {
       "enabled": true,
       "high_enabled": true,
       "alpha": 0.9,
       "high_knee": 0.52,
-      "high_factor": 0.75,
-      "brier_raw": 0.18794,
-      "brier_cal": 0.18634,
-      "val_brier": 0.18634
+      "high_factor": 0.65,
+      "brier_raw": 0.19118,
+      "brier_cal": 0.1894,
+      "val_brier": 0.1894,
+      "bettable": true,
+      "oos_brier_raw": 0.19639,
+      "oos_brier_posthoc": 0.1944
     },
     "completions": {
       "enabled": false,
       "high_enabled": false,
       "alpha": 1.0,
-      "brier_raw": 0.17736,
-      "brier_cal": 0.17736,
-      "val_brier": 0.17736
+      "brier_raw": 0.18108,
+      "brier_cal": 0.18108,
+      "val_brier": 0.18108,
+      "bettable": false,
+      "oos_brier_raw": 0.1888,
+      "oos_brier_posthoc": 0.1888
     },
     "attempts": {
       "enabled": false,
       "high_enabled": false,
       "alpha": 1.0,
-      "brier_raw": 0.15028,
-      "brier_cal": 0.15028,
-      "val_brier": 0.15028
+      "brier_raw": 0.14075,
+      "brier_cal": 0.14075,
+      "val_brier": 0.14075,
+      "bettable": false,
+      "oos_brier_raw": 0.14773,
+      "oos_brier_posthoc": 0.14773
     },
     "anytime_td": {
       "enabled": false,
       "high_enabled": false,
       "alpha": 1.0,
-      "brier_raw": 0.05353,
-      "brier_cal": 0.05353,
-      "val_brier": 0.05353
+      "brier_raw": 0.05304,
+      "brier_cal": 0.05304,
+      "val_brier": 0.05304,
+      "bettable": false,
+      "oos_brier_raw": 0.05264,
+      "oos_brier_posthoc": 0.05264
     }
   }
 }

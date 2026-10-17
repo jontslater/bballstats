@@ -172,12 +172,10 @@ def get_bettable_stat_types(sport: str) -> List[str]:
         bettable_stats = ['points', 'rebounds', 'assists', 'three_pointers_made', 'pts+ast+reb']
         return [s for s in all_stats if s in bettable_stats]
     elif sport == 'NFL':
-        excluded = ['snaps_played', 'snap_percentage', 'interceptions']
-        primary = [
-            'passing_yards', 'rushing_yards', 'receiving_yards', 'receptions',
-            'completions', 'attempts', 'rushing_attempts', 'anytime_td',
-        ]
-        return [s for s in primary if s in all_stats or s == 'anytime_td']
+        from app.services.nfl_bettable_props import get_nfl_bettable_stat_types
+
+        allow = get_nfl_bettable_stat_types()
+        return [s for s in allow if s in all_stats]
     elif sport == 'MLB':
         # Bettable: hits, home_runs, total_bases, strikeouts
         bettable_stats = ['hits', 'home_runs', 'total_bases', 'strikeouts']

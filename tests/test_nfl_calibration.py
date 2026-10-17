@@ -230,6 +230,30 @@ class TestNFLTailAndSymmetry(unittest.TestCase):
             self.assertAlmostEqual(cp + cq, 1.0, delta=0.001)
 
 
+class TestNFLBettableProps(unittest.TestCase):
+    def test_default_allowlist_excludes_failed_calibration_props(self):
+        from app.services.nfl_bettable_props import (
+            DEFAULT_NFL_BETTABLE_PROPS,
+            get_nfl_bettable_stat_types,
+        )
+
+        props = get_nfl_bettable_stat_types()
+        self.assertIn("receiving_yards", props)
+        self.assertNotIn("completions", props)
+        self.assertNotIn("attempts", props)
+        self.assertEqual(set(DEFAULT_NFL_BETTABLE_PROPS), set(props) & set(DEFAULT_NFL_BETTABLE_PROPS))
+
+    def test_env_override(self):
+        import os
+        from app.services.nfl_bettable_props import get_nfl_bettable_stat_types
+
+        os.environ["NFL_BETTABLE_PROPS"] = "receptions,anytime_td"
+        try:
+            self.assertEqual(get_nfl_bettable_stat_types(), ["receptions", "anytime_td"])
+        finally:
+            del os.environ["NFL_BETTABLE_PROPS"]
+
+
 class TestNFLEligibilityUsage(unittest.TestCase):
     def test_wr_usage_qualifies_without_lineup(self):
         from app.services.nfl_eligibility import nfl_player_role_eligible
@@ -267,6 +291,7 @@ class TestNFLEligibilityUsage(unittest.TestCase):
                         targets=8,
                         receptions=5,
                         receiving_yards=70,
+                        snap_percentage=62,
                     )
                 )
             db.commit()

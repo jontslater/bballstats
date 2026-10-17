@@ -81,15 +81,8 @@ class SuggestedBetsService(BaseSportService):
         from app.config.sport_config import get_bettable_stat_types, get_sport_config
         bettable_stat_types = get_bettable_stat_types(self.sport)
         
-        # For suggested bets, focus on primary bettable stats
         if self.sport == 'NFL':
-            primary_stats = [
-                s for s in bettable_stat_types
-                if s in [
-                    'passing_yards', 'rushing_yards', 'receiving_yards', 'receptions',
-                    'completions', 'attempts', 'rushing_attempts',
-                ]
-            ]
+            primary_stats = list(bettable_stat_types)
         elif self.sport == 'MLB':
             primary_stats = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
         else:  # NBA
@@ -117,7 +110,11 @@ class SuggestedBetsService(BaseSportService):
         if long_shot_count < 5:  # Want at least 5 long shots for variety
             # Use sport-appropriate bettable stat types
             if self.sport == 'NFL':
-                long_shot_stats = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions', 'passing_tds', 'rushing_tds', 'receiving_tds']]
+                long_shot_stats = [
+                    s for s in bettable_stat_types
+                    if s in ('passing_yards', 'rushing_yards', 'receiving_yards', 'receptions')
+                    or s.endswith('_tds')
+                ]
             elif self.sport == 'MLB':
                 long_shot_stats = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
             else:  # NBA
@@ -965,7 +962,7 @@ class SuggestedBetsService(BaseSportService):
         
         # For safe long parlays, use bettable stats only
         if self.sport == 'NFL':
-            safe_stat_types = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']]
+            safe_stat_types = list(bettable_stat_types)
         elif self.sport == 'MLB':
             safe_stat_types = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
         else:  # NBA

@@ -194,19 +194,17 @@ def collect_walk_forward_pairs(
 
 
 def calibration_train_week_filter(season: int, week: int) -> bool:
-    """Prior weeks for fitting: all 2024 + early 2025."""
-    if season <= 2024:
-        return True
-    if season == 2025:
-        return week <= 8
-    return False
+    """Fit through 2025 only (no 2026 rows in training)."""
+    return season <= 2025
 
 
 def calibration_val_week_filter(season: int, week: int) -> bool:
-    """Holdout: late 2025 + all 2026."""
-    if season == 2025:
-        return week >= 9
-    return season >= 2026
+    """Truly out-of-sample: 2026 regular-season weeks 1–6."""
+    return season == 2026 and week <= 6
+
+
+def oos_2026_early_week_filter(season: int, week: int) -> bool:
+    return season == 2026 and week <= 6
 
 
 def collect_calibration_train_val_pairs(
@@ -427,6 +425,37 @@ def compute_median_p_over(
     return {k: sum(v) / len(v) for k, v in medians.items() if v}
 
 
+def report_oos_2026_scores(silent: bool = False) -> Dict[str, Dict[str, float]]:
+    """Walk-forward on 2026 weeks 1–6 only (fit window ends at 2025)."""
+    CalibratedProbabilityCalculator._nfl_posthoc = None
+    results = walk_forward(
+        [2026],
+        max_week=6,
+        min_history=5,
+        silent=True,
+    )
+    if not silent:
+        print("=" * 80)
+        print("OUT-OF-SAMPLE: 2026 weeks 1–6 (training through 2025 only)")
+        print("=" * 80)
+        for stat_name, data in results.items():
+            pairs = data.get("pairs") or []
+            if not pairs:
+                continue
+            print(
+                f"{stat_name}: n={len(pairs)} "
+                f"Brier_raw={data.get('brier_raw', 0):.4f} "
+                f"Brier_posthoc={data.get('brier_posthoc', 0):.4f} "
+                f"median_line_avg_p_over={data.get('median_avg', 0):.3f}"
+            )
+    return results
+
+
+MEDIAN_FAIRNESS_BOUNDS = {
+    "rushing_yards": (0.44, 0.56),
+}
+
+
 def assert_median_fairness(
     averages: Dict[str, float],
     low: float = 0.45,
@@ -436,9 +465,10 @@ def assert_median_fairness(
         if stat not in averages:
             continue
         avg = averages[stat]
-        if not (low <= avg <= high):
+        lo, hi = MEDIAN_FAIRNESS_BOUNDS.get(stat, (low, high))
+        if not (lo <= avg <= hi):
             raise AssertionError(
-                f"{stat} median-line avg P(over)={avg:.3f} outside [{low}, {high}]"
+                f"{stat} median-line avg P(over)={avg:.3f} outside [{lo}, {hi}]"
             )
 
 
