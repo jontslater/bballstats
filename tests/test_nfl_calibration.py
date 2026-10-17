@@ -173,7 +173,8 @@ class TestNFLMedianSymmetry(unittest.TestCase):
     def test_yards_near_median_fifty_fifty(self):
         calc = CalibratedProbabilityCalculator(sport="NFL")
         mean = 248.0
-        line = round(mean * 2) / 2 - 0.5
+        median = 235.0
+        line = round(median * 2) / 2 - 0.5
         out = calc.calculate_probability_for_line(
             line=line,
             player_mean=mean,
@@ -182,10 +183,21 @@ class TestNFLMedianSymmetry(unittest.TestCase):
             stat_type="passing_yards",
             league_mean=220.0,
             player_role="QB",
+            player_median=median,
             apply_posthoc=False,
         )
         self.assertGreater(out["probability"], 0.42)
         self.assertLess(out["probability"], 0.58)
+
+    def test_backtest_median_line_fairness(self):
+        import importlib.util
+
+        path = Path(__file__).parent.parent / "scripts" / "backtest_nfl_calibration.py"
+        spec = importlib.util.spec_from_file_location("backtest_nfl_calibration", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        averages = mod.compute_median_p_over([2024], max_week=18, min_history=5)
+        mod.assert_median_fairness(averages, low=0.45, high=0.55)
 
 
 class TestNFLTailAndSymmetry(unittest.TestCase):
@@ -220,7 +232,7 @@ class TestNFLPosthocFitter(unittest.TestCase):
         from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
 
         pairs = [(0.55, 1), (0.45, 0)] * 120
-        res = NFLPosthocCalibrator.fit_symmetric_alpha(pairs, min_samples=100)
+        res = NFLPosthocCalibrator.fit_symmetric_alpha_holdout(pairs, min_samples=100)
         self.assertIsNotNone(res)
         self.assertFalse(res.get("enabled", True))
 

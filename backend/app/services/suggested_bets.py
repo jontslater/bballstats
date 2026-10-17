@@ -151,7 +151,11 @@ class SuggestedBetsService(BaseSportService):
                 if pred.sample_size is not None and pred.sample_size < 5:
                     continue
                 ok, _reason = nfl_player_role_eligible(
-                    self.db, pred.player_id, pred.stat_type, min_games=5
+                    self.db,
+                    pred.player_id,
+                    pred.stat_type,
+                    min_games=5,
+                    game_id=pred.game_id,
                 )
                 if not ok:
                     continue

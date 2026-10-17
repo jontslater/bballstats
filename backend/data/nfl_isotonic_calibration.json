@@ -1,54 +1,67 @@
 {
   "meta": {
     "seasons": [
-      2024,
-      2025
+      2024
     ],
     "method": "symmetric_alpha_walk_forward",
-    "model": "production_v2"
+    "model": "production_v3"
   },
   "stats": {
     "receptions": {
       "enabled": true,
       "alpha": 0.9,
-      "brier_raw": 0.15353,
-      "brier_cal": 0.15256
+      "brier_raw": 0.15213,
+      "brier_cal": 0.15105,
+      "holdout_raw": 0.15134,
+      "holdout_cal": 0.15001
     },
     "receiving_yards": {
       "enabled": true,
       "alpha": 0.9,
-      "brier_raw": 0.16209,
-      "brier_cal": 0.16103
+      "brier_raw": 0.14852,
+      "brier_cal": 0.14678,
+      "holdout_raw": 0.14323,
+      "holdout_cal": 0.14155
     },
     "rushing_yards": {
-      "enabled": true,
-      "alpha": 0.9,
-      "brier_raw": 0.14305,
-      "brier_cal": 0.14158
-    },
-    "passing_yards": {
       "enabled": false,
       "alpha": 1.0,
-      "brier_raw": 0.20438,
-      "brier_cal": 0.20438
+      "brier_raw": 0.14428,
+      "brier_cal": 0.1387,
+      "holdout_raw": 0.14266,
+      "holdout_cal": 0.13688
+    },
+    "passing_yards": {
+      "enabled": true,
+      "alpha": 0.7,
+      "brier_raw": 0.22077,
+      "brier_cal": 0.21374,
+      "holdout_raw": 0.22221,
+      "holdout_cal": 0.21593
     },
     "completions": {
       "enabled": true,
-      "alpha": 0.95,
-      "brier_raw": 0.19049,
-      "brier_cal": 0.19033
+      "alpha": 0.9,
+      "brier_raw": 0.19386,
+      "brier_cal": 0.19254,
+      "holdout_raw": 0.20794,
+      "holdout_cal": 0.2056
     },
     "attempts": {
       "enabled": false,
       "alpha": 1.0,
-      "brier_raw": 0.16437,
-      "brier_cal": 0.16437
+      "brier_raw": 0.17026,
+      "brier_cal": 0.17026,
+      "holdout_raw": 0.17084,
+      "holdout_cal": 0.17022
     },
     "anytime_td": {
       "enabled": false,
       "alpha": 1.0,
-      "brier_raw": 0.09508,
-      "brier_cal": 0.09508
+      "brier_raw": 0.16573,
+      "brier_cal": 0.16573,
+      "holdout_raw": 0.16869,
+      "holdout_cal": 0.16869
     }
   }
 }

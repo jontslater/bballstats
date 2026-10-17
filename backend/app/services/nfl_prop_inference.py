@@ -54,10 +54,12 @@ def get_nfl_adjusted_distribution(
     if pred and pred.distribution_mean is not None and pred.distribution_std_dev is not None:
         player = db.query(Player).filter(Player.player_id == player_id).first()
         game = db.query(Game).filter(Game.game_id == game_id).first()
+        med = pred.percentile_50 if pred.percentile_50 else pred.distribution_mean
         return {
             "adjusted_mean": float(pred.distribution_mean),
             "adjusted_std": float(pred.distribution_std_dev),
             "sample_size": int(pred.sample_size or 5),
+            "player_median": float(med) if med is not None else None,
             "player": player,
             "game": game,
             "player_role": role_for_position(player.position if player else None),
@@ -93,6 +95,7 @@ def compute_nfl_line_probabilities(
         league_mean=league_mean,
         league_std=league_std,
         player_role=ctx.get("player_role"),
+        player_median=ctx.get("player_median"),
         apply_posthoc=False,
     )
     model_p = modeled["probability"]

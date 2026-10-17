@@ -38,6 +38,13 @@ NFL_COUNT_DISPERSION = {
     'anytime_td': 1.60,
 }
 
+NFL_SKEWED_YARDAGE_STATS = frozenset({
+    'passing_yards', 'rushing_yards', 'receiving_yards', 'receptions',
+})
+
+NFL_QB_COUNT_COMPRESSION_KNEE = 0.62
+NFL_QB_COUNT_COMPRESSION_FACTOR = 0.42
+
 # High-end compression to fix overshoot at p >= 0.65
 # Compresses probabilities above knee_point by shrinking excess over base rate
 # Set via environment for tuning (defaults calibrated from desktop backtest)
@@ -104,6 +111,33 @@ class CalibratedProbabilityCalculator:
         """Initialize with sport-specific parameters."""
         self.sport = sport
     
+    def _nfl_skewed_over_probability(
+        self,
+        line: float,
+        player_mean: float,
+        player_median: Optional[float],
+        player_std: float,
+        stat_type: Optional[str] = None,
+    ) -> float:
+        """Right-skewed yardage/reception model: log-normal anchored at player median."""
+        med = float(player_median) if player_median and player_median > 0 else float(player_mean)
+        mean = max(float(player_mean), med)
+        med = max(med, 0.001)
+        ratio = mean / med
+        if ratio > 1.02:
+            sigma = float(np.sqrt(2.0 * np.log(ratio)))
+        elif player_std and mean > 0:
+            sigma = float(np.sqrt(np.log(1.0 + (player_std / mean) ** 2)))
+        else:
+            sigma = 0.35
+        if stat_type == "rushing_yards":
+            std = float(player_std) if player_std and player_std > 0 else med * 0.28
+            std = float(np.clip(std, med * 0.18, med * 0.45))
+            loc = max(med * 0.96, 0.5)
+            return float(1.0 - stats.norm.cdf(line + 0.5, loc=loc, scale=std))
+        sigma = float(np.clip(sigma, 0.12, 0.72))
+        return float(1.0 - stats.lognorm.cdf(line + 0.5, s=sigma, scale=med))
+
     def _nfl_count_over_probability(
         self,
         shrunk_rate: float,
@@ -111,22 +145,34 @@ class CalibratedProbabilityCalculator:
         sample_size: int,
         line: float,
         stat_type: str,
+        player_median: Optional[float] = None,
     ) -> float:
-        """P(X > line) for NFL count props; thinner tails than over-dispersed NB."""
+        """P(X > line) for NFL count props."""
         rate = max(shrunk_rate, 0.001)
+        if stat_type in ('receptions', 'rushing_attempts'):
+            return self._nfl_skewed_over_probability(
+                line, rate, player_median, player_std, stat_type=stat_type
+            )
         if sample_size >= 5 and player_std and player_std > 0:
+            loc = float(player_median) if player_median and player_median > 0 else rate
             std = float(player_std)
             std = max(std, rate ** 0.5 * 0.75)
             std = min(std, rate * 0.5 + 4.0)
-            return float(1.0 - stats.norm.cdf(line + 0.5, loc=rate, scale=std))
-        dispersion = NFL_COUNT_DISPERSION.get(stat_type, 1.25)
-        if dispersion > 1.35:
-            variance = min(dispersion * rate, rate * 1.35)
-            if variance > rate:
-                r = (rate ** 2) / (variance - rate)
-                p_nb = rate / variance
-                return float(1.0 - stats.nbinom.cdf(int(line), r, p_nb))
-        return float(1.0 - stats.poisson.cdf(int(line), rate))
+            prob = float(1.0 - stats.norm.cdf(line + 0.5, loc=loc, scale=std))
+        else:
+            prob = float(1.0 - stats.poisson.cdf(int(line), rate))
+        if stat_type in ('attempts', 'pass_attempts', 'completions') and prob > NFL_QB_COUNT_COMPRESSION_KNEE:
+            prob = NFL_QB_COUNT_COMPRESSION_KNEE + (
+                prob - NFL_QB_COUNT_COMPRESSION_KNEE
+            ) * NFL_QB_COUNT_COMPRESSION_FACTOR
+        return prob
+
+    def _nfl_apply_qb_count_compression(self, prob: float, stat_type: str) -> float:
+        if stat_type in ('attempts', 'pass_attempts', 'completions') and prob > NFL_QB_COUNT_COMPRESSION_KNEE:
+            return NFL_QB_COUNT_COMPRESSION_KNEE + (
+                prob - NFL_QB_COUNT_COMPRESSION_KNEE
+            ) * NFL_QB_COUNT_COMPRESSION_FACTOR
+        return prob
 
     def _apply_high_end_compression(
         self,
@@ -164,6 +210,7 @@ class CalibratedProbabilityCalculator:
         league_mean: Optional[float] = None,
         league_std: Optional[float] = None,
         player_role: Optional[str] = None,
+        player_median: Optional[float] = None,
         apply_posthoc: bool = True,
     ) -> Dict[str, float]:
         """
@@ -211,10 +258,12 @@ class CalibratedProbabilityCalculator:
                         prob = 1.0 - stats.poisson.cdf(int(line), rate)
                 else:
                     prob = self._nfl_count_over_probability(
-                        shrunk_rate, player_std, sample_size, line, stat_type
+                        shrunk_rate, player_std, sample_size, line, stat_type, player_median
                     )
             except (ValueError, ZeroDivisionError):
                 prob = 0.5
+
+            prob = self._nfl_apply_qb_count_compression(prob, stat_type)
 
             if sample_size < 30 and prob > 0.85:
                 prob = 0.85
@@ -317,17 +366,18 @@ class CalibratedProbabilityCalculator:
             player_std, sample_size, league_std
         )
         
-        # Use Student-t for small samples, Normal for large samples
-        if sample_size < 30:
-            # Student-t distribution with df = sample_size - 1
+        if self.sport == 'NFL' and stat_type in NFL_SKEWED_YARDAGE_STATS:
+            med = player_median if player_median and player_median > 0 else shrunk_mean
+            raw_prob = self._nfl_skewed_over_probability(
+                line, player_mean, med, effective_std, stat_type=stat_type
+            )
+        elif sample_size < 30:
             df = max(sample_size - 1, 1)
             standardized = (line - shrunk_mean) / effective_std
             raw_prob = 1.0 - stats.t.cdf(standardized, df)
         else:
-            # Normal distribution for large samples
             raw_prob = 1.0 - stats.norm.cdf(line, loc=shrunk_mean, scale=effective_std)
-        
-        # NFL yardage props: keep symmetric around player mean (no league hit-rate pull)
+
         if self.sport == 'NFL':
             modeled_prob = max(0.01, min(0.99, raw_prob))
             calibrated_prob = (

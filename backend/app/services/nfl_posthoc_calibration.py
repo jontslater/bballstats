@@ -83,6 +83,69 @@ class NFLPosthocCalibrator:
             "brier_cal": round(best_brier, 5),
         }
 
+    @staticmethod
+    def fit_symmetric_alpha_holdout(
+        pairs: list,
+        min_samples: int = 200,
+        holdout_frac: float = 0.25,
+        grid: Optional[list] = None,
+    ) -> Optional[Dict]:
+        """Fit alpha on train split; enable only if holdout Brier improves vs raw."""
+        if not pairs or len(pairs) < min_samples:
+            return None
+        if grid is None:
+            grid = [round(x, 2) for x in [1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5]]
+
+        split = max(int(len(pairs) * (1.0 - holdout_frac)), min_samples // 2)
+        train = pairs[:split]
+        test = pairs[split:]
+        if len(test) < 80:
+            test = pairs[-max(80, len(pairs) // 5) :]
+            train = pairs[: len(pairs) - len(test)]
+
+        def brier_on(pr: list, alpha: float) -> float:
+            total = 0.0
+            for p_raw, y in pr:
+                p = max(0.01, min(0.99, 0.5 + alpha * (p_raw - 0.5)))
+                total += (p - y) ** 2
+            return total / len(pr)
+
+        def best_alpha_for(pr: list) -> float:
+            best_a = 1.0
+            best_b = brier_on(pr, 1.0)
+            for alpha in grid:
+                if alpha <= 0:
+                    continue
+                b = brier_on(pr, alpha)
+                if b < best_b - 1e-6:
+                    best_b = b
+                    best_a = alpha
+            return best_a
+
+        alpha = best_alpha_for(train)
+        raw_test = brier_on(test, 1.0)
+        cal_test = brier_on(test, alpha)
+        raw_all = brier_on(pairs, 1.0)
+
+        cal_all = brier_on(pairs, alpha)
+        if cal_test >= raw_test - 0.001 or cal_all >= raw_all - 0.001:
+            return {
+                "enabled": False,
+                "alpha": 1.0,
+                "brier_raw": round(raw_all, 5),
+                "brier_cal": round(raw_all, 5),
+                "holdout_raw": round(raw_test, 5),
+                "holdout_cal": round(cal_test, 5),
+            }
+        return {
+            "enabled": True,
+            "alpha": round(alpha, 3),
+            "brier_raw": round(raw_all, 5),
+            "brier_cal": round(cal_all, 5),
+            "holdout_raw": round(raw_test, 5),
+            "holdout_cal": round(cal_test, 5),
+        }
+
     def save(self, stats_maps: Dict[str, Dict], meta: Optional[Dict] = None) -> None:
         payload = {"meta": meta or {}, "stats": stats_maps}
         self.params_path.parent.mkdir(parents=True, exist_ok=True)

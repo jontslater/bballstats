@@ -106,6 +106,7 @@ class BetDefinitions:
             'league_mean': league_mean,
             'league_std': league_std,
             'player_role': player_role,
+            'player_median': median_line,
         }
         standard_data = self.calibrator.calculate_probability_for_line(
             standard_line, adjusted_mean, adjusted_std, sample_size, stat_type, **calc_kwargs

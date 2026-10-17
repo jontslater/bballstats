@@ -1512,10 +1512,14 @@ class PredictionService:
 
         from app.services.nfl_position_priors import role_for_position
 
+        pct = base_dist.get("percentiles") or {}
+        player_median = pct.get(50) or base_dist.get("mean")
+
         return {
             "adjusted_mean": float(mean_adjustments["adjusted_mean"]),
             "adjusted_std": float(variance_adjustments["adjusted_std"]),
             "sample_size": int(base_dist["sample_size"]),
+            "player_median": float(player_median) if player_median is not None else None,
             "player": player,
             "game": game,
             "player_role": role_for_position(player.position),
