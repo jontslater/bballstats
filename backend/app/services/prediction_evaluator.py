@@ -18,6 +18,40 @@ class PredictionEvaluator:
     
     def __init__(self, db: Session):
         self.db = db
+
+    @staticmethod
+    def _nfl_actual_value(stat: PlayerGameStat, stat_type: str) -> Optional[float]:
+        mapping = {
+            'passing_yards': stat.passing_yards,
+            'passing_tds': stat.passing_tds,
+            'interceptions': stat.interceptions,
+            'completions': stat.completions,
+            'attempts': stat.pass_attempts,
+            'pass_attempts': stat.pass_attempts,
+            'rushing_yards': stat.rushing_yards,
+            'rushing_tds': stat.rushing_tds,
+            'rushing_attempts': stat.rushing_attempts,
+            'receptions': stat.receptions,
+            'receiving_yards': stat.receiving_yards,
+            'receiving_tds': stat.receiving_tds,
+            'targets': stat.targets,
+        }
+        if stat_type == 'anytime_td':
+            return float((stat.rushing_tds or 0) + (stat.receiving_tds or 0))
+        if stat_type in mapping:
+            val = mapping[stat_type]
+            return float(val) if val is not None else None
+        return None
+
+    @staticmethod
+    def _nfl_player_played(stat: PlayerGameStat) -> bool:
+        return any([
+            (stat.snaps_played or 0) > 0,
+            (stat.pass_attempts or 0) > 0,
+            (stat.rushing_attempts or 0) > 0,
+            (stat.targets or 0) > 0,
+            (stat.receptions or 0) > 0,
+        ])
     
     def evaluate_prediction(self, prediction: Prediction) -> Dict[str, any]:
         """
@@ -85,6 +119,8 @@ class PredictionEvaluator:
             actual_value = stat.total_bases if stat.total_bases is not None else None
         elif prediction.stat_type == 'strikeouts':
             actual_value = stat.strikeouts if stat.strikeouts is not None else None
+        elif prediction.sport == 'NFL':
+            actual_value = self._nfl_actual_value(stat, prediction.stat_type)
 
         # Only skip if actual_value is None (not if it's 0, which is valid)
         if actual_value is None:
@@ -383,6 +419,8 @@ class PredictionEvaluator:
                     played = True
                 elif (stat.at_bats is not None and stat.at_bats > 0) or (stat.innings_pitched is not None and stat.innings_pitched > 0):
                     played = True
+                elif self._nfl_player_played(stat):
+                    played = True
                 if played:
                     # Player played - get actual stat if we don't have it
                     if actual_result is None:
@@ -419,6 +457,8 @@ class PredictionEvaluator:
                             actual_result = stat.total_bases if stat.total_bases is not None else None
                         elif pred.stat_type == 'strikeouts':
                             actual_result = stat.strikeouts if stat.strikeouts is not None else None
+                        elif pred.sport == 'NFL':
+                            actual_result = self._nfl_actual_value(stat, pred.stat_type)
                 else:
                     # Player has stats but minutes_played is 0 or None - they didn't play
                     is_void = True

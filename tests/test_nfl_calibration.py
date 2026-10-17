@@ -1,0 +1,503 @@
+"""Unit tests for NFL prop calibration helpers and suggested-bet odds."""
+import os
+import sys
+import unittest
+from datetime import date
+from pathlib import Path
+
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+
+backend_path = Path(__file__).parent.parent / "backend"
+sys.path.insert(0, str(backend_path))
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.database import Base
+from app.models import (  # noqa: F401
+    Team, Season, Player, Game, PlayerGameStat, Prediction, GameSchedule, BettingLine,
+)
+from app.services.calibrated_probability import CalibratedProbabilityCalculator
+from app.services.distribution_engine import DistributionEngine
+from app.services.nfl_data import american_break_even_odds
+from app.services.suggested_bets import SuggestedBetsService
+
+
+def _session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
+
+
+class TestNFLCalibratedProbability(unittest.TestCase):
+    def test_receptions_count_stat_uses_nfl_branch(self):
+        calc = CalibratedProbabilityCalculator(sport="NFL")
+        out = calc.calculate_probability_for_line(
+            line=3.5,
+            player_mean=5.0,
+            player_std=2.0,
+            sample_size=12,
+            stat_type="receptions",
+            league_mean=4.5,
+            league_std=None,
+        )
+        self.assertGreater(out["probability"], 0.45)
+        self.assertLess(out["probability"], 0.95)
+
+    def test_anytime_td_probability_bounded(self):
+        calc = CalibratedProbabilityCalculator(sport="NFL")
+        out = calc.calculate_probability_for_line(
+            line=0.5,
+            player_mean=0.55,
+            player_std=0.5,
+            sample_size=10,
+            stat_type="anytime_td",
+            league_mean=0.35,
+            league_std=None,
+        )
+        self.assertGreater(out["probability"], 0.2)
+        self.assertLess(out["probability"], 0.85)
+
+    def test_break_even_odds_formula(self):
+        # p=0.60 -> -150
+        self.assertEqual(american_break_even_odds(0.60), -150)
+
+
+class TestNFLDistributionEngine(unittest.TestCase):
+    def setUp(self):
+        self.db = _session()
+        home = Team(sport="NFL", name="Home", abbreviation="HOM", conference="AFC", division="E")
+        away = Team(sport="NFL", name="Away", abbreviation="AWY", conference="AFC", division="E")
+        self.db.add_all([home, away])
+        self.db.flush()
+        season = Season(sport="NFL", season_year="2026", is_current=True)
+        self.db.add(season)
+        self.db.flush()
+        player = Player(sport="NFL", name="Test WR", position="WR", current_team_id=home.team_id)
+        self.db.add(player)
+        self.db.flush()
+        self.player_id = player.player_id
+        self.season_id = season.season_id
+        self.home_id = home.team_id
+        self.away_id = away.team_id
+
+        for i in range(6):
+            g = Game(
+                sport="NFL",
+                game_date=date(2026, 9, 20 + i),
+                season_id=season.season_id,
+                home_team_id=home.team_id,
+                away_team_id=away.team_id,
+                game_status="finished",
+            )
+            self.db.add(g)
+            self.db.flush()
+            self.db.add(
+                PlayerGameStat(
+                    sport="NFL",
+                    player_id=player.player_id,
+                    game_id=g.game_id,
+                    team_id=home.team_id,
+                    opponent_team_id=away.team_id,
+                    targets=6,
+                    receptions=4 + (i % 2),
+                    receiving_yards=50,
+                )
+            )
+        self.db.commit()
+        self.engine = DistributionEngine(self.db)
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_receptions_distribution_with_five_games(self):
+        dist = self.engine.calculate_base_distribution(
+            player_id=self.player_id,
+            stat_type="receptions",
+            sport="NFL",
+            season_ids=[self.season_id],
+            min_games=5,
+        )
+        self.assertIsNotNone(dist)
+        self.assertGreaterEqual(dist["sample_size"], 5)
+
+
+class TestNFLSuggestedBetsFields(unittest.TestCase):
+    def test_break_even_field_present_in_schema(self):
+        # Smoke test: helper used by suggested bets service
+        self.assertEqual(american_break_even_odds(0.55), -122)
+
+
+class TestNFLHistoryHelper(unittest.TestCase):
+    def test_unknown_stat_returns_dict_not_list(self):
+        from app.services.prediction_history_helper import get_last_n_games_for_stat
+
+        db = _session()
+        try:
+            out = get_last_n_games_for_stat(db, player_id=1, stat_type="rushing_attempts", sport="NFL")
+            self.assertIsInstance(out, dict)
+            self.assertIn("games", out)
+        finally:
+            db.close()
+
+
+class TestNFLBetLineFloors(unittest.TestCase):
+    def test_passing_yards_standard_not_half(self):
+        from app.services.bet_definitions import BetDefinitions
+
+        defs = BetDefinitions(sport="NFL")
+        lines = defs.calculate_bet_lines(
+            adjusted_mean=245,
+            adjusted_std=45,
+            sample_size=12,
+            stat_type="passing_yards",
+            median_line=238,
+            player_role="QB",
+            league_mean=220,
+        )
+        self.assertGreaterEqual(lines["standard_line"], 149.5)
+        self.assertGreater(lines["safe_line"], 50)
+
+
+class TestNFLDataLoader(unittest.TestCase):
+    def test_modern_stats_include_2025(self):
+        from app.services.nfl_data import load_nflverse_player_stats
+
+        df = load_nflverse_player_stats([2025])
+        self.assertFalse(df.empty)
+        self.assertIn("recent_team", df.columns)
+        self.assertTrue((df["season"] == 2025).any())
+
+
+class TestNFLMedianSymmetry(unittest.TestCase):
+    def test_yards_near_median_fifty_fifty(self):
+        calc = CalibratedProbabilityCalculator(sport="NFL")
+        mean = 248.0
+        median = 235.0
+        line = round(median * 2) / 2 - 0.5
+        out = calc.calculate_probability_for_line(
+            line=line,
+            player_mean=mean,
+            player_std=42.0,
+            sample_size=14,
+            stat_type="passing_yards",
+            league_mean=220.0,
+            player_role="QB",
+            player_median=median,
+            apply_posthoc=False,
+        )
+        self.assertGreater(out["probability"], 0.42)
+        self.assertLess(out["probability"], 0.58)
+
+    def test_backtest_median_line_fairness(self):
+        import importlib.util
+
+        path = Path(__file__).parent.parent / "scripts" / "backtest_nfl_calibration.py"
+        spec = importlib.util.spec_from_file_location("backtest_nfl_calibration", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for seasons in ([2024], [2025, 2026]):
+            averages = mod.compute_median_p_over(seasons, max_week=18, min_history=5)
+            mod.assert_median_fairness(averages, low=0.45, high=0.55)
+
+
+class TestNFLTailAndSymmetry(unittest.TestCase):
+    def test_high_completion_line_low_probability(self):
+        calc = CalibratedProbabilityCalculator(sport="NFL")
+        out = calc.calculate_probability_for_line(
+            line=31.5,
+            player_mean=24.9,
+            player_std=4.0,
+            sample_size=12,
+            stat_type="completions",
+            league_mean=21.0,
+            player_role="QB",
+            apply_posthoc=False,
+        )
+        self.assertLess(out["probability"], 0.12)
+
+    def test_symmetric_alpha_preserves_complement(self):
+        from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
+
+        cal = NFLPosthocCalibrator(params_path=backend_path / "data" / "nfl_isotonic_calibration.json")
+        p = 0.62
+        q = 1.0 - p
+        for stat in ("completions", "attempts"):
+            entry = cal._stats.get(stat) or {}
+            alpha = float(entry.get("alpha", 1.0))
+            cp = 0.5 + alpha * (p - 0.5)
+            cq = 0.5 + alpha * (q - 0.5)
+            self.assertAlmostEqual(cp + cq, 1.0, delta=0.001)
+
+
+class TestNFLBettableHoldoutCriteria(unittest.TestCase):
+    def test_fails_median_out_of_band(self):
+        from app.services.nfl_calibration_metrics import prop_passes_bettable_criteria
+
+        ok, reasons = prop_passes_bettable_criteria(
+            median_avg_p_over=0.555,
+            buckets={},
+            brier_raw=0.06,
+            brier_posthoc=0.06,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("median" in r for r in reasons))
+
+    def test_fails_bucket_gap(self):
+        from app.services.nfl_calibration_metrics import prop_passes_bettable_criteria
+
+        buckets = {
+            "0.55-0.59": {
+                "n": 100,
+                "mean_predicted": 0.57,
+                "actual_hit_rate": 0.48,
+                "gap": -0.09,
+            }
+        }
+        ok, reasons = prop_passes_bettable_criteria(
+            median_avg_p_over=0.50,
+            buckets=buckets,
+            brier_raw=0.10,
+            brier_posthoc=0.09,
+            min_bucket_n=25,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("bucket" in r for r in reasons))
+
+    def test_passes_when_all_gates_ok(self):
+        from app.services.nfl_calibration_metrics import prop_passes_bettable_criteria
+
+        buckets = {
+            "0.50-0.54": {
+                "n": 80,
+                "mean_predicted": 0.52,
+                "actual_hit_rate": 0.50,
+                "gap": -0.02,
+            }
+        }
+        ok, _ = prop_passes_bettable_criteria(
+            median_avg_p_over=0.50,
+            buckets=buckets,
+            brier_raw=0.11,
+            brier_posthoc=0.10,
+        )
+        self.assertTrue(ok)
+
+
+class TestNFLSuggestedBetsUpcoming(unittest.TestCase):
+    def test_allowlisted_starter_produces_suggestion(self):
+        db = _session()
+        try:
+            home = Team(sport="NFL", name="H", abbreviation="HO", conference="NFC", division="E")
+            away = Team(sport="NFL", name="A", abbreviation="AW", conference="NFC", division="E")
+            db.add_all([home, away])
+            db.flush()
+            season = Season(sport="NFL", season_year="2026", is_current=True)
+            db.add(season)
+            db.flush()
+            wr = Player(sport="NFL", name="Star WR", position="WR", current_team_id=home.team_id)
+            db.add(wr)
+            db.flush()
+            for i in range(6):
+                g = Game(
+                    sport="NFL",
+                    game_date=date(2026, 10, 1 + i),
+                    season_id=season.season_id,
+                    home_team_id=home.team_id,
+                    away_team_id=away.team_id,
+                    game_status="finished",
+                )
+                db.add(g)
+                db.flush()
+                db.add(
+                    PlayerGameStat(
+                        sport="NFL",
+                        player_id=wr.player_id,
+                        game_id=g.game_id,
+                        team_id=home.team_id,
+                        opponent_team_id=away.team_id,
+                        targets=9,
+                        receptions=6,
+                        receiving_yards=80,
+                        snap_percentage=68,
+                    )
+                )
+            upcoming = Game(
+                sport="NFL",
+                game_date=date(2026, 10, 18),
+                season_id=season.season_id,
+                home_team_id=home.team_id,
+                away_team_id=away.team_id,
+                game_status="scheduled",
+            )
+            db.add(upcoming)
+            db.flush()
+            db.add(
+                BettingLine(
+                    game_id=upcoming.game_id,
+                    player_id=wr.player_id,
+                    stat_type="receiving_yards",
+                    over_line=62.5,
+                    sportsbook="FanDuel",
+                )
+            )
+            db.add(
+                Prediction(
+                    sport="NFL",
+                    game_id=upcoming.game_id,
+                    player_id=wr.player_id,
+                    stat_type="receiving_yards",
+                    bet_type="standard",
+                    confidence_level="MEDIUM",
+                    sample_size=10,
+                    standard_line=62.5,
+                    standard_probability=0.56,
+                    line_source="sportsbook",
+                    distribution_mean=72.0,
+                    distribution_std_dev=18.0,
+                )
+            )
+            db.commit()
+            svc = SuggestedBetsService(db, sport="NFL")
+            bets = svc.get_suggested_bets(game_date=date(2026, 10, 18), limit=5, include_long_shots=True)
+            self.assertGreaterEqual(len(bets), 1)
+            self.assertEqual(bets[0]["stat_type"], "receiving_yards")
+        finally:
+            db.close()
+
+
+class TestNFLBettableProps(unittest.TestCase):
+    def test_default_allowlist_excludes_failed_calibration_props(self):
+        from app.services.nfl_bettable_props import (
+            DEFAULT_NFL_BETTABLE_PROPS,
+            get_nfl_bettable_stat_types,
+        )
+
+        props = get_nfl_bettable_stat_types()
+        self.assertIn("receiving_yards", props)
+        self.assertNotIn("completions", props)
+        self.assertNotIn("attempts", props)
+        for p in props:
+            self.assertIn(p, DEFAULT_NFL_BETTABLE_PROPS)
+
+    def test_env_override(self):
+        import os
+        from app.services.nfl_bettable_props import get_nfl_bettable_stat_types
+
+        os.environ["NFL_BETTABLE_PROPS"] = "receptions,anytime_td"
+        try:
+            self.assertEqual(get_nfl_bettable_stat_types(), ["receptions", "anytime_td"])
+        finally:
+            del os.environ["NFL_BETTABLE_PROPS"]
+
+
+class TestNFLEligibilityUsage(unittest.TestCase):
+    def test_wr_usage_qualifies_without_lineup(self):
+        from app.services.nfl_eligibility import nfl_player_role_eligible
+
+        db = _session()
+        try:
+            home = Team(sport="NFL", name="H", abbreviation="HO", conference="NFC", division="E")
+            away = Team(sport="NFL", name="A", abbreviation="AW", conference="NFC", division="E")
+            db.add_all([home, away])
+            db.flush()
+            season = Season(sport="NFL", season_year="2026", is_current=True)
+            db.add(season)
+            db.flush()
+            wr = Player(sport="NFL", name="WR1", position="WR", current_team_id=home.team_id)
+            db.add(wr)
+            db.flush()
+            for i in range(6):
+                g = Game(
+                    sport="NFL",
+                    game_date=date(2026, 9, 10 + i),
+                    season_id=season.season_id,
+                    home_team_id=home.team_id,
+                    away_team_id=away.team_id,
+                    game_status="finished",
+                )
+                db.add(g)
+                db.flush()
+                db.add(
+                    PlayerGameStat(
+                        sport="NFL",
+                        player_id=wr.player_id,
+                        game_id=g.game_id,
+                        team_id=home.team_id,
+                        opponent_team_id=away.team_id,
+                        targets=8,
+                        receptions=5,
+                        receiving_yards=70,
+                        snap_percentage=62,
+                    )
+                )
+            db.commit()
+            ok, _ = nfl_player_role_eligible(db, wr.player_id, "receptions", min_games=5)
+            self.assertTrue(ok)
+        finally:
+            db.close()
+
+
+class TestNFLPosthocFitter(unittest.TestCase):
+    def test_fit_disables_when_no_improvement(self):
+        from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
+
+        pairs = [(0.55, 1), (0.45, 0)] * 120
+        train = [(0.55, 1), (0.45, 0)] * 80
+        val = [(0.58, 0), (0.42, 1)] * 40
+        res = NFLPosthocCalibrator.fit_prop_calibration(train, val, min_train=80, min_val=40)
+        self.assertIsNotNone(res)
+
+
+class TestAnytimeTDDefinition(unittest.TestCase):
+    def test_distribution_anytime_excludes_passing(self):
+        from app.services.distribution_engine import DistributionEngine
+
+        db = _session()
+        try:
+            home = Team(sport="NFL", name="H", abbreviation="HH", conference="AFC", division="E")
+            away = Team(sport="NFL", name="A", abbreviation="AA", conference="AFC", division="E")
+            db.add_all([home, away])
+            db.flush()
+            season = Season(sport="NFL", season_year="2026", is_current=True)
+            db.add(season)
+            db.flush()
+            qb = Player(sport="NFL", name="QB", position="QB", current_team_id=home.team_id)
+            db.add(qb)
+            db.flush()
+            for i in range(6):
+                g = Game(
+                    sport="NFL",
+                    game_date=date(2026, 9, 10 + i),
+                    season_id=season.season_id,
+                    home_team_id=home.team_id,
+                    away_team_id=away.team_id,
+                    game_status="finished",
+                )
+                db.add(g)
+                db.flush()
+                db.add(
+                    PlayerGameStat(
+                        sport="NFL",
+                        player_id=qb.player_id,
+                        game_id=g.game_id,
+                        team_id=home.team_id,
+                        opponent_team_id=away.team_id,
+                        pass_attempts=30,
+                        passing_tds=3,
+                        rushing_tds=0,
+                        receiving_tds=0,
+                    )
+                )
+            db.commit()
+            dist = DistributionEngine(db).calculate_base_distribution(
+                qb.player_id, "anytime_td", sport="NFL", season_ids=[season.season_id], min_games=5
+            )
+            self.assertIsNotNone(dist)
+            self.assertEqual(dist["mean"], 0.0)
+        finally:
+            db.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

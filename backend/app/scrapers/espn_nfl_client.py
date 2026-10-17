@@ -6,7 +6,7 @@ This is a more reliable alternative to Pro Football Reference scraping.
 """
 import requests
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import date, datetime, timedelta
 
 
@@ -133,7 +133,10 @@ class ESPNNFLClient:
                 
                 # Parse date
                 if game_date_str:
-                    game_date = datetime.fromisoformat(game_date_str.replace('Z', '+00:00')).date()
+                    from zoneinfo import ZoneInfo
+
+                    dt_utc = datetime.fromisoformat(game_date_str.replace('Z', '+00:00'))
+                    game_date = dt_utc.astimezone(ZoneInfo('America/New_York')).date()
                 else:
                     continue
                 
@@ -241,3 +244,143 @@ class ESPNNFLClient:
                 print(f"    No games found for Week {week}")
         
         return all_games
+
+    def get_game_summary(self, espn_game_id: str) -> Optional[Dict]:
+        """Fetch full game summary (box score, injuries, etc.)."""
+        url = f"{self.BASE_URL}/summary?event={espn_game_id}"
+        return self._get_json(url)
+
+    @staticmethod
+    def _parse_int(value) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        s = str(value).strip()
+        if not s or s == "-":
+            return None
+        try:
+            return int(float(s))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_completions_attempts(value: str) -> Tuple[Optional[int], Optional[int]]:
+        if not value or "/" not in str(value):
+            return None, None
+        parts = str(value).split("/")
+        try:
+            return int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            return None, None
+
+    def parse_box_score_players(self, summary: Dict) -> List[Dict]:
+        """
+        Parse player stat lines from ESPN summary JSON.
+
+        Returns list of dicts with name, team abbrev, position, and stat fields.
+        """
+        if not summary:
+            return []
+
+        rows: List[Dict] = []
+        box = summary.get("boxscore") or {}
+        for team_block in box.get("players") or []:
+            team_info = team_block.get("team") or {}
+            team_abbrev = team_info.get("abbreviation")
+            if team_abbrev:
+                team_abbrev = team_abbrev.upper()
+
+            for category in team_block.get("statistics") or []:
+                cat_name = (category.get("name") or "").lower()
+                keys = category.get("keys") or []
+                for athlete in category.get("athletes") or []:
+                    athlete_info = athlete.get("athlete") or {}
+                    name = athlete_info.get("displayName") or athlete_info.get("fullName")
+                    if not name:
+                        continue
+                    pos = (athlete_info.get("position") or {}).get("abbreviation")
+                    stats = athlete.get("stats") or []
+                    if len(stats) != len(keys):
+                        continue
+
+                    row = {
+                        "player_name": name,
+                        "team_abbrev": team_abbrev,
+                        "position": pos,
+                    }
+
+                    key_map = dict(zip(keys, stats))
+                    if cat_name == "passing":
+                        comp, att = self._parse_completions_attempts(
+                            key_map.get("completions/passingAttempts")
+                        )
+                        row.update(
+                            {
+                                "completions": comp,
+                                "pass_attempts": att,
+                                "passing_yards": self._parse_int(key_map.get("passingYards")),
+                                "passing_tds": self._parse_int(key_map.get("passingTouchdowns")),
+                                "interceptions": self._parse_int(key_map.get("interceptions")),
+                            }
+                        )
+                    elif cat_name == "rushing":
+                        row.update(
+                            {
+                                "rushing_attempts": self._parse_int(key_map.get("rushingAttempts")),
+                                "rushing_yards": self._parse_int(key_map.get("rushingYards")),
+                                "rushing_tds": self._parse_int(key_map.get("rushingTouchdowns")),
+                            }
+                        )
+                    elif cat_name == "receiving":
+                        row.update(
+                            {
+                                "receptions": self._parse_int(key_map.get("receptions")),
+                                "targets": self._parse_int(key_map.get("receivingTargets")),
+                                "receiving_yards": self._parse_int(key_map.get("receivingYards")),
+                                "receiving_tds": self._parse_int(key_map.get("receivingTouchdowns")),
+                            }
+                        )
+
+                    rows.append(row)
+
+        # Merge rows per player (pass/rush/rec categories are separate)
+        merged: Dict[Tuple[str, str], Dict] = {}
+        for row in rows:
+            key = (row["player_name"], row.get("team_abbrev") or "")
+            if key not in merged:
+                merged[key] = row.copy()
+            else:
+                for k, v in row.items():
+                    if k in ("player_name", "team_abbrev", "position"):
+                        if not merged[key].get(k) and v:
+                            merged[key][k] = v
+                    elif v is not None:
+                        merged[key][k] = v
+
+        return list(merged.values())
+
+    def parse_injuries(self, summary: Dict) -> List[Dict]:
+        """Parse injury report from ESPN summary."""
+        if not summary:
+            return []
+        out = []
+        for team_block in summary.get("injuries") or []:
+            team = team_block.get("team") or {}
+            team_abbrev = (team.get("abbreviation") or "").upper()
+            for inj in team_block.get("injuries") or []:
+                athlete = inj.get("athlete") or {}
+                name = athlete.get("displayName") or athlete.get("fullName")
+                if not name:
+                    continue
+                details = inj.get("details") or {}
+                out.append(
+                    {
+                        "player_name": name,
+                        "team_abbrev": team_abbrev,
+                        "status": inj.get("status") or details.get("fantasyStatus", {}).get("description"),
+                        "injury_type": details.get("type"),
+                        "position": (athlete.get("position") or {}).get("abbreviation"),
+                    }
+                )
+        return out

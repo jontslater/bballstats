@@ -14,6 +14,7 @@ from app.models.team import Team
 from app.services.prediction_history_helper import get_last_n_games_for_stat
 from app.services.base_sport_service import BaseSportService
 from itertools import combinations
+from app.services.nfl_data import american_break_even_odds
 
 
 # Suggested bets are only for games that can still be bet. Finished / eliminated
@@ -77,12 +78,11 @@ class SuggestedBetsService(BaseSportService):
         # Get predictions with high confidence and good probabilities
         # Include all bet types: safe, standard, and long_shot
         # Use sport-appropriate bettable stat types (excludes minutes, snaps, etc.)
-        from app.config.sport_config import get_bettable_stat_types
+        from app.config.sport_config import get_bettable_stat_types, get_sport_config
         bettable_stat_types = get_bettable_stat_types(self.sport)
         
-        # For suggested bets, focus on primary bettable stats
         if self.sport == 'NFL':
-            primary_stats = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']]
+            primary_stats = list(bettable_stat_types)
         elif self.sport == 'MLB':
             primary_stats = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
         else:  # NBA
@@ -110,7 +110,11 @@ class SuggestedBetsService(BaseSportService):
         if long_shot_count < 5:  # Want at least 5 long shots for variety
             # Use sport-appropriate bettable stat types
             if self.sport == 'NFL':
-                long_shot_stats = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions', 'passing_tds', 'rushing_tds', 'receiving_tds']]
+                long_shot_stats = [
+                    s for s in bettable_stat_types
+                    if s in ('passing_yards', 'rushing_yards', 'receiving_yards', 'receptions')
+                    or s.endswith('_tds')
+                ]
             elif self.sport == 'MLB':
                 long_shot_stats = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
             else:  # NBA
@@ -138,6 +142,20 @@ class SuggestedBetsService(BaseSportService):
             injury_status = injury_context.get_player_injury_status(pred.player_id)
             if injury_status and injury_status['status'] in ['Out', 'Doubtful', 'Questionable']:
                 continue  # Skip injured players
+
+            if self.sport == 'NFL':
+                from app.services.nfl_eligibility import nfl_player_role_eligible
+                if pred.sample_size is not None and pred.sample_size < 5:
+                    continue
+                ok, _reason = nfl_player_role_eligible(
+                    self.db,
+                    pred.player_id,
+                    pred.stat_type,
+                    min_games=5,
+                    game_id=pred.game_id,
+                )
+                if not ok:
+                    continue
             
             # Calculate quality score
             score = self._calculate_bet_score(pred)
@@ -168,19 +186,21 @@ class SuggestedBetsService(BaseSportService):
             
             edge = probability - base_rate
             
-            # Filter by bet type with stricter requirements for 'safe' and 'standard' tiers
-            if pred.bet_type == 'safe':
-                # Safe bets must have p >= 0.55 AND positive edge over base rate
+            # Filter by bet type (NFL uses sportsbook-aware thresholds — vig ~52.4% at -110)
+            if pred.bet_type == 'long_shot':
+                # Long shots: 0.08 to 0.30 range
+                if probability < 0.08 or probability > 0.30:
+                    continue
+            elif self.sport == 'NFL' and pred.bet_type in ('safe', 'standard'):
+                min_prob = 0.48 if pred.line_source == 'sportsbook' else 0.53
+                min_edge = 0.012 if pred.line_source == 'sportsbook' else 0.0
+                if probability < min_prob or edge < min_edge:
+                    continue
+            elif pred.bet_type == 'safe':
                 if probability < 0.55 or edge <= 0:
                     continue
             elif pred.bet_type == 'standard':
-                # Standard bets must ALSO meet safe criteria (p >= 0.55 & edge > 0)
-                # This prevents low-probability standard bets from filling the list
                 if probability < 0.55 or edge <= 0:
-                    continue
-            elif pred.bet_type == 'long_shot':
-                # Long shots: 0.08 to 0.30 range
-                if probability < 0.08 or probability > 0.30:
                     continue
             
             # Skip long shots if not included
@@ -317,6 +337,12 @@ class SuggestedBetsService(BaseSportService):
                     seen_reasons.add(reason_lower)
                     deduped_reasons.append(reason)
             
+            prob_f = round(float(probability) if probability is not None else 0.5, 3)
+            break_even = american_break_even_odds(prob_f)
+            high_variance = pred.stat_type in (
+                get_sport_config(self.sport).get('high_variance_stats') or []
+            )
+
             scored_predictions.append({
                 'prediction_id': pred.prediction_id,
                 'player_id': pred.player_id,
@@ -327,7 +353,9 @@ class SuggestedBetsService(BaseSportService):
                 'stat_type': pred.stat_type,
                 'bet_type': pred.bet_type,
                 'line': final_line,
-                'probability': round(float(probability) if probability is not None else 0.5, 3),
+                'probability': prob_f,
+                'break_even_american_odds': break_even,
+                'high_variance': high_variance,
                 'confidence_level': pred.confidence_level,
                 'confidence_tier': pred.confidence_level,  # Alias for clarity
                 'confidence_score': pred.confidence_score,
@@ -974,7 +1002,7 @@ class SuggestedBetsService(BaseSportService):
         
         # For safe long parlays, use bettable stats only
         if self.sport == 'NFL':
-            safe_stat_types = [s for s in bettable_stat_types if s in ['passing_yards', 'rushing_yards', 'receiving_yards', 'receptions']]
+            safe_stat_types = list(bettable_stat_types)
         elif self.sport == 'MLB':
             safe_stat_types = [s for s in bettable_stat_types if s in ['hits', 'home_runs', 'total_bases', 'strikeouts']]
         else:  # NBA

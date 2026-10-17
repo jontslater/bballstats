@@ -263,6 +263,8 @@ def get_last_n_games_for_stat(
                 'interceptions': 'interceptions',
                 'completions': 'completions',
                 'attempts': 'pass_attempts',
+                'pass_attempts': 'pass_attempts',
+                'rushing_attempts': 'rushing_attempts',
                 'snaps_played': 'snaps_played',
             },
             'MLB': {
@@ -279,10 +281,12 @@ def get_last_n_games_for_stat(
             }
         }
 
-        if stat_type not in stat_column_map.get(sport, {}):
-            return []  # Invalid stat type for this sport
-
-        stat_column = stat_column_map[sport][stat_type]
+        if stat_type == 'anytime_td' and sport == 'NFL':
+            stat_column = None
+        elif stat_type not in stat_column_map.get(sport, {}):
+            return {'games': [], 'lineup_context': None}
+        else:
+            stat_column = stat_column_map[sport][stat_type]
     
     # Build query for last N games with this stat
     combo_stats_requirements = {
@@ -309,16 +313,26 @@ def get_last_n_games_for_stat(
         ).filter(and_(*filters))
     else:
         # Regular stat
+        stat_filters = [
+            PlayerGameStat.sport == sport,
+            PlayerGameStat.player_id == player_id,
+            Game.game_status == 'finished',
+        ]
+        if stat_type == 'anytime_td' and sport == 'NFL':
+            from sqlalchemy import or_
+            stat_filters.append(
+                or_(
+                    PlayerGameStat.rushing_attempts > 0,
+                    PlayerGameStat.targets > 0,
+                    PlayerGameStat.receptions > 0,
+                )
+            )
+        else:
+            stat_filters.append(getattr(PlayerGameStat, stat_column).isnot(None))
+
         query = db.query(PlayerGameStat, Game).join(
             Game, PlayerGameStat.game_id == Game.game_id
-        ).filter(
-            and_(
-                PlayerGameStat.sport == sport,
-                PlayerGameStat.player_id == player_id,
-                Game.game_status == 'finished',
-                getattr(PlayerGameStat, stat_column).isnot(None)  # Stat must exist
-            )
-        )
+        ).filter(and_(*stat_filters))
     
     # Exclude specific game if provided
     if exclude_game_id:
@@ -391,6 +405,8 @@ def get_last_n_games_for_stat(
         elif stat_type == 'rebounds_assists':
             # Calculate rebounds + assists
             stat_value = (stat.rebounds or 0) + (stat.assists or 0)
+        elif stat_type == 'anytime_td' and sport == 'NFL':
+            stat_value = (stat.rushing_tds or 0) + (stat.receiving_tds or 0)
         else:
             stat_value = getattr(stat, stat_column)
             # DEBUG: Verify we're getting the right column

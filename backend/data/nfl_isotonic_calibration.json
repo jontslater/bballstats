@@ -1,0 +1,345 @@
+{
+  "meta": {
+    "train": "2024 + all 2025 (fit pool)",
+    "selection": "2025 season only (hyperparameter grid search)",
+    "holdout": "2026 weeks 1\u20136 (true OOS evaluation)",
+    "method": "symmetric_alpha_plus_high_bucket",
+    "model": "production_v6",
+    "bettable_props": [
+      "receiving_yards"
+    ]
+  },
+  "stats": {
+    "receptions": {
+      "enabled": false,
+      "high_enabled": false,
+      "alpha": 1.0,
+      "high_knee": 0.52,
+      "high_factor": 0.65,
+      "brier_raw": 0.10775,
+      "brier_cal": 0.10717,
+      "val_brier": 0.10717,
+      "bettable": false,
+      "bettable_fail_reasons": [
+        "bucket 0.55-0.59 gap 0.091 > 0.08 (n=31)"
+      ],
+      "oos_median_p_over": 0.488,
+      "oos_brier_raw": 0.11822,
+      "oos_brier_posthoc": 0.11714,
+      "oos_buckets": {
+        "0.00-0.49": {
+          "n": 3452,
+          "mean_predicted": 0.1301,
+          "actual_hit_rate": 0.1515,
+          "gap": 0.0214
+        },
+        "0.60-0.64": {
+          "n": 99,
+          "mean_predicted": 0.6238,
+          "actual_hit_rate": 0.6768,
+          "gap": 0.053
+        },
+        "0.70-0.74": {
+          "n": 176,
+          "mean_predicted": 0.7209,
+          "actual_hit_rate": 0.7784,
+          "gap": 0.0575
+        },
+        "0.65-0.69": {
+          "n": 44,
+          "mean_predicted": 0.6692,
+          "actual_hit_rate": 0.6591,
+          "gap": -0.0101
+        },
+        "0.50-0.54": {
+          "n": 5,
+          "mean_predicted": 0.54,
+          "actual_hit_rate": 0.6,
+          "gap": 0.06
+        },
+        "0.55-0.59": {
+          "n": 31,
+          "mean_predicted": 0.5861,
+          "actual_hit_rate": 0.6774,
+          "gap": 0.0913
+        }
+      }
+    },
+    "receiving_yards": {
+      "enabled": true,
+      "high_enabled": true,
+      "alpha": 0.95,
+      "high_knee": 0.52,
+      "high_factor": 0.45,
+      "brier_raw": 0.095,
+      "brier_cal": 0.09321,
+      "val_brier": 0.09321,
+      "bettable": true,
+      "bettable_fail_reasons": [],
+      "oos_median_p_over": 0.4839,
+      "oos_brier_raw": 0.10432,
+      "oos_brier_posthoc": 0.10328,
+      "oos_buckets": {
+        "0.00-0.49": {
+          "n": 3495,
+          "mean_predicted": 0.099,
+          "actual_hit_rate": 0.117,
+          "gap": 0.018
+        },
+        "0.55-0.59": {
+          "n": 79,
+          "mean_predicted": 0.5747,
+          "actual_hit_rate": 0.5696,
+          "gap": -0.0051
+        },
+        "0.50-0.54": {
+          "n": 100,
+          "mean_predicted": 0.526,
+          "actual_hit_rate": 0.59,
+          "gap": 0.064
+        },
+        "0.60-0.64": {
+          "n": 59,
+          "mean_predicted": 0.626,
+          "actual_hit_rate": 0.7966,
+          "gap": 0.1706
+        },
+        "0.70-0.74": {
+          "n": 17,
+          "mean_predicted": 0.7075,
+          "actual_hit_rate": 0.6471,
+          "gap": -0.0604
+        },
+        "0.65-0.69": {
+          "n": 30,
+          "mean_predicted": 0.6781,
+          "actual_hit_rate": 0.8333,
+          "gap": 0.1553
+        }
+      }
+    },
+    "rushing_yards": {
+      "enabled": false,
+      "high_enabled": false,
+      "alpha": 1.0,
+      "high_knee": 0.52,
+      "high_factor": 0.45,
+      "brier_raw": 0.07236,
+      "brier_cal": 0.07108,
+      "val_brier": 0.07108,
+      "bettable": false,
+      "bettable_fail_reasons": [
+        "posthoc Brier 0.0631 worse than raw 0.0624"
+      ],
+      "oos_median_p_over": 0.4811,
+      "oos_brier_raw": 0.06237,
+      "oos_brier_posthoc": 0.06305,
+      "oos_buckets": {
+        "0.00-0.49": {
+          "n": 2448,
+          "mean_predicted": 0.0679,
+          "actual_hit_rate": 0.0596,
+          "gap": -0.0083
+        },
+        "0.65-0.69": {
+          "n": 38,
+          "mean_predicted": 0.6752,
+          "actual_hit_rate": 0.8684,
+          "gap": 0.1932
+        },
+        "0.60-0.64": {
+          "n": 90,
+          "mean_predicted": 0.6213,
+          "actual_hit_rate": 0.7556,
+          "gap": 0.1342
+        },
+        "0.55-0.59": {
+          "n": 49,
+          "mean_predicted": 0.5763,
+          "actual_hit_rate": 0.5102,
+          "gap": -0.0661
+        },
+        "0.50-0.54": {
+          "n": 45,
+          "mean_predicted": 0.523,
+          "actual_hit_rate": 0.5333,
+          "gap": 0.0103
+        }
+      }
+    },
+    "passing_yards": {
+      "enabled": false,
+      "high_enabled": false,
+      "alpha": 1.0,
+      "high_knee": 0.52,
+      "high_factor": 0.55,
+      "brier_raw": 0.18991,
+      "brier_cal": 0.18816,
+      "val_brier": 0.18816,
+      "bettable": false,
+      "bettable_fail_reasons": [
+        "median P(over)=0.432 outside [0.45, 0.55]"
+      ],
+      "oos_median_p_over": 0.4323,
+      "oos_brier_raw": 0.19639,
+      "oos_brier_posthoc": 0.1945,
+      "oos_buckets": {
+        "0.00-0.49": {
+          "n": 326,
+          "mean_predicted": 0.2514,
+          "actual_hit_rate": 0.2699,
+          "gap": 0.0185
+        },
+        "0.65-0.69": {
+          "n": 29,
+          "mean_predicted": 0.6676,
+          "actual_hit_rate": 0.7931,
+          "gap": 0.1256
+        },
+        "0.60-0.64": {
+          "n": 48,
+          "mean_predicted": 0.6171,
+          "actual_hit_rate": 0.5417,
+          "gap": -0.0754
+        },
+        "0.50-0.54": {
+          "n": 77,
+          "mean_predicted": 0.5298,
+          "actual_hit_rate": 0.5455,
+          "gap": 0.0156
+        },
+        "0.55-0.59": {
+          "n": 52,
+          "mean_predicted": 0.5698,
+          "actual_hit_rate": 0.6154,
+          "gap": 0.0456
+        },
+        "0.70-0.74": {
+          "n": 5,
+          "mean_predicted": 0.709,
+          "actual_hit_rate": 0.6,
+          "gap": -0.109
+        }
+      }
+    },
+    "completions": {
+      "enabled": false,
+      "high_enabled": false,
+      "alpha": 1.0,
+      "brier_raw": 0.18219,
+      "brier_cal": 0.18219,
+      "val_brier": 0.18219,
+      "bettable": false,
+      "bettable_fail_reasons": [
+        "median P(over)=0.424 outside [0.45, 0.55]",
+        "bucket 0.50-0.54 gap 0.101 > 0.08 (n=37)",
+        "bucket 0.55-0.59 gap 0.082 > 0.08 (n=56)"
+      ],
+      "oos_median_p_over": 0.4235,
+      "oos_brier_raw": 0.1888,
+      "oos_brier_posthoc": 0.1888,
+      "oos_buckets": {
+        "0.55-0.59": {
+          "n": 56,
+          "mean_predicted": 0.5787,
+          "actual_hit_rate": 0.6607,
+          "gap": 0.082
+        },
+        "0.00-0.49": {
+          "n": 234,
+          "mean_predicted": 0.2088,
+          "actual_hit_rate": 0.2692,
+          "gap": 0.0604
+        },
+        "0.60-0.64": {
+          "n": 31,
+          "mean_predicted": 0.6065,
+          "actual_hit_rate": 0.6129,
+          "gap": 0.0064
+        },
+        "0.50-0.54": {
+          "n": 37,
+          "mean_predicted": 0.5063,
+          "actual_hit_rate": 0.4054,
+          "gap": -0.1009
+        }
+      }
+    },
+    "attempts": {
+      "enabled": false,
+      "high_enabled": false,
+      "alpha": 1.0,
+      "brier_raw": 0.15596,
+      "brier_cal": 0.15596,
+      "val_brier": 0.15596,
+      "bettable": false,
+      "bettable_fail_reasons": [
+        "median P(over)=0.340 outside [0.45, 0.55]"
+      ],
+      "oos_median_p_over": 0.3404,
+      "oos_brier_raw": 0.14773,
+      "oos_brier_posthoc": 0.14773,
+      "oos_buckets": {
+        "0.55-0.59": {
+          "n": 55,
+          "mean_predicted": 0.5825,
+          "actual_hit_rate": 0.5818,
+          "gap": -0.0007
+        },
+        "0.00-0.49": {
+          "n": 346,
+          "mean_predicted": 0.1695,
+          "actual_hit_rate": 0.2023,
+          "gap": 0.0328
+        },
+        "0.60-0.64": {
+          "n": 26,
+          "mean_predicted": 0.6094,
+          "actual_hit_rate": 0.6923,
+          "gap": 0.0829
+        },
+        "0.50-0.54": {
+          "n": 21,
+          "mean_predicted": 0.518,
+          "actual_hit_rate": 0.619,
+          "gap": 0.101
+        }
+      }
+    },
+    "anytime_td": {
+      "enabled": false,
+      "high_enabled": false,
+      "alpha": 1.0,
+      "brier_raw": 0.06771,
+      "brier_cal": 0.06771,
+      "val_brier": 0.06771,
+      "bettable": false,
+      "bettable_fail_reasons": [
+        "median P(over)=0.096 outside [0.45, 0.55]"
+      ],
+      "oos_median_p_over": 0.0957,
+      "oos_brier_raw": 0.05264,
+      "oos_brier_posthoc": 0.05264,
+      "oos_buckets": {
+        "0.00-0.49": {
+          "n": 4274,
+          "mean_predicted": 0.0941,
+          "actual_hit_rate": 0.0667,
+          "gap": -0.0275
+        },
+        "0.50-0.54": {
+          "n": 10,
+          "mean_predicted": 0.5255,
+          "actual_hit_rate": 0.9,
+          "gap": 0.3745
+        },
+        "0.55-0.59": {
+          "n": 5,
+          "mean_predicted": 0.56,
+          "actual_hit_rate": 0.6,
+          "gap": 0.04
+        }
+      }
+    }
+  }
+}

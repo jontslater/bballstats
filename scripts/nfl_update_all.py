@@ -3,294 +3,271 @@
 NFL version of the master script to update all NFL betting analytics data.
 
 Usage:
-    python scripts/nfl_update_all.py
+    PYTHONUTF8=1 PYTHONIOENCODING=utf-8 python scripts/nfl_update_all.py
 
 This script will:
-1. Update NFL game results (previous day)
-2. Update NFL player statistics
-3. Update NFL game schedules
-4. Recalculate NFL analytics (team defense, matchups)
-5. Generate NFL predictions for upcoming games
+1. Update NFL schedules (ESPN rolling window) and create Game rows from schedules
+2. Update NFL game results + player box scores (7-day lookback via ESPN)
+3. Update NFL injuries (ESPN, upcoming week)
+4. Generate NFL predictions for upcoming games
+5. Write suggested bets to historical_suggested_bets
 6. Evaluate NFL predictions for finished games
+
+First-time / weekly history (run once or after DB wipe):
+    python scripts/nfl_seed_teams.py
+    python scripts/nfl_seed_seasons.py
+    PYTHONUTF8=1 python scripts/nfl_backfill_player_stats.py --seasons 2025 2026
 """
 
 import sys
 import os
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
-# Suppress urllib3/OpenSSL warnings (not critical)
-warnings.filterwarnings('ignore', category=UserWarning, module='urllib3')
-warnings.filterwarnings('ignore', message='.*urllib3.*OpenSSL.*')
-
-# Add parent directory to path so we can import app modules
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "backend"))
 
-# Set up logging
+warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
+
 import logging
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler('nfl_update_log.txt'),
-        logging.StreamHandler()
-    ]
+        logging.FileHandler("nfl_update_log.txt"),
+        logging.StreamHandler(),
+    ],
 )
-
 logger = logging.getLogger(__name__)
 
 
-def update_game_results():
-    """Update previous day's NFL game results."""
-    logger.info("=" * 60)
-    logger.info("STEP 1: Updating NFL game results...")
-    logger.info("=" * 60)
-
-    try:
-        import subprocess
-        import sys
-
-        # Run the NFL game results collection script
-        result = subprocess.run([
-            sys.executable,
-            'scripts/nfl_collect_game_results.py',
-            '--previous-day'
-        ], capture_output=True, text=True, cwd=project_root)
-
-        if result.returncode == 0:
-            logger.info("✅ NFL game results updated")
-            # Log some of the output
-            for line in result.stdout.split('\n')[-5:]:  # Last 5 lines
-                if line.strip():
-                    logger.info(f"   {line}")
-            return True
-        else:
-            logger.error(f"❌ NFL game results update failed: {result.stderr}")
-            return False
-
-    except Exception as e:
-        logger.error(f"❌ Error updating NFL game results: {e}")
-        return False
-
-
-def update_player_stats():
-    """Update NFL player statistics - currently not implemented."""
-    logger.info("=" * 60)
-    logger.info("STEP 2: Updating NFL player statistics...")
-    logger.info("=" * 60)
-
-    # NFL player stats are collected as part of game results
-    logger.info("ℹ️  NFL player stats are collected with game results")
-    return True
+def _utf8_env():
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
 def update_schedules():
-    """Update upcoming NFL game schedules."""
     logger.info("=" * 60)
-    logger.info("STEP 3: Updating NFL game schedules...")
+    logger.info("STEP 1: Updating NFL schedules (ESPN)...")
     logger.info("=" * 60)
-
     try:
-        import subprocess
-        import sys
+        from app.database import SessionLocal
+        from app.models import Season
+        from app.scrapers.espn_nfl_client import ESPNNFLClient
+        from app.services.nfl_schedule import sync_upcoming_schedule_window
+        from scripts.create_games_from_schedules import create_games_from_schedules
 
-        # Run the NFL schedule collection script
-        result = subprocess.run([
-            sys.executable,
-            'scripts/nfl_collect_schedule.py',
-            '--all-weeks'
-        ], capture_output=True, text=True, cwd=project_root)
+        db = SessionLocal()
+        try:
+            season = db.query(Season).filter(
+                Season.sport == "NFL",
+                Season.is_current == True,
+            ).first()
+            if not season:
+                season = db.query(Season).filter(Season.sport == "NFL").order_by(
+                    Season.season_id.desc()
+                ).first()
+            if not season:
+                logger.error("No NFL season found — run nfl_seed_seasons.py")
+                return False
 
-        if result.returncode == 0:
-            logger.info("✅ NFL schedules updated")
-            # Log some of the output
-            for line in result.stdout.split('\n')[-3:]:  # Last 3 lines
-                if line.strip():
-                    logger.info(f"   {line}")
+            client = ESPNNFLClient()
+            result = sync_upcoming_schedule_window(
+                db, client, season, lookback_days=7, days_ahead=21
+            )
+            logger.info(
+                f"ESPN schedule persist: created={result['created']} updated={result['updated']} errors={result['errors']}"
+            )
+
+            game_result = create_games_from_schedules(days_ahead=21, sport="NFL")
+            if not game_result.get("success"):
+                logger.error(f"create_games_from_schedules failed: {game_result.get('error')}")
+                return False
+            logger.info(
+                f"Game rows from schedules: created={game_result.get('created', 0)} linked={game_result.get('updated', 0)}"
+            )
             return True
-        else:
-            logger.error(f"❌ NFL schedule update failed: {result.stderr}")
-            return False
-
+        finally:
+            db.close()
     except Exception as e:
-        logger.error(f"❌ Error updating NFL schedules: {e}")
+        logger.error(f"Schedule update error: {e}")
         return False
 
 
-def recalculate_analytics():
-    """Recalculate all NFL analytics (team defense, matchups, etc.)."""
+def update_game_results():
     logger.info("=" * 60)
-    logger.info("STEP 4: Recalculating NFL analytics...")
+    logger.info("STEP 2: Updating NFL game results (7-day lookback)...")
     logger.info("=" * 60)
+    try:
+        from app.database import SessionLocal
+        from app.services.nfl_results import collect_results_lookback
 
-    # NFL analytics recalculation not fully implemented yet
-    logger.info("⚠️  NFL analytics recalculation not implemented yet")
-    return True
+        db = SessionLocal()
+        try:
+            result = collect_results_lookback(db, lookback_days=7)
+            logger.info(
+                f"NFL results: games_processed={result['games_processed']} player_rows={result['player_rows']}"
+            )
+            return True
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Game results error: {e}")
+        return False
 
 
 def update_injuries():
-    """Update NFL injury data."""
     logger.info("=" * 60)
-    logger.info("STEP 5: Updating NFL injury data...")
+    logger.info("STEP 3: Updating NFL injuries (ESPN)...")
     logger.info("=" * 60)
+    try:
+        from app.database import SessionLocal
+        from app.services.nfl_injuries import collect_injuries_for_upcoming_games
 
-    # NFL injuries are not currently implemented
-    logger.info("⚠️  NFL injury collection not implemented yet")
-    return True
-
-
-def update_lineups():
-    """Update NFL lineup confirmations."""
-    logger.info("=" * 60)
-    logger.info("STEP 6: Updating NFL lineup confirmations...")
-    logger.info("=" * 60)
-
-    # NFL lineups are not currently implemented
-    logger.info("⚠️  NFL lineup collection not implemented yet")
-    return True
+        db = SessionLocal()
+        try:
+            result = collect_injuries_for_upcoming_games(db, days_ahead=10)
+            logger.info(f"Injuries: {result}")
+            return True
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Injury update failed (continuing): {e}")
+        return True
 
 
 def generate_predictions():
-    """Generate NFL predictions for upcoming games."""
     logger.info("=" * 60)
-    logger.info("STEP 7: Generating NFL predictions...")
+    logger.info("STEP 4: Generating NFL predictions...")
     logger.info("=" * 60)
+    try:
+        import subprocess
 
-    # NFL prediction generation has issues, skip for now
-    logger.info("⚠️  NFL prediction generation temporarily disabled due to technical issues")
-    logger.info("   Run 'python scripts/generate_nfl_predictions.py --upcoming' manually if needed")
-    return True
+        result = subprocess.run(
+            [sys.executable, "scripts/generate_nfl_predictions.py", "--upcoming"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            env=_utf8_env(),
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode == 0:
+            logger.info("NFL predictions generated")
+            return True
+        logger.error(f"Prediction generation failed: {result.stderr}")
+        return False
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        return False
+
+
+def write_suggested_bets():
+    logger.info("=" * 60)
+    logger.info("STEP 5: Writing NFL suggested bets...")
+    logger.info("=" * 60)
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [sys.executable, "scripts/nfl_write_suggested_bets.py"],
+            capture_output=True,
+            text=True,
+            cwd=project_root,
+            env=_utf8_env(),
+            encoding="utf-8",
+            errors="replace",
+        )
+        logger.info(result.stdout[-2000:] if result.stdout else "")
+        if result.returncode != 0:
+            logger.error(result.stderr)
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"Suggested bets error: {e}")
+        return False
 
 
 def evaluate_predictions():
-    """Evaluate NFL predictions for finished games."""
     logger.info("=" * 60)
-    logger.info("STEP 8: Evaluating NFL predictions for finished games...")
+    logger.info("STEP 6: Evaluating NFL predictions...")
     logger.info("=" * 60)
-
     try:
         from app.services.prediction_evaluator import PredictionEvaluator
         from app.database import SessionLocal
         from app.models.prediction import Prediction
         from app.models.game import Game
-        from sqlalchemy import and_, func, distinct
-        from datetime import date, timedelta
+        from sqlalchemy import and_, distinct
 
         db = SessionLocal()
         try:
-            # Find finished NFL games with unevaluated predictions (last 7 days)
-            cutoff_date = date.today() - timedelta(days=7)
-
-            finished_games = db.query(distinct(Game.game_id), Game.game_date).join(
+            cutoff = date.today() - timedelta(days=7)
+            finished = db.query(distinct(Game.game_id), Game.game_date).join(
                 Prediction, Game.game_id == Prediction.game_id
             ).filter(
-                and_(
-                    Game.game_status == 'finished',
-                    Game.game_date >= cutoff_date,
-                    Game.sport == 'NFL',  # Only NFL games
-                    Prediction.actual_result.is_(None),
-                    Prediction.bet_type != 'pass'
-                )
+                Game.game_status == "finished",
+                Game.game_date >= cutoff,
+                Game.sport == "NFL",
+                Prediction.actual_result.is_(None),
+                Prediction.bet_type != "pass",
             ).order_by(Game.game_date.desc()).all()
 
-            if not finished_games:
-                logger.info("✅ No finished NFL games with unevaluated predictions")
+            if not finished:
+                logger.info("No finished NFL games with unevaluated predictions")
                 return True
 
-            logger.info(f"Found {len(finished_games)} NFL games with unevaluated predictions")
-
             evaluator = PredictionEvaluator(db)
-
-            total_evaluated = 0
-            total_skipped = 0
-            total_errors = 0
-            games_processed = 0
-
-            for game_id, game_date in finished_games:
+            for game_id, _ in finished:
                 try:
-                    result = evaluator.evaluate_game(game_id)
-                    total_evaluated += result['evaluated']
-                    total_skipped += result['skipped']
-                    total_errors += result['errors']
-                    games_processed += 1
+                    evaluator.evaluate_game(game_id)
                     db.commit()
                 except Exception as e:
-                    logger.warning(f"⚠️  Error evaluating NFL game {game_id}: {e}")
+                    logger.warning(f"Evaluate game {game_id}: {e}")
                     db.rollback()
-                    total_errors += 1
-
-            logger.info(f"✅ Evaluated {games_processed} NFL games")
-            logger.info(f"   Predictions evaluated: {total_evaluated}")
-            logger.info(f"   Predictions skipped: {total_skipped}")
-            if total_errors > 0:
-                logger.warning(f"   Errors: {total_errors}")
-
             return True
         finally:
             db.close()
-
-    except ImportError:
-        logger.warning("⚠️  NFL prediction evaluation not implemented yet")
-        return True
     except Exception as e:
-        logger.warning(f"⚠️  Error evaluating NFL predictions: {e} (continuing anyway)")
-        return True  # Don't fail on evaluation
+        logger.error(f"Evaluation error: {e}")
+        return False
 
 
 def main():
-    """Run all NFL update steps."""
-    logger.info("")
-    logger.info("🏈 NFL Betting Analytics - Full Update")
+    logger.info("NFL Betting Analytics - Full Update")
     logger.info(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("")
 
     steps = [
-        ("NFL Game Results", update_game_results),
-        ("NFL Player Stats", update_player_stats),
         ("NFL Schedules", update_schedules),
-        ("NFL Analytics", recalculate_analytics),
+        ("NFL Game Results", update_game_results),
         ("NFL Injuries", update_injuries),
-        ("NFL Lineups", update_lineups),
         ("NFL Predictions", generate_predictions),
+        ("NFL Suggested Bets", write_suggested_bets),
         ("NFL Evaluate Predictions", evaluate_predictions),
     ]
-
     results = {}
-
-    for step_name, step_func in steps:
+    for name, fn in steps:
         try:
-            success = step_func()
-            results[step_name] = success
+            results[name] = fn()
         except Exception as e:
-            logger.error(f"❌ Unexpected error in {step_name}: {e}")
-            results[step_name] = False
+            logger.error(f"Exception in {name}: {e}")
+            results[name] = False
 
-    # Summary
-    logger.info("")
     logger.info("=" * 60)
     logger.info("NFL UPDATE SUMMARY")
     logger.info("=" * 60)
-
-    for step_name, success in results.items():
-        status = "✅ SUCCESS" if success else "❌ FAILED"
-        logger.info(f"{step_name:25s} {status}")
-
-    logger.info("")
-    logger.info(f"NFL update completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info("")
-
-    # Exit code
-    all_success = all(results.values())
-    if all_success:
-        logger.info("🎉 All NFL updates completed successfully!")
-        return 0
-    else:
-        logger.warning("⚠️  Some NFL updates failed. Check logs above.")
-        return 1
+    all_ok = True
+    for name, ok in results.items():
+        logger.info(f"  {name}: {'OK' if ok else 'FAILED'}")
+        if not ok:
+            all_ok = False
+    logger.info(f"Overall: {'SUCCESS' if all_ok else 'FAILED'}")
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    sys.exit(main())
