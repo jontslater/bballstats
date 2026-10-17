@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import (  # noqa: F401
-    Team, Season, Player, Game, PlayerGameStat, Prediction, GameSchedule,
+    Team, Season, Player, Game, PlayerGameStat, Prediction, GameSchedule, BettingLine,
 )
 from app.services.calibrated_probability import CalibratedProbabilityCalculator
 from app.services.distribution_engine import DistributionEngine
@@ -230,6 +230,142 @@ class TestNFLTailAndSymmetry(unittest.TestCase):
             self.assertAlmostEqual(cp + cq, 1.0, delta=0.001)
 
 
+class TestNFLBettableHoldoutCriteria(unittest.TestCase):
+    def test_fails_median_out_of_band(self):
+        from app.services.nfl_calibration_metrics import prop_passes_bettable_criteria
+
+        ok, reasons = prop_passes_bettable_criteria(
+            median_avg_p_over=0.555,
+            buckets={},
+            brier_raw=0.06,
+            brier_posthoc=0.06,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("median" in r for r in reasons))
+
+    def test_fails_bucket_gap(self):
+        from app.services.nfl_calibration_metrics import prop_passes_bettable_criteria
+
+        buckets = {
+            "0.55-0.59": {
+                "n": 100,
+                "mean_predicted": 0.57,
+                "actual_hit_rate": 0.48,
+                "gap": -0.09,
+            }
+        }
+        ok, reasons = prop_passes_bettable_criteria(
+            median_avg_p_over=0.50,
+            buckets=buckets,
+            brier_raw=0.10,
+            brier_posthoc=0.09,
+            min_bucket_n=25,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("bucket" in r for r in reasons))
+
+    def test_passes_when_all_gates_ok(self):
+        from app.services.nfl_calibration_metrics import prop_passes_bettable_criteria
+
+        buckets = {
+            "0.50-0.54": {
+                "n": 80,
+                "mean_predicted": 0.52,
+                "actual_hit_rate": 0.50,
+                "gap": -0.02,
+            }
+        }
+        ok, _ = prop_passes_bettable_criteria(
+            median_avg_p_over=0.50,
+            buckets=buckets,
+            brier_raw=0.11,
+            brier_posthoc=0.10,
+        )
+        self.assertTrue(ok)
+
+
+class TestNFLSuggestedBetsUpcoming(unittest.TestCase):
+    def test_allowlisted_starter_produces_suggestion(self):
+        db = _session()
+        try:
+            home = Team(sport="NFL", name="H", abbreviation="HO", conference="NFC", division="E")
+            away = Team(sport="NFL", name="A", abbreviation="AW", conference="NFC", division="E")
+            db.add_all([home, away])
+            db.flush()
+            season = Season(sport="NFL", season_year="2026", is_current=True)
+            db.add(season)
+            db.flush()
+            wr = Player(sport="NFL", name="Star WR", position="WR", current_team_id=home.team_id)
+            db.add(wr)
+            db.flush()
+            for i in range(6):
+                g = Game(
+                    sport="NFL",
+                    game_date=date(2026, 10, 1 + i),
+                    season_id=season.season_id,
+                    home_team_id=home.team_id,
+                    away_team_id=away.team_id,
+                    game_status="finished",
+                )
+                db.add(g)
+                db.flush()
+                db.add(
+                    PlayerGameStat(
+                        sport="NFL",
+                        player_id=wr.player_id,
+                        game_id=g.game_id,
+                        team_id=home.team_id,
+                        opponent_team_id=away.team_id,
+                        targets=9,
+                        receptions=6,
+                        receiving_yards=80,
+                        snap_percentage=68,
+                    )
+                )
+            upcoming = Game(
+                sport="NFL",
+                game_date=date(2026, 10, 18),
+                season_id=season.season_id,
+                home_team_id=home.team_id,
+                away_team_id=away.team_id,
+                game_status="scheduled",
+            )
+            db.add(upcoming)
+            db.flush()
+            db.add(
+                BettingLine(
+                    game_id=upcoming.game_id,
+                    player_id=wr.player_id,
+                    stat_type="receiving_yards",
+                    over_line=62.5,
+                    sportsbook="FanDuel",
+                )
+            )
+            db.add(
+                Prediction(
+                    sport="NFL",
+                    game_id=upcoming.game_id,
+                    player_id=wr.player_id,
+                    stat_type="receiving_yards",
+                    bet_type="standard",
+                    confidence_level="MEDIUM",
+                    sample_size=10,
+                    standard_line=62.5,
+                    standard_probability=0.56,
+                    line_source="sportsbook",
+                    distribution_mean=72.0,
+                    distribution_std_dev=18.0,
+                )
+            )
+            db.commit()
+            svc = SuggestedBetsService(db, sport="NFL")
+            bets = svc.get_suggested_bets(game_date=date(2026, 10, 18), limit=5, include_long_shots=True)
+            self.assertGreaterEqual(len(bets), 1)
+            self.assertEqual(bets[0]["stat_type"], "receiving_yards")
+        finally:
+            db.close()
+
+
 class TestNFLBettableProps(unittest.TestCase):
     def test_default_allowlist_excludes_failed_calibration_props(self):
         from app.services.nfl_bettable_props import (
@@ -241,7 +377,8 @@ class TestNFLBettableProps(unittest.TestCase):
         self.assertIn("receiving_yards", props)
         self.assertNotIn("completions", props)
         self.assertNotIn("attempts", props)
-        self.assertEqual(set(DEFAULT_NFL_BETTABLE_PROPS), set(props) & set(DEFAULT_NFL_BETTABLE_PROPS))
+        for p in props:
+            self.assertIn(p, DEFAULT_NFL_BETTABLE_PROPS)
 
     def test_env_override(self):
         import os

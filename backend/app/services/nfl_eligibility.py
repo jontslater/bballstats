@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 from sqlalchemy.orm import Session
 
 from app.models import Game, Player, PlayerGameStat
+from app.models.betting_line import BettingLine
 from app.models.lineup import Lineup
 
 SNAP_MIN_WR_TE = 50.0
@@ -106,6 +107,10 @@ def nfl_player_role_eligible(
     player = db.query(Player).filter(Player.player_id == player_id).first()
     position = player.position if player else None
 
+    game_row = (
+        db.query(Game).filter(Game.game_id == game_id).first() if game_id is not None else None
+    )
+
     if game_id is not None:
         from app.services.lineup_service import LineupService
 
@@ -122,6 +127,20 @@ def nfl_player_role_eligible(
 
     usage = _usage_averages(rows)
     snap_need = _snap_threshold_for_stat(stat_type, position)
+    if (
+        game_row
+        and game_row.game_status == "scheduled"
+        and game_id is not None
+        and db.query(BettingLine)
+        .filter(
+            BettingLine.game_id == game_id,
+            BettingLine.player_id == player_id,
+            BettingLine.stat_type == stat_type,
+        )
+        .first()
+    ):
+        snap_need = max(snap_need * 0.88, 36.0)
+
     avg_snap = usage.get("avg_snap")
 
     if avg_snap is not None:

@@ -186,19 +186,21 @@ class SuggestedBetsService(BaseSportService):
             
             edge = probability - base_rate
             
-            # Filter by bet type with stricter requirements for 'safe' and 'standard' tiers
-            if pred.bet_type == 'safe':
-                # Safe bets must have p >= 0.55 AND positive edge over base rate
+            # Filter by bet type (NFL uses sportsbook-aware thresholds — vig ~52.4% at -110)
+            if pred.bet_type == 'long_shot':
+                # Long shots: 0.08 to 0.30 range
+                if probability < 0.08 or probability > 0.30:
+                    continue
+            elif self.sport == 'NFL' and pred.bet_type in ('safe', 'standard'):
+                min_prob = 0.48 if pred.line_source == 'sportsbook' else 0.53
+                min_edge = 0.012 if pred.line_source == 'sportsbook' else 0.0
+                if probability < min_prob or edge < min_edge:
+                    continue
+            elif pred.bet_type == 'safe':
                 if probability < 0.55 or edge <= 0:
                     continue
             elif pred.bet_type == 'standard':
-                # Standard bets must ALSO meet safe criteria (p >= 0.55 & edge > 0)
-                # This prevents low-probability standard bets from filling the list
                 if probability < 0.55 or edge <= 0:
-                    continue
-            elif pred.bet_type == 'long_shot':
-                # Long shots: 0.08 to 0.30 range
-                if probability < 0.08 or probability > 0.30:
                     continue
             
             # Skip long shots if not included

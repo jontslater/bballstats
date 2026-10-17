@@ -194,13 +194,23 @@ def collect_walk_forward_pairs(
 
 
 def calibration_train_week_filter(season: int, week: int) -> bool:
-    """Fit through 2025 only (no 2026 rows in training)."""
+    """Sample pool for min_train counts: all data through 2025."""
     return season <= 2025
 
 
-def calibration_val_week_filter(season: int, week: int) -> bool:
-    """Truly out-of-sample: 2026 regular-season weeks 1–6."""
+def calibration_selection_week_filter(season: int, week: int) -> bool:
+    """Hyperparameter selection (grid search Brier): 2025 season only."""
+    return season == 2025
+
+
+def calibration_holdout_week_filter(season: int, week: int) -> bool:
+    """True holdout: 2026 regular-season weeks 1–6."""
     return season == 2026 and week <= 6
+
+
+def calibration_val_week_filter(season: int, week: int) -> bool:
+    """Alias for holdout (backward compatible)."""
+    return calibration_holdout_week_filter(season, week)
 
 
 def oos_2026_early_week_filter(season: int, week: int) -> bool:
@@ -210,7 +220,8 @@ def oos_2026_early_week_filter(season: int, week: int) -> bool:
 def collect_calibration_train_val_pairs(
     min_history: int = 5,
 ) -> Tuple[Dict[str, List[Tuple[float, int]]], Dict[str, List[Tuple[float, int]]]]:
-    seasons = [2024, 2025, 2026]
+    """Train pool through 2025; selection pairs on 2025 only (not holdout)."""
+    seasons = [2024, 2025]
     train = collect_walk_forward_pairs(
         seasons,
         max_week=18,
@@ -219,15 +230,29 @@ def collect_calibration_train_val_pairs(
         week_filter=calibration_train_week_filter,
         standard_lines_only=True,
     )
-    val = collect_walk_forward_pairs(
+    selection = collect_walk_forward_pairs(
         seasons,
         max_week=18,
         min_history=min_history,
         apply_posthoc=False,
-        week_filter=calibration_val_week_filter,
+        week_filter=calibration_selection_week_filter,
         standard_lines_only=True,
     )
-    return train, val
+    return train, selection
+
+
+def collect_calibration_holdout_pairs(
+    min_history: int = 5,
+    apply_posthoc: bool = True,
+) -> Dict[str, List[Tuple[float, int]]]:
+    return collect_walk_forward_pairs(
+        [2026],
+        max_week=6,
+        min_history=min_history,
+        apply_posthoc=apply_posthoc,
+        week_filter=calibration_holdout_week_filter,
+        standard_lines_only=True,
+    )
 
 
 def walk_forward(seasons: List[int], max_week: int, min_history: int = 5, silent: bool = False):
@@ -426,7 +451,9 @@ def compute_median_p_over(
 
 
 def report_oos_2026_scores(silent: bool = False) -> Dict[str, Dict[str, float]]:
-    """Walk-forward on 2026 weeks 1–6 only (fit window ends at 2025)."""
+    """Walk-forward on 2026 weeks 1–6 only (hyperparameters fit on 2025)."""
+    from app.services.nfl_calibration_metrics import aggregate_bucket_stats, format_bucket_table
+
     CalibratedProbabilityCalculator._nfl_posthoc = None
     results = walk_forward(
         [2026],
@@ -436,18 +463,20 @@ def report_oos_2026_scores(silent: bool = False) -> Dict[str, Dict[str, float]]:
     )
     if not silent:
         print("=" * 80)
-        print("OUT-OF-SAMPLE: 2026 weeks 1–6 (training through 2025 only)")
+        print("TRUE HOLDOUT: 2026 weeks 1–6 (selection on 2025 only)")
         print("=" * 80)
         for stat_name, data in results.items():
             pairs = data.get("pairs") or []
             if not pairs:
                 continue
+            buckets = aggregate_bucket_stats(pairs)
             print(
-                f"{stat_name}: n={len(pairs)} "
+                f"\n{stat_name}: n={len(pairs)} "
                 f"Brier_raw={data.get('brier_raw', 0):.4f} "
                 f"Brier_posthoc={data.get('brier_posthoc', 0):.4f} "
                 f"median_line_avg_p_over={data.get('median_avg', 0):.3f}"
             )
+            print(format_bucket_table(buckets))
     return results
 
 

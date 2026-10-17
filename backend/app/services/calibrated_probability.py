@@ -138,7 +138,7 @@ class CalibratedProbabilityCalculator:
         scale_adj = {
             "receiving_yards": 0.91,
             "passing_yards": 0.97,
-            "receptions": 0.94,
+            "receptions": 0.97,
         }.get(stat_type or "", 1.0)
         sigma = float(np.clip(sigma, 0.12, 0.68))
         return float(
@@ -249,6 +249,8 @@ class CalibratedProbabilityCalculator:
                     prior_strength = PRIOR_STRENGTH_NFL_COMPLETIONS
                 else:
                     prior_strength = PRIOR_STRENGTH_NFL_RECEPTIONS
+                    if sample_size >= 10:
+                        prior_strength *= 0.65
                 if player_role and sample_size >= 6:
                     prior_strength *= 0.45
                 weight_player = sample_size / (sample_size + prior_strength)
@@ -264,8 +266,12 @@ class CalibratedProbabilityCalculator:
                     else:
                         prob = 1.0 - stats.poisson.cdf(int(line), rate)
                 else:
+                    rate_for_prob = shrunk_rate
+                    if stat_type == "receptions" and player_median and player_median > 0:
+                        if line >= float(player_median) - 1.25:
+                            rate_for_prob = max(shrunk_rate, float(player_median) * 0.97)
                     prob = self._nfl_count_over_probability(
-                        shrunk_rate, player_std, sample_size, line, stat_type, player_median
+                        rate_for_prob, player_std, sample_size, line, stat_type, player_median
                     )
             except (ValueError, ZeroDivisionError):
                 prob = 0.5
