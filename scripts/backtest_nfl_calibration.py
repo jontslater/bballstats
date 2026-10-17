@@ -15,7 +15,7 @@ import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple  # noqa: F401 — Tuple used in annotations
 
 backend_path = Path(__file__).parent.parent / "backend"
 sys.path.insert(0, str(backend_path))
@@ -109,22 +109,21 @@ def _league_mean_for_row(stat_name: str, row, player_mean: float) -> float:
     return player_mean
 
 
-def collect_walk_forward_pairs(
+def _iter_walk_forward_rows(
     seasons: List[int],
     max_week: int = 18,
     min_history: int = 5,
-    apply_posthoc: bool = False,
-) -> Dict[str, List[Tuple[float, int]]]:
-    calc = CalibratedProbabilityCalculator(sport="NFL")
+    week_filter=None,
+):
     extended = sorted(set(seasons + [s - 1 for s in seasons]))
     df = load_nflverse_player_stats(extended)
     df = df[df["season_type"] == "REG"].copy()
-    pairs: Dict[str, List[Tuple[float, int]]] = {k: [] for k in STAT_CONFIG}
-
     for season in seasons:
         season_df = df[df["season"] == season].sort_values(["player_id", "week"])
         for week in sorted(season_df["week"].unique()):
             if week > max_week:
+                continue
+            if week_filter and not week_filter(int(season), int(week)):
                 continue
             test_rows = season_df[season_df["week"] == week]
             for _, row in test_rows.iterrows():
@@ -137,45 +136,100 @@ def collect_walk_forward_pairs(
                     history = prior.tail(min_history * 3)
                 if len(history) < min_history:
                     continue
+                yield season, week, row, history, df, season_df
 
-                for stat_name, (col, lines) in STAT_CONFIG.items():
-                    hist_vals = [stat_value(r, col) for _, r in history.iterrows()]
-                    if col in ("passing_yards", "completions", "attempts") and max(hist_vals) <= 0:
-                        continue
-                    if col in ("rushing_yards", "rushing_attempts") and max(hist_vals) <= 0:
-                        continue
-                    if col in ("receptions", "receiving_yards") and max(hist_vals) <= 0:
-                        continue
 
-                    player_mean = sum(hist_vals) / len(hist_vals)
-                    if len(hist_vals) > 1:
-                        var = sum((v - player_mean) ** 2 for v in hist_vals) / (len(hist_vals) - 1)
-                        player_std = var ** 0.5
-                    else:
-                        player_std = max(player_mean * 0.25, 1.0)
+def collect_walk_forward_pairs(
+    seasons: List[int],
+    max_week: int = 18,
+    min_history: int = 5,
+    apply_posthoc: bool = False,
+    week_filter=None,
+    standard_lines_only: bool = False,
+) -> Dict[str, List[Tuple[float, int]]]:
+    calc = CalibratedProbabilityCalculator(sport="NFL")
+    pairs: Dict[str, List[Tuple[float, int]]] = {k: [] for k in STAT_CONFIG}
 
-                    league_mean = _league_mean_for_row(stat_name, row, player_mean)
-                    actual = stat_value(row, col)
-                    player_median = float(statistics.median(hist_vals))
-                    median_line = median_betting_line(player_median, stat_name)
-                    eval_lines = list(set(lines + [median_line]))
+    for _season, _week, row, history, _df, _season_df in _iter_walk_forward_rows(
+        seasons, max_week, min_history, week_filter
+    ):
+        for stat_name, (col, lines) in STAT_CONFIG.items():
+            hist_vals = [stat_value(r, col) for _, r in history.iterrows()]
+            if col in ("passing_yards", "completions", "attempts") and max(hist_vals) <= 0:
+                continue
+            if col in ("rushing_yards", "rushing_attempts") and max(hist_vals) <= 0:
+                continue
+            if col in ("receptions", "receiving_yards") and max(hist_vals) <= 0:
+                continue
 
-                    for line in eval_lines:
-                        out = calc.calculate_probability_for_line(
-                            line=float(line),
-                            player_mean=player_mean,
-                            player_std=player_std,
-                            sample_size=len(hist_vals),
-                            stat_type=stat_name,
-                            league_mean=league_mean,
-                            league_std=None,
-                            player_median=player_median,
-                            apply_posthoc=apply_posthoc,
-                        )
-                        p = out["probability"]
-                        hit = 1 if actual > line else 0
-                        pairs[stat_name].append((p, hit))
+            player_mean = sum(hist_vals) / len(hist_vals)
+            if len(hist_vals) > 1:
+                var = sum((v - player_mean) ** 2 for v in hist_vals) / (len(hist_vals) - 1)
+                player_std = var ** 0.5
+            else:
+                player_std = max(player_mean * 0.25, 1.0)
+
+            league_mean = _league_mean_for_row(stat_name, row, player_mean)
+            actual = stat_value(row, col)
+            player_median = float(statistics.median(hist_vals))
+            median_line = median_betting_line(player_median, stat_name)
+            eval_lines = lines if standard_lines_only else list(set(lines + [median_line]))
+
+            for line in eval_lines:
+                out = calc.calculate_probability_for_line(
+                    line=float(line),
+                    player_mean=player_mean,
+                    player_std=player_std,
+                    sample_size=len(hist_vals),
+                    stat_type=stat_name,
+                    league_mean=league_mean,
+                    league_std=None,
+                    player_median=player_median,
+                    apply_posthoc=apply_posthoc,
+                )
+                p = out["probability"]
+                hit = 1 if actual > line else 0
+                pairs[stat_name].append((p, hit))
     return pairs
+
+
+def calibration_train_week_filter(season: int, week: int) -> bool:
+    """Prior weeks for fitting: all 2024 + early 2025."""
+    if season <= 2024:
+        return True
+    if season == 2025:
+        return week <= 8
+    return False
+
+
+def calibration_val_week_filter(season: int, week: int) -> bool:
+    """Holdout: late 2025 + all 2026."""
+    if season == 2025:
+        return week >= 9
+    return season >= 2026
+
+
+def collect_calibration_train_val_pairs(
+    min_history: int = 5,
+) -> Tuple[Dict[str, List[Tuple[float, int]]], Dict[str, List[Tuple[float, int]]]]:
+    seasons = [2024, 2025, 2026]
+    train = collect_walk_forward_pairs(
+        seasons,
+        max_week=18,
+        min_history=min_history,
+        apply_posthoc=False,
+        week_filter=calibration_train_week_filter,
+        standard_lines_only=True,
+    )
+    val = collect_walk_forward_pairs(
+        seasons,
+        max_week=18,
+        min_history=min_history,
+        apply_posthoc=False,
+        week_filter=calibration_val_week_filter,
+        standard_lines_only=True,
+    )
+    return train, val
 
 
 def walk_forward(seasons: List[int], max_week: int, min_history: int = 5, silent: bool = False):

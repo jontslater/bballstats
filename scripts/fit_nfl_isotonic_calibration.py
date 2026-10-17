@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Fit walk-forward symmetric NFL post-hoc calibration (per-stat, only if Brier improves)."""
+"""Fit walk-forward NFL post-hoc calibration on prior weeks; validate on 2025-26 holdout."""
 import sys
 from pathlib import Path
 
 backend_path = Path(__file__).parent.parent / "backend"
 sys.path.insert(0, str(backend_path))
-
-from collections import defaultdict
-from typing import Dict, List, Tuple
 
 import importlib.util
 
@@ -15,73 +12,51 @@ _backtest_path = Path(__file__).parent / "backtest_nfl_calibration.py"
 _spec = importlib.util.spec_from_file_location("backtest_nfl_calibration", _backtest_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
-STAT_CONFIG = _mod.STAT_CONFIG
-stat_value = _mod.stat_value
-collect_walk_forward_pairs = _mod.collect_walk_forward_pairs
+collect_calibration_train_val_pairs = _mod.collect_calibration_train_val_pairs
 walk_forward = _mod.walk_forward
 
 from app.services.calibrated_probability import CalibratedProbabilityCalculator
 from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
 
 
-def _brier(pairs, alpha: float = 1.0) -> float:
-    if not pairs:
-        return 0.0
-    total = 0.0
-    for p_raw, y in pairs:
-        p = max(0.01, min(0.99, 0.5 + alpha * (p_raw - 0.5)))
-        total += (p - y) ** 2
-    return total / len(pairs)
-
-
 def main():
-    seasons = [2024]
-    pairs_by_stat: Dict[str, List[Tuple[float, int]]] = collect_walk_forward_pairs(
-        seasons, max_week=18, min_history=5, apply_posthoc=False
-    )
+    train, val = collect_calibration_train_val_pairs(min_history=5)
     calibrator = NFLPosthocCalibrator()
     maps = {}
-    for stat, stat_pairs in pairs_by_stat.items():
-        fitted = calibrator.fit_symmetric_alpha_holdout(stat_pairs, min_samples=150)
-        if fitted and fitted.get("enabled"):
-            alpha = float(fitted.get("alpha", 1.0))
-            raw_b = _brier(stat_pairs, 1.0)
-            cal_b = _brier(stat_pairs, alpha)
-            if cal_b >= raw_b - 0.0005:
-                fitted = {
-                    **fitted,
-                    "enabled": False,
-                    "alpha": 1.0,
-                    "brier_raw": round(raw_b, 5),
-                    "brier_cal": round(raw_b, 5),
-                }
+    for stat in train.keys():
+        fitted = calibrator.fit_prop_calibration(
+            train.get(stat) or [],
+            val.get(stat) or [],
+            min_train=100,
+            min_val=60,
+        )
         if fitted:
             maps[stat] = fitted
-    calibrator.save(
-        maps,
-        meta={"seasons": seasons, "method": "symmetric_alpha_walk_forward", "model": "production_v3"},
-    )
-    # Disable any stat whose post-hoc hurts on standard-line 2024 walk-forward
-    CalibratedProbabilityCalculator._nfl_posthoc = None  # reload maps
-    from app.services.calibrated_probability import CalibratedProbabilityCalculator as CPC
 
-    CPC._nfl_posthoc = None
-    summary = walk_forward(seasons, max_week=18, min_history=5, silent=True)
+    meta = {
+        "train": "2024 + 2025 weeks 1-8",
+        "val": "2025 weeks 9-18 + 2026",
+        "method": "symmetric_alpha_plus_high_bucket",
+        "model": "production_v4",
+    }
+    calibrator.save(maps, meta=meta)
+
+    CalibratedProbabilityCalculator._nfl_posthoc = None
+    holdout = walk_forward([2025, 2026], max_week=18, min_history=5, silent=True)
     for stat, entry in maps.items():
-        if not entry.get("enabled"):
+        if not (entry.get("enabled") or entry.get("high_enabled")):
             continue
-        data = summary.get(stat) or {}
+        data = holdout.get(stat) or {}
         br = data.get("brier_raw")
         bp = data.get("brier_posthoc")
         if br is not None and bp is not None and bp >= br - 0.0001:
             entry["enabled"] = False
+            entry["high_enabled"] = False
             entry["alpha"] = 1.0
-    calibrator.save(
-        maps,
-        meta={"seasons": seasons, "method": "symmetric_alpha_walk_forward", "model": "production_v3"},
-    )
-    enabled = sum(1 for m in maps.values() if m.get("enabled"))
-    print(f"Wrote {calibrator.params_path} with {len(maps)} stats ({enabled} enabled)")
+    calibrator.save(maps, meta=meta)
+
+    enabled = sum(1 for m in maps.values() if m.get("enabled") or m.get("high_enabled"))
+    print(f"Wrote {calibrator.params_path} with {len(maps)} stats ({enabled} with active calibration)")
 
 
 if __name__ == "__main__":

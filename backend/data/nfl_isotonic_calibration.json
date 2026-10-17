@@ -1,67 +1,74 @@
 {
   "meta": {
-    "seasons": [
-      2024
-    ],
-    "method": "symmetric_alpha_walk_forward",
-    "model": "production_v3"
+    "train": "2024 + 2025 weeks 1-8",
+    "val": "2025 weeks 9-18 + 2026",
+    "method": "symmetric_alpha_plus_high_bucket",
+    "model": "production_v4"
   },
   "stats": {
     "receptions": {
       "enabled": true,
-      "alpha": 0.9,
-      "brier_raw": 0.15213,
-      "brier_cal": 0.15105,
-      "holdout_raw": 0.15134,
-      "holdout_cal": 0.15001
+      "high_enabled": true,
+      "alpha": 0.95,
+      "high_knee": 0.52,
+      "high_factor": 0.75,
+      "brier_raw": 0.10689,
+      "brier_cal": 0.10594,
+      "val_brier": 0.10594
     },
     "receiving_yards": {
       "enabled": true,
-      "alpha": 0.9,
-      "brier_raw": 0.14852,
-      "brier_cal": 0.14678,
-      "holdout_raw": 0.14323,
-      "holdout_cal": 0.14155
+      "high_enabled": true,
+      "alpha": 0.95,
+      "high_knee": 0.52,
+      "high_factor": 0.45,
+      "brier_raw": 0.09344,
+      "brier_cal": 0.09197,
+      "val_brier": 0.09197
     },
     "rushing_yards": {
-      "enabled": false,
-      "alpha": 1.0,
-      "brier_raw": 0.14428,
-      "brier_cal": 0.1387,
-      "holdout_raw": 0.14266,
-      "holdout_cal": 0.13688
+      "enabled": true,
+      "high_enabled": true,
+      "alpha": 0.95,
+      "high_knee": 0.55,
+      "high_factor": 0.85,
+      "brier_raw": 0.06817,
+      "brier_cal": 0.06741,
+      "val_brier": 0.06741
     },
     "passing_yards": {
       "enabled": true,
-      "alpha": 0.7,
-      "brier_raw": 0.22077,
-      "brier_cal": 0.21374,
-      "holdout_raw": 0.22221,
-      "holdout_cal": 0.21593
+      "high_enabled": true,
+      "alpha": 0.9,
+      "high_knee": 0.52,
+      "high_factor": 0.75,
+      "brier_raw": 0.18794,
+      "brier_cal": 0.18634,
+      "val_brier": 0.18634
     },
     "completions": {
-      "enabled": true,
-      "alpha": 0.9,
-      "brier_raw": 0.19386,
-      "brier_cal": 0.19254,
-      "holdout_raw": 0.20794,
-      "holdout_cal": 0.2056
+      "enabled": false,
+      "high_enabled": false,
+      "alpha": 1.0,
+      "brier_raw": 0.17736,
+      "brier_cal": 0.17736,
+      "val_brier": 0.17736
     },
     "attempts": {
       "enabled": false,
+      "high_enabled": false,
       "alpha": 1.0,
-      "brier_raw": 0.17026,
-      "brier_cal": 0.17026,
-      "holdout_raw": 0.17084,
-      "holdout_cal": 0.17022
+      "brier_raw": 0.15028,
+      "brier_cal": 0.15028,
+      "val_brier": 0.15028
     },
     "anytime_td": {
       "enabled": false,
+      "high_enabled": false,
       "alpha": 1.0,
-      "brier_raw": 0.16573,
-      "brier_cal": 0.16573,
-      "holdout_raw": 0.16869,
-      "holdout_cal": 0.16869
+      "brier_raw": 0.05353,
+      "brier_cal": 0.05353,
+      "val_brier": 0.05353
     }
   }
 }

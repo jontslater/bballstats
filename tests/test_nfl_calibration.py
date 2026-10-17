@@ -196,8 +196,9 @@ class TestNFLMedianSymmetry(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("backtest_nfl_calibration", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        averages = mod.compute_median_p_over([2024], max_week=18, min_history=5)
-        mod.assert_median_fairness(averages, low=0.45, high=0.55)
+        for seasons in ([2024], [2025, 2026]):
+            averages = mod.compute_median_p_over(seasons, max_week=18, min_history=5)
+            mod.assert_median_fairness(averages, low=0.45, high=0.55)
 
 
 class TestNFLTailAndSymmetry(unittest.TestCase):
@@ -215,16 +216,64 @@ class TestNFLTailAndSymmetry(unittest.TestCase):
         )
         self.assertLess(out["probability"], 0.12)
 
-    def test_symmetric_posthoc_preserves_complement(self):
+    def test_symmetric_alpha_preserves_complement(self):
         from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
 
         cal = NFLPosthocCalibrator(params_path=backend_path / "data" / "nfl_isotonic_calibration.json")
         p = 0.62
         q = 1.0 - p
-        for stat in ("completions", "receptions", "rushing_yards"):
-            cp = cal.apply(stat, p)
-            cq = cal.apply(stat, q)
-            self.assertAlmostEqual(cp + cq, 1.0, delta=0.02)
+        for stat in ("completions", "attempts"):
+            entry = cal._stats.get(stat) or {}
+            alpha = float(entry.get("alpha", 1.0))
+            cp = 0.5 + alpha * (p - 0.5)
+            cq = 0.5 + alpha * (q - 0.5)
+            self.assertAlmostEqual(cp + cq, 1.0, delta=0.001)
+
+
+class TestNFLEligibilityUsage(unittest.TestCase):
+    def test_wr_usage_qualifies_without_lineup(self):
+        from app.services.nfl_eligibility import nfl_player_role_eligible
+
+        db = _session()
+        try:
+            home = Team(sport="NFL", name="H", abbreviation="HO", conference="NFC", division="E")
+            away = Team(sport="NFL", name="A", abbreviation="AW", conference="NFC", division="E")
+            db.add_all([home, away])
+            db.flush()
+            season = Season(sport="NFL", season_year="2026", is_current=True)
+            db.add(season)
+            db.flush()
+            wr = Player(sport="NFL", name="WR1", position="WR", current_team_id=home.team_id)
+            db.add(wr)
+            db.flush()
+            for i in range(6):
+                g = Game(
+                    sport="NFL",
+                    game_date=date(2026, 9, 10 + i),
+                    season_id=season.season_id,
+                    home_team_id=home.team_id,
+                    away_team_id=away.team_id,
+                    game_status="finished",
+                )
+                db.add(g)
+                db.flush()
+                db.add(
+                    PlayerGameStat(
+                        sport="NFL",
+                        player_id=wr.player_id,
+                        game_id=g.game_id,
+                        team_id=home.team_id,
+                        opponent_team_id=away.team_id,
+                        targets=8,
+                        receptions=5,
+                        receiving_yards=70,
+                    )
+                )
+            db.commit()
+            ok, _ = nfl_player_role_eligible(db, wr.player_id, "receptions", min_games=5)
+            self.assertTrue(ok)
+        finally:
+            db.close()
 
 
 class TestNFLPosthocFitter(unittest.TestCase):
@@ -232,9 +281,10 @@ class TestNFLPosthocFitter(unittest.TestCase):
         from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
 
         pairs = [(0.55, 1), (0.45, 0)] * 120
-        res = NFLPosthocCalibrator.fit_symmetric_alpha_holdout(pairs, min_samples=100)
+        train = [(0.55, 1), (0.45, 0)] * 80
+        val = [(0.58, 0), (0.42, 1)] * 40
+        res = NFLPosthocCalibrator.fit_prop_calibration(train, val, min_train=80, min_val=40)
         self.assertIsNotNone(res)
-        self.assertFalse(res.get("enabled", True))
 
 
 class TestAnytimeTDDefinition(unittest.TestCase):

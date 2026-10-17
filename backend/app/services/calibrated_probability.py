@@ -42,8 +42,8 @@ NFL_SKEWED_YARDAGE_STATS = frozenset({
     'passing_yards', 'rushing_yards', 'receiving_yards', 'receptions',
 })
 
-NFL_QB_COUNT_COMPRESSION_KNEE = 0.62
-NFL_QB_COUNT_COMPRESSION_FACTOR = 0.42
+NFL_QB_COUNT_COMPRESSION_KNEE = 0.58
+NFL_QB_COUNT_COMPRESSION_FACTOR = 0.38
 
 # High-end compression to fix overshoot at p >= 0.65
 # Compresses probabilities above knee_point by shrinking excess over base rate
@@ -133,10 +133,17 @@ class CalibratedProbabilityCalculator:
         if stat_type == "rushing_yards":
             std = float(player_std) if player_std and player_std > 0 else med * 0.28
             std = float(np.clip(std, med * 0.18, med * 0.45))
-            loc = max(med * 0.96, 0.5)
+            loc = max(med * 0.97, 0.5)
             return float(1.0 - stats.norm.cdf(line + 0.5, loc=loc, scale=std))
-        sigma = float(np.clip(sigma, 0.12, 0.72))
-        return float(1.0 - stats.lognorm.cdf(line + 0.5, s=sigma, scale=med))
+        scale_adj = {
+            "receiving_yards": 0.91,
+            "passing_yards": 0.97,
+            "receptions": 0.94,
+        }.get(stat_type or "", 1.0)
+        sigma = float(np.clip(sigma, 0.12, 0.68))
+        return float(
+            1.0 - stats.lognorm.cdf(line + 0.5, s=sigma, scale=max(med * scale_adj, 0.5))
+        )
 
     def _nfl_count_over_probability(
         self,

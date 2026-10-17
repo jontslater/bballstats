@@ -1,15 +1,14 @@
 """
-Walk-forward symmetric post-hoc calibration for NFL prop probabilities.
+Walk-forward post-hoc calibration for NFL prop OVER probabilities.
 
-Only applies per-stat scaling when it improves out-of-sample Brier vs the raw model.
-Symmetric form preserves P(over) + P(under) = 1 at the same line:
-    p_cal = 0.5 + alpha * (p_raw - 0.5)
+- Symmetric scale: p = 0.5 + α(p_raw − 0.5)
+- High-bucket (over-side) compression: p = knee + (p − knee) × factor for p > knee
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 DEFAULT_PARAMS_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "nfl_isotonic_calibration.json"
@@ -32,119 +31,105 @@ class NFLPosthocCalibrator:
             self._stats = {}
 
     def is_enabled(self, stat_type: str) -> bool:
-        entry = self._stats.get(stat_type)
-        return bool(entry and entry.get("enabled"))
+        entry = self._stats.get(stat_type) or {}
+        return bool(entry.get("enabled") or entry.get("high_enabled"))
 
     def apply(self, stat_type: str, raw_prob: float) -> float:
         entry = self._stats.get(stat_type)
-        if not entry or not entry.get("enabled"):
+        if not entry:
             return raw_prob
-        alpha = float(entry.get("alpha", 1.0))
-        p = 0.5 + alpha * (raw_prob - 0.5)
+        p = float(raw_prob)
+        if entry.get("enabled"):
+            alpha = float(entry.get("alpha", 1.0))
+            p = 0.5 + alpha * (p - 0.5)
+        if entry.get("high_enabled"):
+            knee = float(entry.get("high_knee", 0.55))
+            factor = float(entry.get("high_factor", 0.7))
+            if p > knee:
+                p = knee + (p - knee) * factor
         return max(0.01, min(0.99, p))
 
     @staticmethod
-    def fit_symmetric_alpha(
-        pairs: list,
-        min_samples: int = 200,
-        grid: Optional[list] = None,
-    ) -> Optional[Dict]:
-        """Find alpha in (0,1] minimizing Brier; return None if no improvement vs alpha=1."""
-        if not pairs or len(pairs) < min_samples:
-            return None
-        if grid is None:
-            grid = [round(x, 2) for x in [1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5]]
-
-        def brier(alpha: float) -> float:
-            total = 0.0
-            for p_raw, y in pairs:
-                p = 0.5 + alpha * (p_raw - 0.5)
-                p = max(0.01, min(0.99, p))
-                total += (p - y) ** 2
-            return total / len(pairs)
-
-        brier_one = brier(1.0)
-        best_alpha = 1.0
-        best_brier = brier_one
-        for alpha in grid:
-            if alpha <= 0:
-                continue
-            b = brier(alpha)
-            if b < best_brier - 1e-6:
-                best_brier = b
-                best_alpha = alpha
-
-        if best_alpha >= 0.999 or best_brier >= brier_one - 1e-5:
-            return {"enabled": False, "alpha": 1.0, "brier_raw": round(brier_one, 5), "brier_cal": round(brier_one, 5)}
-        return {
-            "enabled": True,
-            "alpha": round(best_alpha, 3),
-            "brier_raw": round(brier_one, 5),
-            "brier_cal": round(best_brier, 5),
-        }
+    def _brier(pairs: List[Tuple[float, int]], transform) -> float:
+        if not pairs:
+            return 0.0
+        total = 0.0
+        for p_raw, y in pairs:
+            p = max(0.01, min(0.99, transform(p_raw)))
+            total += (p - y) ** 2
+        return total / len(pairs)
 
     @staticmethod
-    def fit_symmetric_alpha_holdout(
-        pairs: list,
-        min_samples: int = 200,
-        holdout_frac: float = 0.25,
-        grid: Optional[list] = None,
-    ) -> Optional[Dict]:
-        """Fit alpha on train split; enable only if holdout Brier improves vs raw."""
-        if not pairs or len(pairs) < min_samples:
-            return None
-        if grid is None:
-            grid = [round(x, 2) for x in [1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5]]
+    def fit_prop_calibration(
+        train_pairs: List[Tuple[float, int]],
+        val_pairs: List[Tuple[float, int]],
+        min_train: int = 120,
+        min_val: int = 80,
+    ) -> Dict:
+        """Fit α and high-bucket factor on train; enable only if val Brier beats raw."""
+        if len(train_pairs) < min_train or len(val_pairs) < min_val:
+            return {"enabled": False, "high_enabled": False, "alpha": 1.0}
 
-        split = max(int(len(pairs) * (1.0 - holdout_frac)), min_samples // 2)
-        train = pairs[:split]
-        test = pairs[split:]
-        if len(test) < 80:
-            test = pairs[-max(80, len(pairs) // 5) :]
-            train = pairs[: len(pairs) - len(test)]
+        alphas = [1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7]
+        knees = [0.52, 0.55, 0.58]
+        factors = [0.45, 0.55, 0.65, 0.75, 0.85]
 
-        def brier_on(pr: list, alpha: float) -> float:
-            total = 0.0
-            for p_raw, y in pr:
-                p = max(0.01, min(0.99, 0.5 + alpha * (p_raw - 0.5)))
-                total += (p - y) ** 2
-            return total / len(pr)
+        def make_transform(alpha: float, high_knee: Optional[float], high_factor: Optional[float]):
+            def _t(p_raw: float) -> float:
+                p = 0.5 + alpha * (p_raw - 0.5)
+                if high_knee is not None and high_factor is not None and p > high_knee:
+                    p = high_knee + (p - high_knee) * high_factor
+                return p
 
-        def best_alpha_for(pr: list) -> float:
-            best_a = 1.0
-            best_b = brier_on(pr, 1.0)
-            for alpha in grid:
-                if alpha <= 0:
-                    continue
-                b = brier_on(pr, alpha)
-                if b < best_b - 1e-6:
-                    best_b = b
-                    best_a = alpha
-            return best_a
+            return _t
 
-        alpha = best_alpha_for(train)
-        raw_test = brier_on(test, 1.0)
-        cal_test = brier_on(test, alpha)
-        raw_all = brier_on(pairs, 1.0)
+        raw_val = NFLPosthocCalibrator._brier(val_pairs, lambda x: x)
+        best = {"enabled": False, "high_enabled": False, "alpha": 1.0, "val_brier": raw_val}
+        best_b = raw_val
 
-        cal_all = brier_on(pairs, alpha)
-        if cal_test >= raw_test - 0.001 or cal_all >= raw_all - 0.001:
+        for alpha in alphas:
+            for knee in knees:
+                for factor in factors:
+                    tr = make_transform(alpha, knee, factor)
+                    vb = NFLPosthocCalibrator._brier(val_pairs, tr)
+                    if vb < best_b - 0.0003:
+                        best_b = vb
+                        best = {
+                            "enabled": alpha < 0.999,
+                            "high_enabled": True,
+                            "alpha": round(alpha, 3),
+                            "high_knee": round(knee, 3),
+                            "high_factor": round(factor, 3),
+                            "brier_raw": round(raw_val, 5),
+                            "brier_cal": round(vb, 5),
+                            "val_brier": round(vb, 5),
+                        }
+
+        # Also try alpha-only and high-only
+        for alpha in alphas:
+            tr = make_transform(alpha, None, None)
+            vb = NFLPosthocCalibrator._brier(val_pairs, tr)
+            if vb < best_b - 0.0003:
+                best_b = vb
+                best = {
+                    "enabled": alpha < 0.999,
+                    "high_enabled": False,
+                    "alpha": round(alpha, 3),
+                    "brier_raw": round(raw_val, 5),
+                    "brier_cal": round(vb, 5),
+                    "val_brier": round(vb, 5),
+                }
+
+        if best_b >= raw_val - 0.0005:
             return {
                 "enabled": False,
+                "high_enabled": False,
                 "alpha": 1.0,
-                "brier_raw": round(raw_all, 5),
-                "brier_cal": round(raw_all, 5),
-                "holdout_raw": round(raw_test, 5),
-                "holdout_cal": round(cal_test, 5),
+                "brier_raw": round(raw_val, 5),
+                "brier_cal": round(raw_val, 5),
+                "val_brier": round(raw_val, 5),
             }
-        return {
-            "enabled": True,
-            "alpha": round(alpha, 3),
-            "brier_raw": round(raw_all, 5),
-            "brier_cal": round(cal_all, 5),
-            "holdout_raw": round(raw_test, 5),
-            "holdout_cal": round(cal_test, 5),
-        }
+        return best
 
     def save(self, stats_maps: Dict[str, Dict], meta: Optional[Dict] = None) -> None:
         payload = {"meta": meta or {}, "stats": stats_maps}
