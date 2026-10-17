@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Game, GameSchedule, Season, Team
 from app.services.nfl_data import parse_espn_status
+from app.services.nfl_game_dedup import dedupe_nfl_games, find_matching_nfl_game
 
 
 def find_nfl_team(db: Session, abbrev: str) -> Optional[Team]:
@@ -54,6 +55,18 @@ def persist_espn_games(db: Session, games: List[Dict], season: Season) -> Dict[s
                     GameSchedule.home_team_id == home_team.team_id,
                     GameSchedule.away_team_id == away_team.team_id,
                 ).first()
+            if not existing_schedule:
+                match_game = find_matching_nfl_game(
+                    db,
+                    home_team.team_id,
+                    away_team.team_id,
+                    game_date,
+                    str(external_id) if external_id else None,
+                )
+                if match_game:
+                    existing_schedule = db.query(GameSchedule).filter(
+                        GameSchedule.game_id == match_game.game_id
+                    ).first()
 
             if existing_schedule:
                 existing_schedule.external_game_id = external_id or existing_schedule.external_game_id
@@ -75,19 +88,13 @@ def persist_espn_games(db: Session, games: List[Dict], season: Season) -> Dict[s
 
             # Finished games → Game row with scores
             if status == "finished" and home_score is not None and away_score is not None:
-                game = None
-                if external_id:
-                    game = db.query(Game).filter(
-                        Game.sport == "NFL",
-                        Game.espn_game_id == str(external_id),
-                    ).first()
-                if not game:
-                    game = db.query(Game).filter(
-                        Game.sport == "NFL",
-                        Game.game_date == game_date,
-                        Game.home_team_id == home_team.team_id,
-                        Game.away_team_id == away_team.team_id,
-                    ).first()
+                game = find_matching_nfl_game(
+                    db,
+                    home_team.team_id,
+                    away_team.team_id,
+                    game_date,
+                    str(external_id) if external_id else None,
+                )
                 if game:
                     game.home_score = home_score
                     game.away_score = away_score
@@ -117,13 +124,13 @@ def persist_espn_games(db: Session, games: List[Dict], season: Season) -> Dict[s
                         Game.sport == "NFL",
                         Game.espn_game_id == str(external_id),
                     ).first()
-                if not game:
-                    game = db.query(Game).filter(
-                        Game.sport == "NFL",
-                        Game.game_date == game_date,
-                        Game.home_team_id == home_team.team_id,
-                        Game.away_team_id == away_team.team_id,
-                    ).first()
+                game = find_matching_nfl_game(
+                    db,
+                    home_team.team_id,
+                    away_team.team_id,
+                    game_date,
+                    str(external_id) if external_id else None,
+                )
                 if not game:
                     game = Game(
                         sport="NFL",
@@ -138,16 +145,19 @@ def persist_espn_games(db: Session, games: List[Dict], season: Season) -> Dict[s
                     db.flush()
                 else:
                     game.game_status = status
+                    game.game_date = game_date
                     if external_id and not game.espn_game_id:
                         game.espn_game_id = str(external_id)
                 schedule.game_id = game.game_id
+                schedule.game_date = game_date
 
         except Exception:
             errors += 1
             continue
 
     db.commit()
-    return {"created": created, "updated": updated, "errors": errors}
+    dedupe = dedupe_nfl_games(db, season.season_id)
+    return {"created": created, "updated": updated, "errors": errors, "deduped": dedupe.get("merged", 0)}
 
 
 def sync_upcoming_schedule_window(

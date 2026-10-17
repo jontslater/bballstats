@@ -20,10 +20,10 @@ PRIOR_STRENGTH_TB = float(os.environ.get('K_TB', '15.0'))  # Re-tuned after NB f
 PRIOR_STRENGTH_HR = float(os.environ.get('K_HR', '40.0'))  # HRs are rare, need stronger shrinkage
 
 # NFL count-stat shrinkage (receptions, attempts, etc.)
-PRIOR_STRENGTH_NFL_RECEPTIONS = float(os.environ.get('K_NFL_REC', '12.0'))
-PRIOR_STRENGTH_NFL_ATTEMPTS = float(os.environ.get('K_NFL_ATT', '15.0'))
-PRIOR_STRENGTH_NFL_COMPLETIONS = float(os.environ.get('K_NFL_CMP', '15.0'))
-PRIOR_STRENGTH_NFL_ANYTIME_TD = float(os.environ.get('K_NFL_ATD', '25.0'))
+PRIOR_STRENGTH_NFL_RECEPTIONS = float(os.environ.get('K_NFL_REC', '8.0'))
+PRIOR_STRENGTH_NFL_ATTEMPTS = float(os.environ.get('K_NFL_ATT', '6.0'))
+PRIOR_STRENGTH_NFL_COMPLETIONS = float(os.environ.get('K_NFL_CMP', '6.0'))
+PRIOR_STRENGTH_NFL_ANYTIME_TD = float(os.environ.get('K_NFL_ATD', '18.0'))
 
 NFL_COUNT_STATS = {
     'receptions', 'completions', 'attempts', 'pass_attempts',
@@ -47,6 +47,22 @@ COMPRESSION_FACTOR = float(os.environ.get('COMPRESSION_FACTOR', '0.50'))  # Shri
 
 class CalibratedProbabilityCalculator:
     """Calculate calibrated probabilities with shrinkage and base rates."""
+
+    _nfl_posthoc = None
+
+    @classmethod
+    def _get_nfl_posthoc(cls):
+        if cls._nfl_posthoc is None:
+            from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
+            cls._nfl_posthoc = NFLPosthocCalibrator()
+        return cls._nfl_posthoc
+
+    def _finalize_nfl_prob(self, stat_type: str, raw_prob: float) -> Tuple[float, float]:
+        """Return (raw_prob, posthoc calibrated_prob) for NFL."""
+        if self.sport != 'NFL':
+            return raw_prob, raw_prob
+        calibrated = self._get_nfl_posthoc().apply(stat_type, raw_prob)
+        return raw_prob, calibrated
     
     # League-wide base rates for different sports and stat types
     # These are P(player exceeds typical line) not per-game averages
@@ -122,7 +138,9 @@ class CalibratedProbabilityCalculator:
         sample_size: int,
         stat_type: str,
         league_mean: Optional[float] = None,
-        league_std: Optional[float] = None
+        league_std: Optional[float] = None,
+        player_role: Optional[str] = None,
+        apply_posthoc: bool = True,
     ) -> Dict[str, float]:
         """
         Calculate calibrated probability of exceeding a line.
@@ -153,6 +171,8 @@ class CalibratedProbabilityCalculator:
                     prior_strength = PRIOR_STRENGTH_NFL_COMPLETIONS
                 else:
                     prior_strength = PRIOR_STRENGTH_NFL_RECEPTIONS
+                if player_role and sample_size >= 6:
+                    prior_strength *= 0.45
                 weight_player = sample_size / (sample_size + prior_strength)
                 shrunk_rate = weight_player * player_mean + (1 - weight_player) * league_mean
             else:
@@ -161,7 +181,6 @@ class CalibratedProbabilityCalculator:
             dispersion = NFL_COUNT_DISPERSION.get(stat_type, 1.25)
             try:
                 if stat_type == 'anytime_td':
-                    # P(>=1 TD) from Poisson rate = mean TDs per game
                     prob = 1.0 - stats.poisson.cdf(0, max(shrunk_rate, 0.001))
                 elif dispersion > 1.35:
                     variance = dispersion * max(shrunk_rate, 0.001)
@@ -179,12 +198,15 @@ class CalibratedProbabilityCalculator:
             if sample_size < 30 and prob > 0.85:
                 prob = 0.85
             prob = max(0.01, min(0.99, prob))
+            raw_prob = prob
+            cal_prob = self._get_nfl_posthoc().apply(stat_type, prob) if apply_posthoc else prob
             return {
-                'probability': round(prob, 3),
+                'probability': round(cal_prob, 3),
+                'calibrated_probability': round(cal_prob, 3),
                 'shrunk_mean': round(shrunk_rate, 2),
                 'effective_std': round(player_std, 2),
                 'effective_n': sample_size,
-                'raw_probability': round(prob, 3),
+                'raw_probability': round(raw_prob, 3),
             }
 
         # For MLB count stats, use discrete Poisson/Negative Binomial model
@@ -258,9 +280,12 @@ class CalibratedProbabilityCalculator:
         
         # For continuous stats or non-MLB, use Normal/Student-t
         # Apply Empirical Bayes shrinkage to the mean
+        prior_strength = 10.0
+        if self.sport == 'NFL' and player_role:
+            prior_strength = 5.0
         if league_mean is not None:
             shrunk_mean, effective_n = self._shrink_mean_toward_prior(
-                player_mean, league_mean, sample_size
+                player_mean, league_mean, sample_size, prior_strength=prior_strength
             )
         else:
             shrunk_mean = player_mean
@@ -284,14 +309,18 @@ class CalibratedProbabilityCalculator:
         # Apply base rate adjustment
         base_hit_rate = self._get_base_hit_rate(stat_type)
         calibrated_prob = self._apply_base_rate_adjustment(
-            raw_prob, base_hit_rate, effective_n, stat_type
+            raw_prob, base_hit_rate, effective_n, stat_type, sport=self.sport
         )
         
         # Clamp to valid range
         calibrated_prob = max(0.01, min(0.99, calibrated_prob))
+
+        if self.sport == 'NFL' and apply_posthoc:
+            calibrated_prob = self._get_nfl_posthoc().apply(stat_type, calibrated_prob)
         
         return {
             'probability': round(calibrated_prob, 3),
+            'calibrated_probability': round(calibrated_prob, 3),
             'shrunk_mean': round(shrunk_mean, 2),
             'effective_std': round(effective_std, 2),
             'effective_n': effective_n,
@@ -387,7 +416,8 @@ class CalibratedProbabilityCalculator:
         self,
         player_mean: float,
         league_mean: float,
-        sample_size: int
+        sample_size: int,
+        prior_strength: float = 10.0,
     ) -> Tuple[float, float]:
         """
         Apply Empirical Bayes shrinkage to player mean toward league prior.
@@ -402,8 +432,6 @@ class CalibratedProbabilityCalculator:
         (not inflated by pseudo-observations) for display to users.
         """
         # Shrinkage weight: more data = less shrinkage
-        # Use a prior strength equivalent to 10 games
-        prior_strength = 10.0
         weight_player = sample_size / (sample_size + prior_strength)
         weight_prior = prior_strength / (sample_size + prior_strength)
         
@@ -448,7 +476,8 @@ class CalibratedProbabilityCalculator:
         raw_prob: float,
         base_hit_rate: float,
         effective_n: float,
-        stat_type: str = None
+        stat_type: str = None,
+        sport: str = None,
     ) -> float:
         """
         Adjust probability toward base rate, weighted by sample size.
@@ -458,7 +487,10 @@ class CalibratedProbabilityCalculator:
         """
         # Base weight inversely proportional to sample size
         # Default: At n=10: 20%, at n=50+: 2%
-        base_weight = min(0.20, 5.0 / effective_n)
+        if sport == 'NFL':
+            base_weight = min(0.06, 1.5 / max(effective_n, 1))
+        else:
+            base_weight = min(0.20, 5.0 / effective_n)
         
         # Home runs need stronger shrinkage toward base rate (they're rare)
         if stat_type == 'home_runs':

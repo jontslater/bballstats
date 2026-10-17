@@ -176,11 +176,8 @@ class DistributionEngine:
                 elif stat_type in ('attempts', 'pass_attempts'):
                     value = stat.pass_attempts
                 elif stat_type == 'anytime_td':
-                    value = (
-                        (stat.passing_tds or 0)
-                        + (stat.rushing_tds or 0)
-                        + (stat.receiving_tds or 0)
-                    )
+                    # Scorer props: rushing + receiving only (exclude passing TDs for QBs)
+                    value = (stat.rushing_tds or 0) + (stat.receiving_tds or 0)
                 elif stat_type == 'rushing_yards':
                     value = stat.rushing_yards
                 elif stat_type == 'rushing_tds':

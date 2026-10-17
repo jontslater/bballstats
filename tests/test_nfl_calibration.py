@@ -128,5 +128,96 @@ class TestNFLSuggestedBetsFields(unittest.TestCase):
         self.assertEqual(american_break_even_odds(0.55), -122)
 
 
+class TestNFLHistoryHelper(unittest.TestCase):
+    def test_unknown_stat_returns_dict_not_list(self):
+        from app.services.prediction_history_helper import get_last_n_games_for_stat
+
+        db = _session()
+        try:
+            out = get_last_n_games_for_stat(db, player_id=1, stat_type="rushing_attempts", sport="NFL")
+            self.assertIsInstance(out, dict)
+            self.assertIn("games", out)
+        finally:
+            db.close()
+
+
+class TestNFLBetLineFloors(unittest.TestCase):
+    def test_passing_yards_standard_not_half(self):
+        from app.services.bet_definitions import BetDefinitions
+
+        defs = BetDefinitions(sport="NFL")
+        lines = defs.calculate_bet_lines(
+            adjusted_mean=245,
+            adjusted_std=45,
+            sample_size=12,
+            stat_type="passing_yards",
+            median_line=238,
+            player_role="QB",
+            league_mean=220,
+        )
+        self.assertGreaterEqual(lines["standard_line"], 149.5)
+        self.assertGreater(lines["safe_line"], 50)
+
+
+class TestNFLDataLoader(unittest.TestCase):
+    def test_modern_stats_include_2025(self):
+        from app.services.nfl_data import load_nflverse_player_stats
+
+        df = load_nflverse_player_stats([2025])
+        self.assertFalse(df.empty)
+        self.assertIn("recent_team", df.columns)
+        self.assertTrue((df["season"] == 2025).any())
+
+
+class TestAnytimeTDDefinition(unittest.TestCase):
+    def test_distribution_anytime_excludes_passing(self):
+        from app.services.distribution_engine import DistributionEngine
+
+        db = _session()
+        try:
+            home = Team(sport="NFL", name="H", abbreviation="HH", conference="AFC", division="E")
+            away = Team(sport="NFL", name="A", abbreviation="AA", conference="AFC", division="E")
+            db.add_all([home, away])
+            db.flush()
+            season = Season(sport="NFL", season_year="2026", is_current=True)
+            db.add(season)
+            db.flush()
+            qb = Player(sport="NFL", name="QB", position="QB", current_team_id=home.team_id)
+            db.add(qb)
+            db.flush()
+            for i in range(6):
+                g = Game(
+                    sport="NFL",
+                    game_date=date(2026, 9, 10 + i),
+                    season_id=season.season_id,
+                    home_team_id=home.team_id,
+                    away_team_id=away.team_id,
+                    game_status="finished",
+                )
+                db.add(g)
+                db.flush()
+                db.add(
+                    PlayerGameStat(
+                        sport="NFL",
+                        player_id=qb.player_id,
+                        game_id=g.game_id,
+                        team_id=home.team_id,
+                        opponent_team_id=away.team_id,
+                        pass_attempts=30,
+                        passing_tds=3,
+                        rushing_tds=0,
+                        receiving_tds=0,
+                    )
+                )
+            db.commit()
+            dist = DistributionEngine(db).calculate_base_distribution(
+                qb.player_id, "anytime_td", sport="NFL", season_ids=[season.season_id], min_games=5
+            )
+            self.assertIsNotNone(dist)
+            self.assertEqual(dist["mean"], 0.0)
+        finally:
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

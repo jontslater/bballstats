@@ -28,7 +28,9 @@ class BetDefinitions:
         stat_type: str,
         real_line: Optional[float] = None,
         league_mean: Optional[float] = None,
-        league_std: Optional[float] = None
+        league_std: Optional[float] = None,
+        median_line: Optional[float] = None,
+        player_role: Optional[str] = None,
     ) -> Dict[str, any]:
         """
         Calculate bet lines and calibrated probabilities.
@@ -71,8 +73,12 @@ class BetDefinitions:
             else:
                 shrunk_mean = adjusted_mean
             
-            # Round to nearest half-integer for discrete grid
-            standard_line = round(shrunk_mean * 2) / 2
+            center = median_line if median_line and median_line > 0 else shrunk_mean
+            if self.sport == 'NFL':
+                standard_line = round(center * 2) / 2
+                standard_line = max(standard_line, self._nfl_min_meaningful_line(stat_type, center))
+            else:
+                standard_line = round(shrunk_mean * 2) / 2
             
             # Ensure minimum sensible line per stat type
             min_line = {
@@ -96,18 +102,26 @@ class BetDefinitions:
             is_synthetic = True
         
         # Calculate probability for standard line
+        calc_kwargs = {
+            'league_mean': league_mean,
+            'league_std': league_std,
+            'player_role': player_role,
+        }
         standard_data = self.calibrator.calculate_probability_for_line(
-            standard_line, adjusted_mean, adjusted_std, sample_size, stat_type,
-            league_mean, league_std
+            standard_line, adjusted_mean, adjusted_std, sample_size, stat_type, **calc_kwargs
         )
         
         # Generate candidate lines on discrete grid
-        # Range: 0.5 to reasonable max for this stat type
         max_candidate = self._get_max_line_for_stat(stat_type, adjusted_mean)
-        candidates = [x * 0.5 for x in range(1, int(max_candidate * 2) + 1)]
-        
-        # Ensure minimum line is 0.5
-        candidates = [c for c in candidates if c >= 0.5]
+        if self.sport == 'NFL':
+            min_c = self._nfl_min_meaningful_line(stat_type, median_line or adjusted_mean)
+            candidates = [
+                round(x * 2) / 2
+                for x in range(int(min_c * 2), int(max_candidate * 2) + 1)
+            ]
+        else:
+            candidates = [x * 0.5 for x in range(1, int(max_candidate * 2) + 1)]
+            candidates = [c for c in candidates if c >= 0.5]
         
         # Find safe line: highest line with best probability (not requiring p>=0.65)
         # Safe = highest probability pick, even if not a "sure thing"
@@ -118,10 +132,11 @@ class BetDefinitions:
         for line in sorted(candidates):
             if line > standard_line * 0.8:  # Safe should be easier than standard
                 continue
+            if self.sport == 'NFL' and line < self._nfl_min_meaningful_line(stat_type, median_line or adjusted_mean):
+                continue
             
             prob_data = self.calibrator.calculate_probability_for_line(
-                line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                league_mean, league_std
+                line, adjusted_mean, adjusted_std, sample_size, stat_type, **calc_kwargs
             )
             
             # Track the line with highest probability (safe = highest likelihood)
@@ -132,12 +147,23 @@ class BetDefinitions:
         
         # If no safe line found, use lowest candidate
         if safe_line is None:
-            safe_line = min(candidates) if candidates else 0.5
+            safe_line = min(candidates) if candidates else self._nfl_min_meaningful_line(stat_type, adjusted_mean)
             safe_data = self.calibrator.calculate_probability_for_line(
-                safe_line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                league_mean, league_std
+                safe_line, adjusted_mean, adjusted_std, sample_size, stat_type, **calc_kwargs
             )
             safe_probability = safe_data['probability']
+
+        if self.sport == 'NFL':
+            min_c = self._nfl_min_meaningful_line(stat_type, median_line or adjusted_mean)
+            center = median_line or adjusted_mean
+            trivial = safe_line < min_c or (safe_probability > 0.80 and safe_line < center * 0.55)
+            if trivial:
+                safe_line = max(min_c, round((center * 0.88) * 2) / 2)
+                safe_line = min(safe_line, standard_line)
+                safe_data = self.calibrator.calculate_probability_for_line(
+                    safe_line, adjusted_mean, adjusted_std, sample_size, stat_type, **calc_kwargs
+                )
+                safe_probability = safe_data['probability']
         
         # Find long shot line: line with p in 0.15-0.30 range (prefer ~0.20)
         # Cap at sport-specific single-game maximum
@@ -176,8 +202,7 @@ class BetDefinitions:
                         continue  # Skip whole-number lines like 1.0, 2.0, 3.0
                 
                 prob_data = self.calibrator.calculate_probability_for_line(
-                    line, adjusted_mean, adjusted_std, sample_size, stat_type,
-                    league_mean, league_std
+                    line, adjusted_mean, adjusted_std, sample_size, stat_type, **calc_kwargs
                 )
                 prob = prob_data['probability']
                 
@@ -247,6 +272,25 @@ class BetDefinitions:
         # Default to pass if nothing qualifies
         return 'pass'
     
+    @staticmethod
+    def _nfl_min_meaningful_line(stat_type: str, center: float) -> float:
+        floors = {
+            'passing_yards': 149.5,
+            'rushing_yards': 19.5,
+            'receiving_yards': 19.5,
+            'receptions': 2.5,
+            'completions': 10.5,
+            'attempts': 14.5,
+            'pass_attempts': 14.5,
+            'rushing_attempts': 4.5,
+            'anytime_td': 0.5,
+        }
+        floor = floors.get(stat_type, 0.5)
+        if center and center > 0:
+            dynamic = round((center * 0.65) * 2) / 2
+            return max(floor, dynamic)
+        return floor
+
     def _get_max_line_for_stat(self, stat_type: str, mean: float) -> float:
         """Get reasonable maximum line for candidate generation."""
         if self.sport == 'MLB':

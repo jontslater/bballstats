@@ -573,11 +573,11 @@ class PredictionService:
         
         # Step 5: Calculate bet lines using calibrated probability
         # Get league averages for this stat type (optional, for shrinkage)
-        league_mean, league_std = self._get_league_averages(stat_type)
+        from app.services.nfl_position_priors import role_for_position
+        player_role = role_for_position(player.position)
+        league_mean, league_std = self._get_league_averages(stat_type, player_position=player.position)
         
-        # TODO: Check if real betting line exists (from betting_lines table)
-        # For now, we'll pass None to synthesize from the player's distribution
-        real_line = None  # self._get_real_betting_line(game_id, player_id, stat_type)
+        real_line = self._get_real_betting_line(game_id, player_id, stat_type)
         
         bet_lines = self.bet_defs.calculate_bet_lines(
             adjusted_mean=mean_adjustments['adjusted_mean'],
@@ -586,7 +586,9 @@ class PredictionService:
             stat_type=stat_type,
             real_line=real_line,
             league_mean=league_mean,
-            league_std=league_std
+            league_std=league_std,
+            median_line=adjusted_percentiles.get(50),
+            player_role=player_role,
         )
         
         # Step 6: Evaluate pass rules with new confidence calculation
@@ -1390,7 +1392,21 @@ class PredictionService:
             'ladders_created': ladders_created if 'ladders_created' in locals() else 0
         }
     
-    def _get_league_averages(self, stat_type: str) -> tuple:
+    def _get_real_betting_line(self, game_id: int, player_id: int, stat_type: str) -> Optional[float]:
+        try:
+            from app.models.betting_line import BettingLine
+            row = self.db.query(BettingLine).filter(
+                BettingLine.game_id == game_id,
+                BettingLine.player_id == player_id,
+                BettingLine.stat_type == stat_type,
+            ).order_by(BettingLine.line_id.desc()).first()
+            if row and row.over_line and row.over_line > 0:
+                return float(row.over_line)
+        except Exception:
+            pass
+        return None
+
+    def _get_league_averages(self, stat_type: str, player_position: Optional[str] = None) -> tuple:
         """
         Get league average and std for a stat type from historical data.
         
@@ -1398,7 +1414,7 @@ class PredictionService:
             (league_mean, league_std) or (None, None) if not available
         """
         # Check cache first
-        cache_key = f'{self.sport}_{stat_type}'
+        cache_key = f'{self.sport}_{stat_type}_{player_position or "ALL"}'
         if not hasattr(self, '_league_avg_cache'):
             self._league_avg_cache = {}
         
@@ -1449,17 +1465,50 @@ class PredictionService:
             
             cutoff_date = date.today() - timedelta(days=180)
             
-            result = self.db.query(
+            from app.models.player import Player
+            from sqlalchemy import or_
+            from app.services.nfl_position_priors import (
+                role_for_position,
+                positions_for_stat_role,
+                fallback_mean,
+            )
+
+            query = self.db.query(
                 func.avg(stat_column).label('mean'),
                 func.stddev(stat_column).label('std')
-            ).join(Game).filter(
+            ).join(Game).join(Player, PlayerGameStat.player_id == Player.player_id).filter(
                 Game.sport == self.sport,
                 Game.game_status == 'finished',
                 Game.game_date >= cutoff_date,
                 stat_column.isnot(None),
-                # Include ALL values including zeros (count stats can be 0)
-                stat_column >= 0
-            ).first()
+                stat_column >= 0,
+            )
+
+            if self.sport == 'NFL':
+                role = role_for_position(player_position)
+                allowed = positions_for_stat_role(stat_type, role)
+                if allowed == set():
+                    fb = fallback_mean(stat_type, role)
+                    if fb is not None:
+                        self._league_avg_cache[cache_key] = (fb, fb * 0.35)
+                        return (fb, fb * 0.35)
+                elif allowed:
+                    query = query.filter(Player.position.in_(list(allowed)))
+                if stat_type in ('completions', 'attempts', 'pass_attempts', 'passing_yards', 'interceptions'):
+                    query = query.filter(PlayerGameStat.pass_attempts > 0)
+                elif stat_type in ('rushing_yards', 'rushing_attempts', 'rushing_tds'):
+                    query = query.filter(PlayerGameStat.rushing_attempts > 0)
+                elif stat_type in ('receptions', 'receiving_yards', 'receiving_tds', 'targets'):
+                    query = query.filter(or_(PlayerGameStat.targets > 0, PlayerGameStat.receptions > 0))
+                elif stat_type == 'anytime_td':
+                    query = query.filter(
+                        or_(
+                            PlayerGameStat.rushing_attempts > 0,
+                            PlayerGameStat.targets > 0,
+                        )
+                    )
+
+            result = query.first()
             
             if result and result.mean is not None:
                 league_mean = float(result.mean)

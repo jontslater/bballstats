@@ -37,12 +37,7 @@ class PredictionEvaluator:
             'targets': stat.targets,
         }
         if stat_type == 'anytime_td':
-            total = (
-                (stat.passing_tds or 0)
-                + (stat.rushing_tds or 0)
-                + (stat.receiving_tds or 0)
-            )
-            return float(total)
+            return float((stat.rushing_tds or 0) + (stat.receiving_tds or 0))
         if stat_type in mapping:
             val = mapping[stat_type]
             return float(val) if val is not None else None

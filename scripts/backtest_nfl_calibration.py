@@ -63,11 +63,7 @@ STAT_CONFIG = {
 
 
 def player_td_total(row) -> float:
-    return float(
-        (row.get("passing_tds") or 0)
-        + (row.get("rushing_tds") or 0)
-        + (row.get("receiving_tds") or 0)
-    )
+    return float((row.get("rushing_tds") or 0) + (row.get("receiving_tds") or 0))
 
 
 def stat_value(row, col: str) -> float:
@@ -91,7 +87,11 @@ def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
     print(f"Loaded nflverse rows: {len(df)} seasons={sorted(df['season'].unique())}")
 
     results = {
-        name: {"pairs": [], "buckets": defaultdict(lambda: {"n": 0, "hits": 0, "sum_p": 0.0})}
+        name: {
+            "pairs": [],
+            "pairs_raw": [],
+            "buckets": defaultdict(lambda: {"n": 0, "hits": 0, "sum_p": 0.0}),
+        }
         for name in STAT_CONFIG
     }
 
@@ -133,6 +133,16 @@ def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
                     actual = stat_value(row, col)
 
                     for line in lines:
+                        out_raw = calc.calculate_probability_for_line(
+                            line=float(line),
+                            player_mean=player_mean,
+                            player_std=player_std,
+                            sample_size=len(hist_vals),
+                            stat_type=stat_name if stat_name != "attempts" else "attempts",
+                            league_mean=league_mean,
+                            league_std=None,
+                            apply_posthoc=False,
+                        )
                         out = calc.calculate_probability_for_line(
                             line=float(line),
                             player_mean=player_mean,
@@ -141,10 +151,13 @@ def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
                             stat_type=stat_name if stat_name != "attempts" else "attempts",
                             league_mean=league_mean,
                             league_std=None,
+                            apply_posthoc=True,
                         )
                         p = out["probability"]
+                        p_raw = out_raw["probability"]
                         hit = 1 if actual > line else 0
                         results[stat_name]["pairs"].append((p, hit))
+                        results[stat_name]["pairs_raw"].append((p_raw, hit))
                         b = bucket_probability(p)
                         results[stat_name]["buckets"][b]["n"] += 1
                         results[stat_name]["buckets"][b]["hits"] += hit
@@ -158,7 +171,11 @@ def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
         if not pairs:
             print(f"\n{stat_name}: no samples")
             continue
-        print(f"\n{stat_name}: n={len(pairs)} Brier={brier(pairs):.4f}")
+        raw_pairs = data["pairs_raw"]
+        print(
+            f"\n{stat_name}: n={len(pairs)} "
+            f"Brier_raw={brier(raw_pairs):.4f} Brier_posthoc={brier(pairs):.4f}"
+        )
         for bucket in sorted(data["buckets"].keys()):
             b = data["buckets"][bucket]
             if b["n"] == 0:
