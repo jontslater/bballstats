@@ -30,6 +30,7 @@ from app.services.mlb_equivalent_props import (
 )
 from app.services.mlb_probable_pitchers import (
     MlbProbablePitcherResolver,
+    box_score_name_matches_probable,
     normalize_mlb_person_name,
     should_skip_mlb_pitcher_prop,
 )
@@ -72,12 +73,27 @@ class TestMlbProbablePitcherFilter(unittest.TestCase):
             espn_game_id='MLB_849816',
         )
         self.db.add(self.game)
-        mc = Player(sport='MLB', name='Shane McClanahan', position='SP', current_team_id=away.team_id)
-        nick = Player(sport='MLB', name='Nick Martinez', position='SP', current_team_id=away.team_id)
-        self.db.add_all([mc, nick])
+        mc = Player(sport='MLB', name='McClanahan, S', position='SP', current_team_id=away.team_id)
+        nick = Player(
+            sport='MLB',
+            name='Martinez, N',
+            position='SP',
+            current_team_id=away.team_id,
+            mlb_person_id=607259,
+        )
+        shawn = Player(
+            sport='MLB',
+            name='Armstrong, S',
+            position='SP',
+            current_team_id=home.team_id,
+            mlb_person_id=542888,
+        )
+        self.db.add_all([mc, nick, shawn])
         self.db.commit()
         self.mc = mc
         self.nick = nick
+        self.shawn = shawn
+        self.home = home
         self.client = FakeScheduleClient({
             date(2026, 10, 17): [{
                 'game_id': 849816,
@@ -85,6 +101,8 @@ class TestMlbProbablePitcherFilter(unittest.TestCase):
                 'away_id': 139,
                 'home_probable_pitcher': 'Shawn Armstrong',
                 'away_probable_pitcher': 'Nick Martinez',
+                'home_probable_pitcher_id': 542888,
+                'away_probable_pitcher_id': 607259,
             }],
         })
         self.resolver = MlbProbablePitcherResolver(client=self.client)
@@ -125,6 +143,39 @@ class TestMlbProbablePitcherFilter(unittest.TestCase):
         self.assertEqual(
             normalize_mlb_person_name("J.P. Smith"),
             normalize_mlb_person_name('JP Smith'),
+        )
+
+    def test_box_score_name_matches_api_probable_display_names(self):
+        self.assertTrue(box_score_name_matches_probable('Martinez, N', 'Nick Martinez'))
+        self.assertTrue(box_score_name_matches_probable('Armstrong, S', 'Shawn Armstrong'))
+        self.assertFalse(box_score_name_matches_probable('McClanahan, S', 'Nick Martinez'))
+
+    def test_probable_starter_with_box_score_name_gets_strikeout_prop(self):
+        self.assertFalse(
+            should_skip_mlb_pitcher_prop(
+                self.db, self.game, self.nick, 'strikeouts', self.resolver
+            )
+        )
+        self.assertFalse(
+            should_skip_mlb_pitcher_prop(
+                self.db, self.game, self.shawn, 'strikeouts', self.resolver
+            )
+        )
+
+    def test_probable_starter_matched_by_mlb_person_id_only(self):
+        nick_by_id = Player(
+            sport='MLB',
+            name='Unknown Label',
+            position='SP',
+            current_team_id=self.nick.current_team_id,
+            mlb_person_id=607259,
+        )
+        self.db.add(nick_by_id)
+        self.db.commit()
+        self.assertFalse(
+            should_skip_mlb_pitcher_prop(
+                self.db, self.game, nick_by_id, 'strikeouts', self.resolver
+            )
         )
 
 
