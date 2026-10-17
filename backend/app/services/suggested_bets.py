@@ -145,6 +145,16 @@ class SuggestedBetsService(BaseSportService):
             injury_status = injury_context.get_player_injury_status(pred.player_id)
             if injury_status and injury_status['status'] in ['Out', 'Doubtful', 'Questionable']:
                 continue  # Skip injured players
+
+            if self.sport == 'NFL':
+                from app.services.nfl_eligibility import nfl_player_role_eligible
+                if pred.sample_size is not None and pred.sample_size < 5:
+                    continue
+                ok, _reason = nfl_player_role_eligible(
+                    self.db, pred.player_id, pred.stat_type, min_games=5
+                )
+                if not ok:
+                    continue
             
             # Calculate quality score
             score = self._calculate_bet_score(pred)

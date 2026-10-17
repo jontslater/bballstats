@@ -75,9 +75,86 @@ def stat_value(row, col: str) -> float:
     return float(val)
 
 
+def _league_mean_for_row(stat_name: str, row, player_mean: float) -> float:
+    from app.services.nfl_position_priors import fallback_mean, role_for_position
+
+    pos = row.get("position") if hasattr(row, "get") else None
+    role = role_for_position(pos)
+    fb = fallback_mean(stat_name, role)
+    if fb is not None:
+        return fb
+    return player_mean
+
+
+def collect_walk_forward_pairs(
+    seasons: List[int],
+    max_week: int = 18,
+    min_history: int = 5,
+    apply_posthoc: bool = False,
+) -> Dict[str, List[Tuple[float, int]]]:
+    calc = CalibratedProbabilityCalculator(sport="NFL")
+    extended = sorted(set(seasons + [s - 1 for s in seasons]))
+    df = load_nflverse_player_stats(extended)
+    df = df[df["season_type"] == "REG"].copy()
+    pairs: Dict[str, List[Tuple[float, int]]] = {k: [] for k in STAT_CONFIG}
+
+    for season in seasons:
+        season_df = df[df["season"] == season].sort_values(["player_id", "week"])
+        for week in sorted(season_df["week"].unique()):
+            if week > max_week:
+                continue
+            test_rows = season_df[season_df["week"] == week]
+            for _, row in test_rows.iterrows():
+                pid = row["player_id"]
+                history = season_df[(season_df["player_id"] == pid) & (season_df["week"] < week)]
+                if len(history) < min_history:
+                    prior = df[(df["player_id"] == pid) & (df["season"] < season)].sort_values(
+                        ["season", "week"]
+                    )
+                    history = prior.tail(min_history * 3)
+                if len(history) < min_history:
+                    continue
+
+                for stat_name, (col, lines) in STAT_CONFIG.items():
+                    hist_vals = [stat_value(r, col) for _, r in history.iterrows()]
+                    if col in ("passing_yards", "completions", "attempts") and max(hist_vals) <= 0:
+                        continue
+                    if col in ("rushing_yards", "rushing_attempts") and max(hist_vals) <= 0:
+                        continue
+                    if col in ("receptions", "receiving_yards") and max(hist_vals) <= 0:
+                        continue
+
+                    player_mean = sum(hist_vals) / len(hist_vals)
+                    if len(hist_vals) > 1:
+                        var = sum((v - player_mean) ** 2 for v in hist_vals) / (len(hist_vals) - 1)
+                        player_std = var ** 0.5
+                    else:
+                        player_std = max(player_mean * 0.25, 1.0)
+
+                    league_mean = _league_mean_for_row(stat_name, row, player_mean)
+                    actual = stat_value(row, col)
+                    median_line = round(player_mean * 2) / 2 - 0.5 if player_mean > 1 else 0.5
+                    eval_lines = list(set(lines + [median_line]))
+
+                    for line in eval_lines:
+                        out = calc.calculate_probability_for_line(
+                            line=float(line),
+                            player_mean=player_mean,
+                            player_std=player_std,
+                            sample_size=len(hist_vals),
+                            stat_type=stat_name,
+                            league_mean=league_mean,
+                            league_std=None,
+                            apply_posthoc=apply_posthoc,
+                        )
+                        p = out["probability"]
+                        hit = 1 if actual > line else 0
+                        pairs[stat_name].append((p, hit))
+    return pairs
+
+
 def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
     calc = CalibratedProbabilityCalculator(sport="NFL")
-    # Include prior season for early-week history when nflverse lags current year.
     extended = sorted(set(seasons + [s - 1 for s in seasons]))
     df = load_nflverse_player_stats(extended)
     df = df[df["season_type"] == "REG"].copy()
@@ -90,6 +167,7 @@ def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
         name: {
             "pairs": [],
             "pairs_raw": [],
+            "median_pairs": [],
             "buckets": defaultdict(lambda: {"n": 0, "hits": 0, "sum_p": 0.0}),
         }
         for name in STAT_CONFIG
@@ -129,8 +207,9 @@ def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
                     else:
                         player_std = max(player_mean * 0.25, 1.0)
 
-                    league_mean = sum(hist_vals) / len(hist_vals)
+                    league_mean = _league_mean_for_row(stat_name, row, player_mean)
                     actual = stat_value(row, col)
+                    median_line = round(player_mean * 2) / 2 - 0.5 if player_mean > 1 else 0.5
 
                     for line in lines:
                         out_raw = calc.calculate_probability_for_line(
@@ -163,6 +242,17 @@ def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
                         results[stat_name]["buckets"][b]["hits"] += hit
                         results[stat_name]["buckets"][b]["sum_p"] += p
 
+                    med_out = calc.calculate_probability_for_line(
+                        line=float(median_line),
+                        player_mean=player_mean,
+                        player_std=player_std,
+                        sample_size=len(hist_vals),
+                        stat_type=stat_name,
+                        league_mean=league_mean,
+                        apply_posthoc=True,
+                    )
+                    results[stat_name]["median_pairs"].append(med_out["probability"])
+
     print("=" * 80)
     print("NFL WALK-FORWARD CALIBRATION (nflverse → production calculator)")
     print("=" * 80)
@@ -172,9 +262,12 @@ def walk_forward(seasons: List[int], max_week: int, min_history: int = 5):
             print(f"\n{stat_name}: no samples")
             continue
         raw_pairs = data["pairs_raw"]
+        med = data["median_pairs"]
+        med_avg = sum(med) / len(med) if med else 0.0
         print(
             f"\n{stat_name}: n={len(pairs)} "
-            f"Brier_raw={brier(raw_pairs):.4f} Brier_posthoc={brier(pairs):.4f}"
+            f"Brier_raw={brier(raw_pairs):.4f} Brier_posthoc={brier(pairs):.4f} "
+            f"median_line_avg_p_over={med_avg:.3f}"
         )
         for bucket in sorted(data["buckets"].keys()):
             b = data["buckets"][bucket]

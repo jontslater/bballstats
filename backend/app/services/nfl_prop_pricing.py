@@ -4,16 +4,13 @@ Price a single NFL player prop against a sportsbook line (e.g. FanDuel via The O
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from sqlalchemy.orm import Session
 
 from app.models import Game, Player
-from app.services.calibrated_probability import CalibratedProbabilityCalculator
-from app.services.distribution_engine import DistributionEngine
 from app.services.nfl_data import american_break_even_odds
-from app.services.nfl_position_priors import role_for_position
-from app.services.prediction_service import PredictionService
+from app.services.nfl_prop_inference import compute_nfl_line_probabilities
 
 # The Odds API market keys → internal stat_type
 ODDS_API_MARKET_MAP: Dict[str, str] = {
@@ -63,9 +60,6 @@ def parse_american_odds(odds_str: str) -> int:
 class NFLPropPricingService:
     def __init__(self, db: Session):
         self.db = db
-        self.dist = DistributionEngine(db)
-        self.calc = CalibratedProbabilityCalculator(sport="NFL")
-        self.pred_service = PredictionService(db, sport="NFL")
 
     def resolve_player(self, player_name: str, team_abbrev: Optional[str] = None) -> Optional[Player]:
         q = self.db.query(Player).filter(Player.sport == "NFL", Player.name.ilike(player_name))
@@ -114,35 +108,19 @@ class NFLPropPricingService:
                 raise ValueError(f"No upcoming NFL game found for {player.name}")
             game_id = game.game_id
 
-        game = self.db.query(Game).filter(Game.game_id == game_id).first()
-        season_ids = [game.season_id]
-        base = self.dist.calculate_base_distribution(
+        probs = compute_nfl_line_probabilities(
+            self.db,
             player_id=player.player_id,
+            game_id=game_id,
             stat_type=market_stat,
-            sport="NFL",
-            season_ids=season_ids,
-            min_games=5,
+            line=float(line),
+            apply_posthoc=True,
         )
-        if not base:
+        if not probs:
             raise ValueError(f"Insufficient history for {player.name} {market_stat}")
 
-        role = role_for_position(player.position)
-        league_mean, league_std = self.pred_service._get_league_averages(
-            market_stat, player_position=player.position
-        )
-
-        raw = self.calc.calculate_probability_for_line(
-            line=float(line),
-            player_mean=base["mean"],
-            player_std=base["std_dev"],
-            sample_size=base["sample_size"],
-            stat_type=market_stat,
-            league_mean=league_mean,
-            league_std=league_std,
-            player_role=role,
-        )
-        model_p = raw["probability"]
-        cal_p = raw.get("calibrated_probability", model_p)
+        model_p = probs["model_probability"]
+        cal_p = probs["calibrated_probability"]
         be = american_break_even_odds(cal_p)
 
         sb_american = None
@@ -163,7 +141,7 @@ class NFLPropPricingService:
             sportsbook_american_odds=sb_american,
             implied_probability=implied,
             edge=edge,
-            sample_size=base["sample_size"],
-            player_mean=base["mean"],
-            player_std=base["std_dev"],
+            sample_size=probs["sample_size"],
+            player_mean=probs["player_mean"],
+            player_std=probs["player_std"],
         )

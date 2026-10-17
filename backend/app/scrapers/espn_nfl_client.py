@@ -133,7 +133,10 @@ class ESPNNFLClient:
                 
                 # Parse date
                 if game_date_str:
-                    game_date = datetime.fromisoformat(game_date_str.replace('Z', '+00:00')).date()
+                    from zoneinfo import ZoneInfo
+
+                    dt_utc = datetime.fromisoformat(game_date_str.replace('Z', '+00:00'))
+                    game_date = dt_utc.astimezone(ZoneInfo('America/New_York')).date()
                 else:
                     continue
                 

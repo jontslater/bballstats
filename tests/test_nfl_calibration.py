@@ -169,6 +169,62 @@ class TestNFLDataLoader(unittest.TestCase):
         self.assertTrue((df["season"] == 2025).any())
 
 
+class TestNFLMedianSymmetry(unittest.TestCase):
+    def test_yards_near_median_fifty_fifty(self):
+        calc = CalibratedProbabilityCalculator(sport="NFL")
+        mean = 248.0
+        line = round(mean * 2) / 2 - 0.5
+        out = calc.calculate_probability_for_line(
+            line=line,
+            player_mean=mean,
+            player_std=42.0,
+            sample_size=14,
+            stat_type="passing_yards",
+            league_mean=220.0,
+            player_role="QB",
+            apply_posthoc=False,
+        )
+        self.assertGreater(out["probability"], 0.42)
+        self.assertLess(out["probability"], 0.58)
+
+
+class TestNFLTailAndSymmetry(unittest.TestCase):
+    def test_high_completion_line_low_probability(self):
+        calc = CalibratedProbabilityCalculator(sport="NFL")
+        out = calc.calculate_probability_for_line(
+            line=31.5,
+            player_mean=24.9,
+            player_std=4.0,
+            sample_size=12,
+            stat_type="completions",
+            league_mean=21.0,
+            player_role="QB",
+            apply_posthoc=False,
+        )
+        self.assertLess(out["probability"], 0.12)
+
+    def test_symmetric_posthoc_preserves_complement(self):
+        from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
+
+        cal = NFLPosthocCalibrator(params_path=backend_path / "data" / "nfl_isotonic_calibration.json")
+        p = 0.62
+        q = 1.0 - p
+        for stat in ("completions", "receptions", "rushing_yards"):
+            cp = cal.apply(stat, p)
+            cq = cal.apply(stat, q)
+            self.assertAlmostEqual(cp + cq, 1.0, delta=0.02)
+
+
+class TestNFLPosthocFitter(unittest.TestCase):
+    def test_fit_disables_when_no_improvement(self):
+        from app.services.nfl_posthoc_calibration import NFLPosthocCalibrator
+
+        pairs = [(0.55, 1), (0.45, 0)] * 120
+        res = NFLPosthocCalibrator.fit_symmetric_alpha(pairs, min_samples=100)
+        self.assertIsNotNone(res)
+        self.assertFalse(res.get("enabled", True))
+
+
 class TestAnytimeTDDefinition(unittest.TestCase):
     def test_distribution_anytime_excludes_passing(self):
         from app.services.distribution_engine import DistributionEngine

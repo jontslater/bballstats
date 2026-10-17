@@ -1392,6 +1392,135 @@ class PredictionService:
             'ladders_created': ladders_created if 'ladders_created' in locals() else 0
         }
     
+    def build_nfl_prop_distribution(
+        self, player_id: int, game_id: int, stat_type: str
+    ) -> Optional[Dict]:
+        """Adjusted mean/std for NFL props (same path as generate_prediction, fewer filters)."""
+        if self.sport != "NFL":
+            return None
+        game = self.db.query(Game).filter(Game.game_id == game_id).first()
+        player = self.db.query(Player).filter(Player.player_id == player_id).first()
+        if not game or not player:
+            return None
+        if player.current_team_id not in (game.home_team_id, game.away_team_id):
+            return None
+
+        season_id = game.season_id
+        is_home = game.home_team_id == player.current_team_id
+        opponent_team_id = game.away_team_id if is_home else game.home_team_id
+        game_context = self.context_calc.get_game_context(game_id, player.current_team_id)
+
+        season_ids_for_dist = [season_id]
+        season_row = self.db.query(Season).filter(Season.season_id == season_id).first()
+        if season_row:
+            try:
+                prev_year = str(int(season_row.season_year) - 1)
+                prev_season = self.db.query(Season).filter(
+                    Season.sport == "NFL", Season.season_year == prev_year
+                ).first()
+                if prev_season and prev_season.season_id not in season_ids_for_dist:
+                    season_ids_for_dist.append(prev_season.season_id)
+            except ValueError:
+                pass
+
+        historical_avg_minutes = self.dist_engine.get_historical_avg_minutes(
+            player_id, sport=self.sport, season_ids=season_ids_for_dist, recent_games=20
+        )
+        if not historical_avg_minutes:
+            historical_avg_minutes = 30.0
+
+        minutes_redist = self.redist_engine.calculate_redistributed_minutes(
+            player_id, player.current_team_id, historical_avg_minutes
+        )
+        projected_minutes = minutes_redist["projected_minutes"]
+        usage_factor = 1.0
+        stat_boost_from_injuries = 1.0
+        is_promoted_bench_player = False
+
+        base_dist = self.dist_engine.calculate_base_distribution(
+            player_id=player_id,
+            stat_type=stat_type,
+            sport=self.sport,
+            projected_minutes=projected_minutes,
+            season_ids=season_ids_for_dist,
+            min_games=5,
+        )
+        if not base_dist or base_dist.get("mean") is None:
+            return None
+        base_std = base_dist.get("std_dev")
+        if base_std is None or base_std == 0:
+            base_std = max(base_dist.get("mean", 1.0) * 0.05, 1.0)
+            base_dist["std_dev"] = base_std
+
+        base_mean = base_dist.get("mean")
+        mean_adjustments = self.adjustments.calculate_mean_adjustments(
+            base_mean=base_mean,
+            player_id=player_id,
+            opponent_team_id=opponent_team_id,
+            projected_minutes=projected_minutes,
+            historical_avg_minutes=historical_avg_minutes,
+            is_home=is_home,
+            player_position=player.position,
+            season_id=season_id,
+            usage_factor=usage_factor,
+            stat_type=stat_type,
+            game_id=game_id,
+            game_context=game_context,
+            is_promoted_bench_player=is_promoted_bench_player,
+        )
+        if mean_adjustments.get("adjusted_mean") is None:
+            return None
+
+        rest_days_factor = game_context.get("rest_days_factor", 1.0) or 1.0
+        relative_rest_factor = game_context.get("relative_rest_factor", 1.0) or 1.0
+        team_performance = game_context.get("team_performance", {})
+        team_performance_factor = team_performance.get("performance_factor", 1.0) or 1.0
+        game_importance = game_context.get("game_importance", {})
+        importance_factor = game_importance.get("importance_factor", 1.0) or 1.0
+        national_tv_factor = game_context.get("national_tv_factor", 1.0) or 1.0
+        time_of_day_factor = self.context_calc.calculate_time_of_day_factor(
+            game_id, player_id, season_id
+        ) or 1.0
+        clutch_performance = self.context_calc.calculate_clutch_performance(player_id, season_id)
+        clutch_factor = clutch_performance.get("clutch_factor", 1.0) or 1.0
+
+        mean_adjustments["adjusted_mean"] *= rest_days_factor
+        mean_adjustments["adjusted_mean"] *= relative_rest_factor
+        mean_adjustments["adjusted_mean"] *= team_performance_factor
+        mean_adjustments["adjusted_mean"] *= importance_factor
+        mean_adjustments["adjusted_mean"] *= national_tv_factor
+        mean_adjustments["adjusted_mean"] *= time_of_day_factor
+        mean_adjustments["adjusted_mean"] *= clutch_factor
+        mean_adjustments["adjusted_mean"] *= stat_boost_from_injuries
+
+        minutes_locked = self.redist_engine.is_minutes_locked(player_id, player.current_team_id)
+        minutes_unstable = not minutes_locked and projected_minutes < 25
+        usage_stable = self.redist_engine.is_usage_stable(player_id, player.current_team_id)
+        blowout_risk = game_context.get("blowout", {}).get("blowout_risk_high", False)
+
+        variance_adjustments = self.adjustments.calculate_variance_adjustments(
+            base_std=base_dist["std_dev"],
+            minutes_are_locked=minutes_locked,
+            minutes_are_unstable=minutes_unstable,
+            usage_depends_on_others=not usage_stable,
+            usage_is_stable=usage_stable,
+            blowout_risk_high=blowout_risk,
+            sample_size=base_dist.get("sample_size"),
+        )
+        if variance_adjustments.get("adjusted_std") is None:
+            return None
+
+        from app.services.nfl_position_priors import role_for_position
+
+        return {
+            "adjusted_mean": float(mean_adjustments["adjusted_mean"]),
+            "adjusted_std": float(variance_adjustments["adjusted_std"]),
+            "sample_size": int(base_dist["sample_size"]),
+            "player": player,
+            "game": game,
+            "player_role": role_for_position(player.position),
+        }
+
     def _get_real_betting_line(self, game_id: int, player_id: int, stat_type: str) -> Optional[float]:
         try:
             from app.models.betting_line import BettingLine
@@ -1453,6 +1582,48 @@ class PredictionService:
                 # Note: 'runs' column doesn't exist in PlayerGameStat model
             }
             
+            if self.sport == "NFL" and stat_type == "anytime_td":
+                td_expr = (
+                    func.coalesce(PlayerGameStat.rushing_tds, 0)
+                    + func.coalesce(PlayerGameStat.receiving_tds, 0)
+                )
+                query = (
+                    self.db.query(func.avg(td_expr).label("mean"), func.stddev(td_expr).label("std"))
+                    .select_from(PlayerGameStat)
+                    .join(Game, PlayerGameStat.game_id == Game.game_id)
+                    .join(Player, PlayerGameStat.player_id == Player.player_id)
+                    .filter(
+                        Game.sport == "NFL",
+                        Game.game_status == "finished",
+                        Game.game_date >= cutoff_date,
+                    )
+                )
+                role = role_for_position(player_position)
+                allowed = positions_for_stat_role(stat_type, role)
+                if allowed == set():
+                    fb = fallback_mean(stat_type, role)
+                    if fb is not None:
+                        self._league_avg_cache[cache_key] = (fb, fb * 0.5)
+                        return (fb, fb * 0.5)
+                elif allowed:
+                    query = query.filter(Player.position.in_(list(allowed)))
+                query = query.filter(
+                    or_(
+                        PlayerGameStat.rushing_attempts > 0,
+                        PlayerGameStat.targets > 0,
+                    )
+                )
+                result = query.first()
+                if result and result.mean is not None:
+                    league_mean = float(result.mean)
+                    league_std = float(result.std) if result.std else max(league_mean * 0.5, 0.1)
+                    self._league_avg_cache[cache_key] = (league_mean, league_std)
+                    return (league_mean, league_std)
+                fb = fallback_mean(stat_type, role_for_position(player_position))
+                if fb is not None:
+                    self._league_avg_cache[cache_key] = (fb, fb * 0.5)
+                    return (fb, fb * 0.5)
+
             stat_column = stat_column_map.get(stat_type)
             if stat_column is None:
                 # No column exists for this stat type

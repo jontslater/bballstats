@@ -104,6 +104,30 @@ class CalibratedProbabilityCalculator:
         """Initialize with sport-specific parameters."""
         self.sport = sport
     
+    def _nfl_count_over_probability(
+        self,
+        shrunk_rate: float,
+        player_std: float,
+        sample_size: int,
+        line: float,
+        stat_type: str,
+    ) -> float:
+        """P(X > line) for NFL count props; thinner tails than over-dispersed NB."""
+        rate = max(shrunk_rate, 0.001)
+        if sample_size >= 5 and player_std and player_std > 0:
+            std = float(player_std)
+            std = max(std, rate ** 0.5 * 0.75)
+            std = min(std, rate * 0.5 + 4.0)
+            return float(1.0 - stats.norm.cdf(line + 0.5, loc=rate, scale=std))
+        dispersion = NFL_COUNT_DISPERSION.get(stat_type, 1.25)
+        if dispersion > 1.35:
+            variance = min(dispersion * rate, rate * 1.35)
+            if variance > rate:
+                r = (rate ** 2) / (variance - rate)
+                p_nb = rate / variance
+                return float(1.0 - stats.nbinom.cdf(int(line), r, p_nb))
+        return float(1.0 - stats.poisson.cdf(int(line), rate))
+
     def _apply_high_end_compression(
         self,
         prob: float,
@@ -178,27 +202,24 @@ class CalibratedProbabilityCalculator:
             else:
                 shrunk_rate = player_mean
 
-            dispersion = NFL_COUNT_DISPERSION.get(stat_type, 1.25)
             try:
                 if stat_type == 'anytime_td':
-                    prob = 1.0 - stats.poisson.cdf(0, max(shrunk_rate, 0.001))
-                elif dispersion > 1.35:
-                    variance = dispersion * max(shrunk_rate, 0.001)
-                    if variance > shrunk_rate:
-                        r = (shrunk_rate ** 2) / (variance - shrunk_rate)
-                        p_nb = shrunk_rate / variance
-                        prob = 1.0 - stats.nbinom.cdf(int(line), r, p_nb)
+                    rate = max(shrunk_rate, 0.001)
+                    if line <= 0.5:
+                        prob = 1.0 - stats.poisson.cdf(0, rate)
                     else:
-                        prob = 1.0 - stats.poisson.cdf(int(line), shrunk_rate)
+                        prob = 1.0 - stats.poisson.cdf(int(line), rate)
                 else:
-                    prob = 1.0 - stats.poisson.cdf(int(line), max(shrunk_rate, 0.001))
+                    prob = self._nfl_count_over_probability(
+                        shrunk_rate, player_std, sample_size, line, stat_type
+                    )
             except (ValueError, ZeroDivisionError):
                 prob = 0.5
 
             if sample_size < 30 and prob > 0.85:
                 prob = 0.85
             prob = max(0.01, min(0.99, prob))
-            raw_prob = prob
+            modeled_prob = prob
             cal_prob = self._get_nfl_posthoc().apply(stat_type, prob) if apply_posthoc else prob
             return {
                 'probability': round(cal_prob, 3),
@@ -206,7 +227,7 @@ class CalibratedProbabilityCalculator:
                 'shrunk_mean': round(shrunk_rate, 2),
                 'effective_std': round(player_std, 2),
                 'effective_n': sample_size,
-                'raw_probability': round(raw_prob, 3),
+                'raw_probability': round(modeled_prob, 3),
             }
 
         # For MLB count stats, use discrete Poisson/Negative Binomial model
@@ -306,25 +327,26 @@ class CalibratedProbabilityCalculator:
             # Normal distribution for large samples
             raw_prob = 1.0 - stats.norm.cdf(line, loc=shrunk_mean, scale=effective_std)
         
-        # Apply base rate adjustment
-        base_hit_rate = self._get_base_hit_rate(stat_type)
-        calibrated_prob = self._apply_base_rate_adjustment(
-            raw_prob, base_hit_rate, effective_n, stat_type, sport=self.sport
-        )
-        
-        # Clamp to valid range
-        calibrated_prob = max(0.01, min(0.99, calibrated_prob))
+        # NFL yardage props: keep symmetric around player mean (no league hit-rate pull)
+        if self.sport == 'NFL':
+            modeled_prob = max(0.01, min(0.99, raw_prob))
+            calibrated_prob = (
+                self._get_nfl_posthoc().apply(stat_type, modeled_prob) if apply_posthoc else modeled_prob
+            )
+        else:
+            base_hit_rate = self._get_base_hit_rate(stat_type)
+            calibrated_prob = self._apply_base_rate_adjustment(
+                raw_prob, base_hit_rate, effective_n, stat_type, sport=self.sport
+            )
+            calibrated_prob = max(0.01, min(0.99, calibrated_prob))
 
-        if self.sport == 'NFL' and apply_posthoc:
-            calibrated_prob = self._get_nfl_posthoc().apply(stat_type, calibrated_prob)
-        
         return {
             'probability': round(calibrated_prob, 3),
             'calibrated_probability': round(calibrated_prob, 3),
             'shrunk_mean': round(shrunk_mean, 2),
             'effective_std': round(effective_std, 2),
             'effective_n': effective_n,
-            'raw_probability': round(raw_prob, 3)
+            'raw_probability': round(modeled_prob if self.sport == 'NFL' else raw_prob, 3),
         }
     
     def calculate_discrete_probability(
@@ -488,7 +510,7 @@ class CalibratedProbabilityCalculator:
         # Base weight inversely proportional to sample size
         # Default: At n=10: 20%, at n=50+: 2%
         if sport == 'NFL':
-            base_weight = min(0.06, 1.5 / max(effective_n, 1))
+            return raw_prob
         else:
             base_weight = min(0.20, 5.0 / effective_n)
         
