@@ -4,9 +4,12 @@ MLB Stats API Client - Wrapper around MLB-StatsAPI package.
 Uses official MLB Stats API (statsapi.mlb.com) - no rate limits like Baseball Reference.
 Provides schedule and box score data for MLB games.
 """
+import json
 import time
+import urllib.error
+import urllib.request
 from typing import List, Dict, Optional, Any
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 
 # MLB API team ID -> our abbreviation (from seed_mlb_teams)
@@ -81,7 +84,70 @@ class MLBAPIClient:
             end_date=end_dt,
             sportId=1  # MLB
         )
-        return games if games else []
+        games = games if games else []
+        self._attach_probable_pitcher_ids(games, game_date, start_date, end_date)
+        return games
+
+    def _attach_probable_pitcher_ids(
+        self,
+        games: List[Dict],
+        game_date: Optional[date],
+        start_date: Optional[date],
+        end_date: Optional[date],
+    ) -> None:
+        """Merge personId from schedule hydrate=probablePitcher onto schedule rows."""
+        if not games:
+            return
+        if game_date:
+            range_start = range_end = game_date
+        elif start_date and end_date:
+            range_start, range_end = start_date, end_date
+        else:
+            range_start = range_end = date.today()
+
+        probables_by_pk: Dict[int, Dict[str, Optional[int]]] = {}
+        current = range_start
+        while current <= range_end:
+            probables_by_pk.update(self._fetch_probable_pitcher_ids_for_date(current))
+            current += timedelta(days=1)
+
+        for row in games:
+            pk = row.get('game_id')
+            if pk is None:
+                continue
+            info = probables_by_pk.get(int(pk))
+            if not info:
+                continue
+            row['home_probable_pitcher_id'] = info.get('home_id')
+            row['away_probable_pitcher_id'] = info.get('away_id')
+
+    def _fetch_probable_pitcher_ids_for_date(self, game_date: date) -> Dict[int, Dict[str, Optional[int]]]:
+        self._rate_limit()
+        iso = game_date.strftime('%Y-%m-%d')
+        url = (
+            'https://statsapi.mlb.com/api/v1/schedule'
+            f'?sportId=1&date={iso}&hydrate=probablePitcher'
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=30) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+            return {}
+
+        result: Dict[int, Dict[str, Optional[int]]] = {}
+        for day in payload.get('dates') or []:
+            for game in day.get('games') or []:
+                pk = game.get('gamePk')
+                if pk is None:
+                    continue
+                teams = game.get('teams') or {}
+                home_pp = (teams.get('home') or {}).get('probablePitcher') or {}
+                away_pp = (teams.get('away') or {}).get('probablePitcher') or {}
+                result[int(pk)] = {
+                    'home_id': home_pp.get('id'),
+                    'away_id': away_pp.get('id'),
+                }
+        return result
 
     def get_box_score_data(self, game_id: int) -> Optional[Dict]:
         """
@@ -180,8 +246,10 @@ class MLBAPIClient:
         singles = max(0, h - double - triple - hr)
         total_bases = singles + 2 * double + 3 * triple + 4 * hr
 
+        person_id = self._safe_int(item.get('personId'))
         return {
             'player_name': name,
+            'mlb_person_id': person_id,
             'team_abbreviation': team_abbrev,
             'is_batter': True,
             'is_pitcher': False,
@@ -206,8 +274,10 @@ class MLBAPIClient:
         bb = self._safe_int(item.get('bb')) or 0
         if ip is None and so == 0 and h_allowed == 0:
             return None
+        person_id = self._safe_int(item.get('personId'))
         return {
             'player_name': name,
+            'mlb_person_id': person_id,
             'team_abbreviation': team_abbrev,
             'is_batter': False,
             'is_pitcher': True,

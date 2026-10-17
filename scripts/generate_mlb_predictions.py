@@ -21,6 +21,11 @@ from app.database import SessionLocal
 from app.models import Game, Player, PlayerGameStat
 from app.models.prediction import Prediction
 from app.services.prediction_service import PredictionService
+from app.services.mlb_probable_pitchers import (
+    MlbProbablePitcherResolver,
+    is_mlb_pitcher_prop_stat,
+    should_skip_mlb_pitcher_prop,
+)
 from app.config.sport_config import get_sport_config
 
 
@@ -62,6 +67,7 @@ def generate_predictions_for_game(
         db.commit()
 
     pred_service = pred_service or PredictionService(db, sport='MLB')
+    probable_resolver = MlbProbablePitcherResolver()
 
     players_with_stats = db.query(PlayerGameStat.player_id).filter(
         PlayerGameStat.sport == 'MLB',
@@ -96,6 +102,11 @@ def generate_predictions_for_game(
             stat_types = BATTER_STATS + PITCHER_STATS
 
         for stat_type in stat_types:
+            if is_mlb_pitcher_prop_stat(stat_type) and should_skip_mlb_pitcher_prop(
+                db, game, player, stat_type, probable_resolver
+            ):
+                skipped += 1
+                continue
             try:
                 pred = pred_service.generate_prediction(
                     player_id=player.player_id,

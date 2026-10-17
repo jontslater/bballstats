@@ -350,11 +350,49 @@ class SuggestedBetsService(BaseSportService):
         
         for bet in scored_predictions:
             # Direction is always OVER for our predictions (we're computing P(X > line))
-            bet_key = (bet['player_id'], bet['stat_type'], round(bet['line'], 1))
-            
-            if bet_key not in seen_bets:
-                seen_bets.add(bet_key)
-                deduped_predictions.append(bet)
+            if self.sport == 'MLB':
+                from app.services.mlb_equivalent_props import (
+                    prefer_stat_when_equivalent,
+                    suggested_bet_dedup_key,
+                )
+                bet_key = suggested_bet_dedup_key(
+                    bet['player_id'], bet['stat_type'], bet['line']
+                )
+            else:
+                bet_key = (bet['player_id'], bet['stat_type'], round(bet['line'], 1))
+
+            if bet_key in seen_bets:
+                if self.sport == 'MLB':
+                    existing_idx = next(
+                        (
+                            i
+                            for i, b in enumerate(deduped_predictions)
+                            if suggested_bet_dedup_key(
+                                b['player_id'], b['stat_type'], b['line']
+                            )
+                            == bet_key
+                        ),
+                        None,
+                    )
+                    if existing_idx is not None:
+                        existing = deduped_predictions[existing_idx]
+                        replace = False
+                        if prefer_stat_when_equivalent(
+                            bet['stat_type']
+                        ) < prefer_stat_when_equivalent(existing['stat_type']):
+                            replace = True
+                        elif (
+                            prefer_stat_when_equivalent(bet['stat_type'])
+                            == prefer_stat_when_equivalent(existing['stat_type'])
+                            and bet['score'] > existing['score']
+                        ):
+                            replace = True
+                        if replace:
+                            deduped_predictions[existing_idx] = bet
+                continue
+
+            seen_bets.add(bet_key)
+            deduped_predictions.append(bet)
         
         # Apply diversity cap: limit same stat/line combinations
         # Don't show 10 TB OVER 0.5 - cap at 4 per stat/line combo

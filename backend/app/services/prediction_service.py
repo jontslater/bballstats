@@ -5,7 +5,7 @@ Main service that generates distribution-based predictions for players.
 """
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 from datetime import date, timedelta
 from app.models.prediction import Prediction
 from app.models.game import Game
@@ -57,6 +57,8 @@ class PredictionService:
         self.injury_context = InjuryContext(db)
         self.ml_optimizer = MLOptimizer(db)
         self.calibration_service = PredictionCalibration(db)
+        self._mlb_probable_pitcher_resolver = None
+        self._mlb_hit_over_half_cache: Dict[Tuple[int, int], Dict] = {}
     
     def generate_prediction(
         self,
@@ -81,6 +83,22 @@ class PredictionService:
         
         if not game or not player:
             return None
+
+        if self.sport == 'MLB':
+            from app.services.mlb_probable_pitchers import (
+                MlbProbablePitcherResolver,
+                should_skip_mlb_pitcher_prop,
+            )
+            if self._mlb_probable_pitcher_resolver is None:
+                self._mlb_probable_pitcher_resolver = MlbProbablePitcherResolver()
+            if should_skip_mlb_pitcher_prop(
+                self.db,
+                game,
+                player,
+                stat_type,
+                self._mlb_probable_pitcher_resolver,
+            ):
+                return None
         
         # EARLY FILTER: For upcoming games, check if player is likely to play
         if game.game_status in ['scheduled', 'in_progress']:
@@ -575,6 +593,42 @@ class PredictionService:
             league_mean=league_mean,
             league_std=league_std
         )
+
+        if self.sport == 'MLB' and stat_type in ('hits', 'total_bases'):
+            from app.services.mlb_equivalent_props import apply_canonical_hit_over_half_probabilities
+
+            if stat_type == 'hits':
+                hits_league, _ = self._get_league_averages('hits')
+                hit_profile = {
+                    'mean': mean_adjustments['adjusted_mean'],
+                    'std': variance_adjustments['adjusted_std'],
+                    'sample_size': base_dist['sample_size'],
+                    'league_mean': hits_league,
+                }
+                self._mlb_hit_over_half_cache[(player_id, game_id)] = hit_profile
+            else:
+                hit_profile = self._mlb_hit_over_half_cache.get((player_id, game_id))
+                if hit_profile is None:
+                    hit_profile = self._compute_mlb_hit_over_half_profile(
+                        player_id=player_id,
+                        game_id=game_id,
+                        player=player,
+                        game=game,
+                        projected_minutes=projected_minutes,
+                        season_id=season_id,
+                        season_ids_for_dist=season_ids_for_dist,
+                        min_games_threshold=min_games_threshold,
+                        is_home=is_home,
+                        opponent_team_id=opponent_team_id,
+                        is_promoted_bench_player=is_promoted_bench_player,
+                        game_context=game_context,
+                        usage_factor=usage_factor,
+                        stat_boost_from_injuries=stat_boost_from_injuries,
+                    )
+            if hit_profile:
+                apply_canonical_hit_over_half_probabilities(
+                    self.bet_defs.calibrator, bet_lines, hit_profile
+                )
         
         # Step 6: Evaluate pass rules with new confidence calculation
         # usage_redist already calculated above
@@ -1375,6 +1429,101 @@ class PredictionService:
             'updated': total_updated,
             'skipped': total_skipped,
             'ladders_created': ladders_created if 'ladders_created' in locals() else 0
+        }
+
+    def _compute_mlb_hit_over_half_profile(
+        self,
+        *,
+        player_id: int,
+        game_id: int,
+        player: Player,
+        game: Game,
+        projected_minutes: float,
+        season_id: int,
+        season_ids_for_dist: List[int],
+        min_games_threshold: int,
+        is_home: bool,
+        opponent_team_id: int,
+        is_promoted_bench_player: bool,
+        game_context: Dict,
+        usage_factor: float,
+        stat_boost_from_injuries: float,
+    ) -> Optional[Dict]:
+        """Hits adjusted rate for shared OVER 0.5 hit/TB probability (when hits pred missing)."""
+        hits_base = self.dist_engine.calculate_base_distribution(
+            player_id=player_id,
+            stat_type='hits',
+            sport='MLB',
+            projected_minutes=projected_minutes,
+            season_ids=season_ids_for_dist,
+            min_games=min_games_threshold,
+        )
+        if not hits_base or hits_base.get('mean') is None or hits_base.get('std_dev') is None:
+            return None
+
+        base_mean = hits_base['mean']
+        base_std = hits_base.get('std_dev') or 0.0
+        if base_std == 0.0:
+            base_std = max(base_mean * 0.10, 1.0)
+
+        mean_adjustments = self.adjustments.calculate_mean_adjustments(
+            base_mean=base_mean,
+            player_id=player_id,
+            opponent_team_id=opponent_team_id,
+            projected_minutes=projected_minutes,
+            historical_avg_minutes=projected_minutes,
+            is_home=is_home,
+            player_position=player.position,
+            season_id=season_id,
+            usage_factor=usage_factor,
+            stat_type='hits',
+            game_id=game_id,
+            game_context=game_context,
+            is_promoted_bench_player=is_promoted_bench_player,
+        )
+        if mean_adjustments.get('adjusted_mean') is None:
+            return None
+
+        rest_days_factor = game_context.get('rest_days_factor', 1.0) or 1.0
+        relative_rest_factor = game_context.get('relative_rest_factor', 1.0) or 1.0
+        team_performance = game_context.get('team_performance', {})
+        team_performance_factor = team_performance.get('performance_factor', 1.0) or 1.0
+        game_importance = game_context.get('game_importance', {})
+        importance_factor = game_importance.get('importance_factor', 1.0) or 1.0
+        national_tv_factor = game_context.get('national_tv_factor', 1.0) or 1.0
+        time_of_day_factor = self.context_calc.calculate_time_of_day_factor(
+            game_id, player_id, season_id
+        ) or 1.0
+        clutch_performance = self.context_calc.calculate_clutch_performance(player_id, season_id)
+        clutch_factor = clutch_performance.get('clutch_factor', 1.0) or 1.0
+
+        mean_adjustments['adjusted_mean'] *= rest_days_factor
+        mean_adjustments['adjusted_mean'] *= relative_rest_factor
+        mean_adjustments['adjusted_mean'] *= team_performance_factor
+        mean_adjustments['adjusted_mean'] *= importance_factor
+        mean_adjustments['adjusted_mean'] *= national_tv_factor
+        mean_adjustments['adjusted_mean'] *= time_of_day_factor
+        mean_adjustments['adjusted_mean'] *= clutch_factor
+        mean_adjustments['adjusted_mean'] *= stat_boost_from_injuries
+
+        variance_adjustments = self.adjustments.calculate_variance_adjustments(
+            base_std=base_std,
+            minutes_are_locked=False,
+            minutes_are_unstable=False,
+            usage_depends_on_others=False,
+            usage_is_stable=True,
+            blowout_risk_high=game_context.get('blowout', {}).get('blowout_risk_high', False),
+            sample_size=hits_base.get('sample_size'),
+        )
+        if variance_adjustments.get('adjusted_std') is None:
+            return None
+
+        hits_league, _ = self._get_league_averages('hits')
+        return {
+            'mean': mean_adjustments['adjusted_mean'],
+            'std': variance_adjustments['adjusted_std'],
+            'sample_size': hits_base['sample_size'],
+            'league_mean': hits_league,
         }
     
     def _get_league_averages(self, stat_type: str) -> tuple:

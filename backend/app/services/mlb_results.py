@@ -26,12 +26,21 @@ def get_or_create_mlb_player(
     position: str = None,
     is_batter: bool = False,
     is_pitcher: bool = False,
+    mlb_person_id: int = None,
 ):
-    """Get or create MLB player by name and team."""
-    player = db.query(Player).filter(
-        Player.sport == 'MLB',
-        Player.name == player_name
-    ).first()
+    """Get or create MLB player by MLB personId and/or box-score name."""
+    player = None
+    if mlb_person_id is not None:
+        player = db.query(Player).filter(
+            Player.sport == 'MLB',
+            Player.mlb_person_id == mlb_person_id,
+        ).first()
+
+    if not player:
+        player = db.query(Player).filter(
+            Player.sport == 'MLB',
+            Player.name == player_name
+        ).first()
 
     if not player:
         if not position:
@@ -46,13 +55,16 @@ def get_or_create_mlb_player(
             sport='MLB',
             name=player_name,
             position=position,
-            current_team_id=team.team_id
+            current_team_id=team.team_id,
+            mlb_person_id=mlb_person_id,
         )
         db.add(player)
         db.flush()
     else:
         if player.current_team_id != team.team_id:
             player.current_team_id = team.team_id
+        if mlb_person_id is not None and player.mlb_person_id is None:
+            player.mlb_person_id = mlb_person_id
 
         if position and player.position == 'P' and is_batter and not is_pitcher:
             player.position = position if position != 'P' else 'DH'
@@ -182,7 +194,8 @@ def upsert_mlb_final_game(
                     db, ps['player_name'], team,
                     position=position,
                     is_batter=is_batter,
-                    is_pitcher=is_pitcher
+                    is_pitcher=is_pitcher,
+                    mlb_person_id=ps.get('mlb_person_id'),
                 )
 
                 existing_stat = db.query(PlayerGameStat).filter(
