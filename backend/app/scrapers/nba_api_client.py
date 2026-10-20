@@ -1,418 +1,111 @@
 """
-NBA API Client - Wrapper around nba_api package for data collection.
-
-This module provides a clean interface to the NBA API for collecting:
-- Players
-- Teams
-- Game schedules
-- Game results and box scores
+NBA data client: ESPN primary, optional nba_api fallback for box scores.
 """
+from __future__ import annotations
+
 import time
-from typing import List, Dict, Optional
-from datetime import datetime, date
+from datetime import date
+from typing import Dict, List, Optional
 
-# NBA API is currently broken, using alternative client
-NBA_API_AVAILABLE = False
-print("⚠️ Using alternative NBA client (nba_api package is broken)")
+from .espn_nba_client import ESPNNBAClient
 
-# Import alternative client
-from .alternative_nba_client import AlternativeNBAClient
+try:
+    from nba_api.stats.endpoints import boxscoretraditionalv2
+    from nba_api.stats.static import teams
 
-# Import the alternative client from separate file
-# Disable SSL warnings globally
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    NBA_API_AVAILABLE = True
+except ImportError:
+    NBA_API_AVAILABLE = False
+    teams = None
+    boxscoretraditionalv2 = None
 
 
 class NBAAPIClient:
-    """Client for interacting with NBA API with comprehensive fallback methods."""
+    """Client for NBA schedule and box scores."""
 
-    def __init__(self, delay: float = 0.6):
-        """
-        Initialize NBA API client with alternative client.
-
-        Args:
-            delay: Seconds to wait between API calls (to respect rate limits)
-        """
+    def __init__(self, delay: float = 0.6, use_nba_api_fallback: bool = True):
         self.delay = delay
-        self.last_call_time = 0
-        self.nba_api_available = NBA_API_AVAILABLE
-        # Use alternative client as primary since nba_api is broken
-        self.client = AlternativeNBAClient(delay)
-        print("✅ NBA API client initialized with alternative client")
-    
-    def _rate_limit(self):
-        """Enforce rate limiting between API calls."""
-        current_time = time.time()
-        time_since_last_call = current_time - self.last_call_time
-        
-        if time_since_last_call < self.delay:
-            sleep_time = self.delay - time_since_last_call
-            time.sleep(sleep_time)
-        
+        self.last_call_time = 0.0
+        self.espn = ESPNNBAClient(delay=delay)
+        self.use_nba_api_fallback = use_nba_api_fallback and NBA_API_AVAILABLE
+
+    def _rate_limit(self) -> None:
+        current = time.time()
+        if current - self.last_call_time < self.delay:
+            time.sleep(self.delay - (current - self.last_call_time))
         self.last_call_time = time.time()
-    
-    def get_all_teams(self) -> List[Dict]:
-        """
-        Get all NBA teams.
-        
-        Returns:
-            List of team dictionaries with id, full_name, abbreviation, etc.
-        """
+
+    def get_game_schedule(self, game_date: date) -> List[Dict]:
+        games = self.espn.get_games_for_date(game_date)
+        legacy = []
+        status_map = {"scheduled": 1, "in_progress": 2, "finished": 3, "cancelled": 1}
+        for g in games:
+            legacy.append(
+                {
+                    "GAME_ID": g["espn_game_id"],
+                    "GAME_DATE": g["game_date"].strftime("%Y-%m-%d"),
+                    "GAME_STATUS_TEXT": g.get("status_name", g.get("status", "")),
+                    "GAME_STATUS_ID": status_map.get(g.get("status", "scheduled"), 1),
+                    "HOME_TEAM_ID": g.get("home_team"),
+                    "VISITOR_TEAM_ID": g.get("away_team"),
+                    "HOME_TEAM_SCORE": g.get("home_score"),
+                    "VISITOR_TEAM_SCORE": g.get("away_score"),
+                    "_espn": g,
+                }
+            )
+        return legacy
+
+    def get_game_box_score(self, game_id: str) -> Optional[Dict]:
+        box = self.espn.get_box_score_for_game(str(game_id))
+        if box and box.get("player_stats"):
+            return self._espn_to_legacy_box(box)
+
+        if not self.use_nba_api_fallback:
+            return None
+
         self._rate_limit()
         try:
-            teams_list = teams.get_teams()
-            return teams_list
-        except Exception as e:
-            print(f"❌ Error fetching teams: {e}")
-            return []
-    
-    def get_all_players(self, season: Optional[str] = None, is_only_current_season: int = 1, max_retries: int = 5) -> List[Dict]:
-        """
-        Get all NBA players.
-        
-        Args:
-            season: Season string (e.g., "2023-24"). If None, uses current season.
-            is_only_current_season: 1 for current season only, 0 for all players
-            max_retries: Maximum number of retry attempts
-        
-        Returns:
-            List of player dictionaries
-        """
-        # Try different parameter combinations (order matters - try simplest first)
-        attempts_config = [
-            {"season": None, "is_only_current_season": 1, "desc": "current season (no season param)"},
-            {"season": season, "is_only_current_season": 1, "desc": f"season {season}"} if season else None,
-            {"season": None, "is_only_current_season": 0, "desc": "all players"},
-        ]
-        # Filter out None configs
-        attempts_config = [c for c in attempts_config if c is not None]
-        
-        for config_idx, config in enumerate(attempts_config):
-            config_desc = config.pop("desc", "")
-            print(f"  Trying: {config_desc}...")
-            
-            for attempt in range(max_retries):
-                # Much longer delay before first attempt of each config
-                if attempt == 0:
-                    if config_idx == 0:
-                        # First attempt of first config - wait longer
-                        wait_time = 5
-                    else:
-                        # First attempt of subsequent configs - wait even longer
-                        wait_time = 10
-                    print(f"    ⏳ Waiting {wait_time}s before attempt {attempt + 1}/{max_retries}...")
-                    time.sleep(wait_time)
-                
-                self._rate_limit()
-                try:
-                    # Try with longer timeout
-                    players = commonallplayers.CommonAllPlayers(
-                        season=config["season"],
-                        is_only_current_season=config["is_only_current_season"],
-                        timeout=60
-                    )
-                    players_df = players.get_data_frames()[0]
-                    
-                    if players_df.empty:
-                        if attempt < max_retries - 1:
-                            print(f"    ⚠️  Empty response, retrying ({attempt + 1}/{max_retries})...")
-                            time.sleep(3)
-                            continue
-                        else:
-                            print(f"    ❌ Empty after {max_retries} attempts, trying next config...")
-                            break
-                    
-                    # Success!
-                    print(f"    ✅ Success! Found {len(players_df)} players")
-                    return players_df.to_dict('records')
-                    
-                except Exception as e:
-                    error_msg = str(e)
-                    if "Expecting value" in error_msg or "JSON" in error_msg:
-                        # API returned empty/invalid response - likely rate limiting
-                        if attempt < max_retries - 1:
-                            # Exponential backoff with longer waits: 10s, 20s, 30s, 45s, 60s
-                            wait_time = min((attempt + 1) * 10, 60)  # Cap at 60 seconds
-                            print(f"    ⚠️  API error (likely rate limit), waiting {wait_time}s...")
-                            print(f"       This is normal - NBA API has strict rate limits. Retrying...")
-                            time.sleep(wait_time)
-                        else:
-                            print(f"    ❌ Failed after {max_retries} attempts")
-                            print(f"       The API may be temporarily rate-limited. Wait 15-20 minutes and try again.")
-                            break
-                    else:
-                        # Different error - retry once then move on
-                        if attempt < max_retries - 1:
-                            time.sleep(2)
-                        else:
-                            break
-        
-        print(f"  ❌ Failed to fetch players after trying all configurations")
-        return []
-    
-    def get_player_info(self, player_id: int, max_retries: int = 2) -> Optional[Dict]:
-        """
-        Get detailed information about a specific player.
-        
-        Args:
-            player_id: NBA player ID
-            max_retries: Maximum number of retry attempts
-        
-        Returns:
-            Player info dictionary or None
-        """
-        for attempt in range(max_retries):
+            bs = boxscoretraditionalv2.BoxScoreTraditionalV2(game_id=game_id, timeout=60)
+            player_stats_df = bs.get_data_frames()[0]
+            return {"player_stats": player_stats_df.to_dict("records"), "team_stats": []}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _espn_to_legacy_box(box: Dict) -> Dict:
+        player_stats = []
+        for ps in box.get("player_stats", []):
+            player_stats.append(
+                {
+                    "PLAYER_ID": ps.get("espn_player_id"),
+                    "PLAYER_NAME": ps.get("player_name"),
+                    "TEAM_ABBREVIATION": ps.get("team_abbreviation"),
+                    "MIN": ps.get("minutes_played"),
+                    "PTS": ps.get("points"),
+                    "REB": ps.get("rebounds"),
+                    "OREB": ps.get("offensive_rebounds"),
+                    "DREB": ps.get("defensive_rebounds"),
+                    "AST": ps.get("assists"),
+                    "STL": ps.get("steals"),
+                    "BLK": ps.get("blocks"),
+                    "TOV": ps.get("turnovers"),
+                    "PF": ps.get("personal_fouls"),
+                    "FGM": ps.get("field_goals_made"),
+                    "FGA": ps.get("field_goals_attempted"),
+                    "FG3M": ps.get("three_pointers_made"),
+                    "FG3A": ps.get("three_pointers_attempted"),
+                    "FTM": ps.get("free_throws_made"),
+                    "FTA": ps.get("free_throws_attempted"),
+                    "PLUS_MINUS": ps.get("plus_minus"),
+                }
+            )
+        return {"player_stats": player_stats, "team_stats": [], "injuries": box.get("injuries", [])}
+
+    def get_all_teams(self) -> List[Dict]:
+        if NBA_API_AVAILABLE and teams:
             self._rate_limit()
             try:
-                player_info = commonplayerinfo.CommonPlayerInfo(
-                    player_id=player_id,
-                    timeout=60
-                )
-                info_df = player_info.get_data_frames()[0]
-                if not info_df.empty:
-                    result = info_df.iloc[0].to_dict()
-                    # Add extra delay after successful call to respect rate limits
-                    time.sleep(0.5)
-                    return result
-                return None
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    # Exponential backoff for retries
-                    wait_time = (attempt + 1) * 2
-                    time.sleep(wait_time)
-                    continue
-                # Don't print error for every failed player - too noisy
-                return None
-    
-    def get_game_schedule(self, game_date: date) -> List[Dict]:
-        """
-        Get games scheduled for a specific date using alternative client.
-
-        Args:
-            game_date: Date to get games for
-
-        Returns:
-            List of game dictionaries
-        """
-        return self.client.get_game_schedule(game_date)
-
-    def _get_schedule_espn_fallback(self, game_date: date) -> List[Dict]:
-        """
-        Fallback method using ESPN API to get game schedules.
-        """
-        import requests
-
-        # ESPN NBA scoreboard API
-        espn_url = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-        params = {
-            'dates': game_date.strftime('%Y%m%d')
-        }
-
-        response = requests.get(espn_url, params=params, timeout=10)
-        response.raise_for_status()
-
-        data = response.json()
-        games = []
-
-        for event in data.get('events', []):
-            # Extract basic game info
-            game_data = {
-                'GAME_ID': event.get('id', ''),
-                'GAME_DATE': game_date.strftime('%Y-%m-%d'),
-                'GAME_STATUS_TEXT': event.get('status', {}).get('type', {}).get('description', ''),
-                'GAME_STATUS_ID': event.get('status', {}).get('type', {}).get('id', 0),
-                'HOME_TEAM_ID': event.get('competitions', [{}])[0].get('competitors', [{}])[0].get('id', ''),
-                'AWAY_TEAM_ID': event.get('competitions', [{}])[0].get('competitors', [{}])[1].get('id', ''),
-                'HOME_TEAM_NAME': event.get('competitions', [{}])[0].get('competitors', [{}])[0].get('team', {}).get('displayName', ''),
-                'AWAY_TEAM_NAME': event.get('competitions', [{}])[0].get('competitors', [{}])[1].get('team', {}).get('displayName', ''),
-            }
-            games.append(game_data)
-
-        print(f"✅ ESPN API fallback success: {len(games)} games found")
-        return games
-
-    def _get_mock_schedule(self, game_date: date) -> List[Dict]:
-        """
-        Mock schedule data for testing when all APIs fail.
-        Creates sample games for the current date.
-        """
-        import random
-
-        # NBA team ID mapping (simplified)
-        nba_teams = [
-            {'id': 1610612737, 'name': 'Atlanta Hawks', 'abbrev': 'ATL'},
-            {'id': 1610612738, 'name': 'Boston Celtics', 'abbrev': 'BOS'},
-            {'id': 1610612751, 'name': 'Brooklyn Nets', 'abbrev': 'BKN'},
-            {'id': 1610612766, 'name': 'Charlotte Hornets', 'abbrev': 'CHA'},
-            {'id': 1610612741, 'name': 'Chicago Bulls', 'abbrev': 'CHI'},
-            {'id': 1610612739, 'name': 'Cleveland Cavaliers', 'abbrev': 'CLE'},
-            {'id': 1610612742, 'name': 'Dallas Mavericks', 'abbrev': 'DAL'},
-            {'id': 1610612743, 'name': 'Denver Nuggets', 'abbrev': 'DEN'},
-            {'id': 1610612765, 'name': 'Detroit Pistons', 'abbrev': 'DET'},
-            {'id': 1610612744, 'name': 'Golden State Warriors', 'abbrev': 'GSW'},
-        ]
-
-        # Create 2-4 mock games
-        num_games = random.randint(2, 4)
-        games = []
-
-        for i in range(num_games):
-            home_team = nba_teams[i * 2]
-            away_team = nba_teams[i * 2 + 1] if i * 2 + 1 < len(nba_teams) else nba_teams[0]
-
-            game_data = {
-                'GAME_ID': f"999{i+1:03d}",
-                'GAME_DATE': game_date.strftime('%Y-%m-%d'),
-                'GAME_STATUS_TEXT': 'Scheduled',
-                'GAME_STATUS_ID': 1,
-                'HOME_TEAM_ID': home_team['id'],
-                'AWAY_TEAM_ID': away_team['id'],
-                'HOME_TEAM_NAME': home_team['name'],
-                'AWAY_TEAM_NAME': away_team['name'],
-            }
-            games.append(game_data)
-
-        print(f"✅ Mock data fallback: {len(games)} games created for testing")
-        return games
-    
-    def get_team_game_log(self, team_id: int, season: str) -> List[Dict]:
-        """
-        Get game log for a team for a specific season.
-        
-        Args:
-            team_id: NBA team ID
-            season: Season string (e.g., "2023-24")
-        
-        Returns:
-            List of game dictionaries
-        """
-        self._rate_limit()
-        try:
-            game_log = teamgamelog.TeamGameLog(
-                team_id=team_id,
-                season=season,
-                timeout=30
-            )
-            games_df = game_log.get_data_frames()[0]
-            return games_df.to_dict('records')
-        except Exception as e:
-            print(f"❌ Error fetching team game log for team {team_id}: {e}")
-            return []
-    
-    def get_player_game_log(self, player_id: int, season: str) -> List[Dict]:
-        """
-        Get game log for a player for a specific season.
-        
-        Args:
-            player_id: NBA player ID
-            season: Season string (e.g., "2023-24")
-        
-        Returns:
-            List of game stat dictionaries
-        """
-        self._rate_limit()
-        try:
-            game_log = playergamelog.PlayerGameLog(
-                player_id=player_id,
-                season=season,
-                timeout=30
-            )
-            games_df = game_log.get_data_frames()[0]
-            return games_df.to_dict('records')
-        except Exception as e:
-            print(f"❌ Error fetching player game log for player {player_id}: {e}")
-            return []
-    
-    def get_game_box_score(self, game_id: str) -> Optional[Dict]:
-        """
-        Get box score for a specific game.
-        
-        Args:
-            game_id: NBA game ID (format: "0022300123")
-        
-        Returns:
-            Dictionary with player stats and team stats, or None
-        """
-        self._rate_limit()
-        try:
-            box_score = boxscoretraditionalv2.BoxScoreTraditionalV2(
-                game_id=game_id,
-                timeout=30
-            )
-            
-            # Get dataframes
-            player_stats_df = box_score.get_data_frames()[0]  # PlayerStats
-            team_stats_df = box_score.get_data_frames()[1]    # TeamStats
-            
-            return {
-                'player_stats': player_stats_df.to_dict('records'),
-                'team_stats': team_stats_df.to_dict('records')
-            }
-        except Exception as e:
-            print(f"❌ Error fetching box score for game {game_id}: {e}")
-            return None
-    
-    def get_games_by_date_range(self, season: str, date_from: date, date_to: date) -> List[Dict]:
-        """
-        Get all games in a date range for a season.
-        
-        Args:
-            season: Season string (e.g., "2023-24")
-            date_from: Start date
-            date_to: End date
-        
-        Returns:
-            List of game dictionaries
-        """
-        self._rate_limit()
-        try:
-            game_finder = leaguegamefinder.LeagueGameFinder(
-                season_nullable=season,
-                date_from_nullable=date_from.strftime("%m/%d/%Y"),
-                date_to_nullable=date_to.strftime("%m/%d/%Y"),
-                timeout=30
-            )
-            games_df = game_finder.get_data_frames()[0]
-            return games_df.to_dict('records')
-        except Exception as e:
-            print(f"❌ Error fetching games for date range: {e}")
-            return []
-
-
-def test_client():
-    """Test the NBA API client."""
-    if not NBA_API_AVAILABLE:
-        print("❌ nba_api package not available")
-        return False
-    
-    print("Testing NBA API Client...")
-    client = NBAAPIClient()
-    
-    # Test 1: Get teams
-    print("\n1. Testing get_all_teams()...")
-    teams_list = client.get_all_teams()
-    print(f"   ✅ Found {len(teams_list)} teams")
-    if teams_list:
-        print(f"   Example: {teams_list[0]['full_name']}")
-    
-    # Test 2: Get players
-    print("\n2. Testing get_all_players()...")
-    players = client.get_all_players(is_only_current_season=1)
-    print(f"   ✅ Found {len(players)} current players")
-    if players:
-        print(f"   Example: {players[0].get('DISPLAY_FIRST_LAST', 'N/A')}")
-    
-    # Test 3: Get today's schedule
-    print("\n3. Testing get_game_schedule()...")
-    today = date.today()
-    games = client.get_game_schedule(today)
-    print(f"   ✅ Found {len(games)} games scheduled for today")
-    
-    print("\n✅ All tests passed!")
-    return True
-
-
-if __name__ == "__main__":
-    test_client()
-
+                return teams.get_teams()
+            except Exception:
+                pass
+        return []

@@ -21,16 +21,22 @@ from app.models import Season
 # Season data - Update these dates for current season
 SEASONS = [
     {
-        "season_year": "2023-24",
-        "start_date": date(2023, 10, 24),
-        "end_date": date(2024, 4, 14),
-        "is_current": False  # Update this based on current date
-    },
-    {
         "season_year": "2024-25",
         "start_date": date(2024, 10, 22),
         "end_date": date(2025, 4, 13),
-        "is_current": True  # Update this based on current date
+        "is_current": False,
+    },
+    {
+        "season_year": "2025-26",
+        "start_date": date(2025, 10, 21),
+        "end_date": date(2026, 4, 12),
+        "is_current": False,
+    },
+    {
+        "season_year": "2026-27",
+        "start_date": date(2026, 10, 20),
+        "end_date": date(2027, 4, 11),
+        "is_current": True,
     },
 ]
 
