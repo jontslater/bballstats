@@ -52,7 +52,7 @@ NBA_TEAMS = [
 ]
 
 
-def seed_teams():
+def seed_teams(yes: bool = False):
     """Seed teams into the database."""
     db: Session = SessionLocal()
     
@@ -61,10 +61,11 @@ def seed_teams():
         existing_count = db.query(Team).count()
         if existing_count > 0:
             print(f"⚠️  {existing_count} teams already exist in database.")
-            response = input("Do you want to continue? This will skip existing teams. (y/n): ")
-            if response.lower() != 'y':
-                print("Cancelled.")
-                return
+            if not yes:
+                response = input("Do you want to continue? This will skip existing teams. (y/n): ")
+                if response.lower() != 'y':
+                    print("Cancelled.")
+                    return
         
         # Create teams
         created = 0
@@ -72,13 +73,16 @@ def seed_teams():
         
         for team_data in NBA_TEAMS:
             # Check if team already exists
-            existing = db.query(Team).filter(Team.abbreviation == team_data["abbreviation"]).first()
+            existing = db.query(Team).filter(
+                Team.sport == "NBA",
+                Team.abbreviation == team_data["abbreviation"],
+            ).first()
             
             if existing:
                 skipped += 1
                 continue
             
-            team = Team(**team_data)
+            team = Team(sport="NBA", **team_data)
             db.add(team)
             created += 1
         
@@ -101,9 +105,13 @@ def seed_teams():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--yes", action="store_true", help="Skip confirmation prompts")
+    args = parser.parse_args()
     print("🏀 Seeding NBA Teams...")
     print("=" * 50)
-    seed_teams()
+    seed_teams(yes=args.yes)
     print("=" * 50)
     print("✅ Done!")
 

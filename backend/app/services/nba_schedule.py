@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Set
 from sqlalchemy.orm import Session
 
 from app.models import Game, GameSchedule, Season, Team
+from app.scrapers.espn_nba_client import normalize_nba_abbrev
 
 NBA_SCHEDULE_LOOKBACK_DAYS = 7
 
@@ -16,6 +17,7 @@ NBA_SCHEDULE_LOOKBACK_DAYS = 7
 def find_nba_team(db: Session, abbrev: Optional[str]) -> Optional[Team]:
     if not abbrev:
         return None
+    abbrev = normalize_nba_abbrev(abbrev)
     return db.query(Team).filter(Team.sport == "NBA", Team.abbreviation == abbrev).first()
 
 
@@ -86,17 +88,24 @@ def persist_nba_schedule_games(db: Session, games: List[Dict], season: Season) -
             status = nba_game_status(g.get("status", "scheduled"))
 
             sched = _lookup_schedule(db, espn_id, game_date, home.team_id, away.team_id)
+            if g.get("game_time"):
+                gt = g["game_time"]
+            else:
+                gt = None
             if sched:
                 sched.status = status
                 if espn_id:
                     sched.external_game_id = espn_id
                     sched.nba_game_id = espn_id
+                if gt:
+                    sched.game_time = gt
                 updated_schedules += 1
             else:
                 sched = GameSchedule(
                     sport="NBA",
                     season_id=season.season_id,
                     game_date=game_date,
+                    game_time=gt,
                     home_team_id=home.team_id,
                     away_team_id=away.team_id,
                     status=status,

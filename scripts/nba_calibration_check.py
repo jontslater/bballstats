@@ -13,7 +13,7 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "backend"))
 
 from app.database import SessionLocal
-from app.services.nba_prop_calibration import run_oos_calibration, refresh_prop_gate_cache
+from app.services.nba_prop_calibration import refresh_prop_gate_cache
 
 
 def print_tables(reports):
@@ -40,9 +40,8 @@ def print_tables(reports):
 def main():
     db = SessionLocal()
     try:
-        reports = run_oos_calibration(db)
+        reports = refresh_prop_gate_cache(db)
         print_tables(reports)
-        refresh_prop_gate_cache(db)
     finally:
         db.close()
 

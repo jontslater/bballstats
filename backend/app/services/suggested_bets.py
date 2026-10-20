@@ -167,24 +167,20 @@ class SuggestedBetsService(BaseSportService):
                 from app.services.nba_prop_calibration import prop_passes_calibration_gate
                 from app.models.betting_line import BettingLine
                 from app.services.betting_line_service import BettingLineService
-                if not prop_passes_calibration_gate(pred.stat_type):
+                if not prop_passes_calibration_gate(pred.stat_type, db=self.db):
                     continue
-                betting_line = self.db.query(BettingLine).filter(
-                    BettingLine.game_id == pred.game_id,
-                    BettingLine.player_id == pred.player_id,
-                    BettingLine.stat_type == pred.stat_type,
-                ).first()
-                if betting_line and betting_line.over_odds:
-                    break_even = BettingLineService(self.db)._odds_to_probability(betting_line.over_odds)
-                    edge = probability - break_even
-                    if edge < 0.03:
-                        continue
-                else:
-                    from app.constants.base_rates import get_base_rate
-                    base_rate = get_base_rate(pred.stat_type, line_rounded, default=None)
-                    if base_rate is None:
-                        continue
-                    edge = probability - base_rate
+                betting_line = BettingLineService(self.db).find_matching_line(
+                    game_id=pred.game_id,
+                    player_id=pred.player_id,
+                    stat_type=pred.stat_type,
+                    model_line=line_rounded,
+                )
+                if not betting_line or not betting_line.over_odds:
+                    continue
+                break_even = BettingLineService(self.db)._odds_to_probability(betting_line.over_odds)
+                edge = probability - break_even
+                if edge < 0.03:
+                    continue
             else:
                 from app.constants.base_rates import get_base_rate
                 base_rate = get_base_rate(pred.stat_type, line_rounded, default=0.50)

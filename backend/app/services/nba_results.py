@@ -40,7 +40,7 @@ def get_or_create_nba_player(
         player = db.query(Player).filter(Player.sport == "NBA", Player.name == player_name).first()
 
     if not player:
-        max_id = db.query(func.max(Player.player_id)).filter(Player.sport == "NBA").scalar() or 0
+        max_id = db.query(func.max(Player.player_id)).scalar() or 0
         player = Player(
             player_id=max_id + 1,
             sport="NBA",
@@ -56,6 +56,8 @@ def get_or_create_nba_player(
             player.espn_player_id = str(espn_player_id)
         if team and player.current_team_id != team.team_id:
             player.current_team_id = team.team_id
+        if position and not player.position:
+            player.position = position
     return player
 
 

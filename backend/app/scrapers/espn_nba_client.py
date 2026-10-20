@@ -222,6 +222,8 @@ class ESPNNBAClient:
                 abbrev = normalize_nba_abbrev(team.get("abbreviation"), tid)
                 score_raw = competitor.get("score")
                 score = int(score_raw) if score_raw not in (None, "") and str(score_raw).isdigit() else None
+                if not abbrev:
+                    continue
                 if competitor.get("homeAway") == "home":
                     home_abbrev = abbrev
                     home_score = score
@@ -231,10 +233,20 @@ class ESPNNBAClient:
 
             if not home_abbrev or not away_abbrev or not game_date:
                 return None
+            if home_abbrev == away_abbrev:
+                return None
+
+            game_time = None
+            if iso_date:
+                try:
+                    game_time = datetime.fromisoformat(iso_date.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    game_time = None
 
             return {
                 "espn_game_id": espn_game_id,
                 "game_date": game_date,
+                "game_time": game_time,
                 "home_team": home_abbrev,
                 "away_team": away_abbrev,
                 "home_score": home_score,

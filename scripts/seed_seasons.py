@@ -41,7 +41,7 @@ SEASONS = [
 ]
 
 
-def seed_seasons():
+def seed_seasons(yes: bool = False):
     """Seed seasons into the database."""
     db: Session = SessionLocal()
     
@@ -50,10 +50,11 @@ def seed_seasons():
         existing_count = db.query(Season).count()
         if existing_count > 0:
             print(f"⚠️  {existing_count} seasons already exist in database.")
-            response = input("Do you want to continue? This will skip existing seasons. (y/n): ")
-            if response.lower() != 'y':
-                print("Cancelled.")
-                return
+            if not yes:
+                response = input("Do you want to continue? This will skip existing seasons. (y/n): ")
+                if response.lower() != 'y':
+                    print("Cancelled.")
+                    return
         
         # Create seasons
         created = 0
@@ -62,14 +63,15 @@ def seed_seasons():
         for season_data in SEASONS:
             # Check if season already exists
             existing = db.query(Season).filter(
-                Season.season_year == season_data["season_year"]
+                Season.sport == "NBA",
+                Season.season_year == season_data["season_year"],
             ).first()
             
             if existing:
                 skipped += 1
                 continue
             
-            season = Season(**season_data)
+            season = Season(sport="NBA", **season_data)
             db.add(season)
             created += 1
         
@@ -96,9 +98,13 @@ def seed_seasons():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--yes", action="store_true", help="Skip confirmation prompts")
+    args = parser.parse_args()
     print("🏀 Seeding NBA Seasons...")
     print("=" * 50)
-    seed_seasons()
+    seed_seasons(yes=args.yes)
     print("=" * 50)
     print("✅ Done!")
 

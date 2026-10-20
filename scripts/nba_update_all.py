@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 """
 NBA master update script (mirrors mlb_update_all.py).
-
-Usage:
-    python scripts/nba_update_all.py
-
-Steps:
-1. Collect yesterday's finals (lookback 1 day through today for missed games)
-2. Refresh schedule (lookback + next 7 days)
-3. Create Game rows from schedules
-4. Generate predictions for upcoming games
-5. Evaluate finished-game predictions
-6. Refresh calibration gates and log suggested bets for today
 """
 import logging
 import sys
@@ -50,12 +39,25 @@ def update_game_results():
     if r.returncode != 0:
         logger.error(r.stderr)
         return False
-    logger.info(r.stdout[-2000:] if r.stdout else "OK")
     return True
 
 
+def sync_rosters():
+    logger.info("STEP 2: Sync NBA rosters from ESPN...")
+    from app.database import SessionLocal
+    from app.services.nba_roster_sync import sync_nba_rosters_from_espn
+
+    db = SessionLocal()
+    try:
+        result = sync_nba_rosters_from_espn(db)
+        logger.info(f"Rosters: created={result['created']}, updated={result['updated']}, errors={result['errors']}")
+        return True
+    finally:
+        db.close()
+
+
 def update_schedules():
-    logger.info("STEP 2: NBA schedules...")
+    logger.info("STEP 3: NBA schedules...")
     import subprocess
 
     env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
@@ -77,12 +79,25 @@ def update_schedules():
     if not gr.get("success"):
         logger.error(gr.get("error"))
         return False
-    logger.info(f"Schedules OK; games from schedules created={gr.get('created')}")
     return True
 
 
+def load_calibration_gates():
+    logger.info("STEP 4: Load persisted NBA calibration gates (recompute if stale)...")
+    from app.database import SessionLocal
+    from app.services.nba_prop_calibration import load_prop_gates
+
+    db = SessionLocal()
+    try:
+        gates = load_prop_gates(db)
+        logger.info(f"Calibration gates: {gates}")
+        return True
+    finally:
+        db.close()
+
+
 def generate_predictions():
-    logger.info("STEP 3: NBA predictions...")
+    logger.info("STEP 5: NBA predictions...")
     import subprocess
 
     env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
@@ -102,15 +117,12 @@ def generate_predictions():
         encoding="utf-8",
         errors="replace",
     )
-    if r.returncode != 0:
-        logger.error(r.stderr)
-        return False
-    return True
+    return r.returncode == 0
 
 
 def evaluate_predictions():
-    logger.info("STEP 4: Evaluate NBA predictions...")
-    from sqlalchemy import and_, distinct
+    logger.info("STEP 6: Evaluate NBA predictions...")
+    from sqlalchemy import distinct
 
     from app.database import SessionLocal
     from app.models.game import Game
@@ -133,8 +145,6 @@ def evaluate_predictions():
             .order_by(Game.game_date.desc())
             .all()
         )
-        if not finished:
-            return True
         ev = PredictionEvaluator(db)
         for game_id, _ in finished:
             try:
@@ -148,16 +158,15 @@ def evaluate_predictions():
         db.close()
 
 
-def suggested_bets_and_calibration():
-    logger.info("STEP 5: Calibration gates + suggested bets...")
+def log_suggested_bets():
+    logger.info("STEP 7: Suggested bets (uses loaded gates)...")
     from app.database import SessionLocal
-    from app.services.nba_prop_calibration import refresh_prop_gate_cache
+    from app.services.nba_prop_calibration import load_prop_gates
     from app.services.suggested_bets import SuggestedBetsService
 
     db = SessionLocal()
     try:
-        gates = refresh_prop_gate_cache(db)
-        logger.info(f"Calibration gates: {gates}")
+        load_prop_gates(db)
         svc = SuggestedBetsService(db, sport="NBA")
         bets = svc.get_suggested_bets(game_date=date.today(), limit=25)
         logger.info(f"Suggested bets for today: {len(bets)}")
@@ -167,13 +176,14 @@ def suggested_bets_and_calibration():
 
 
 def main():
-    logger.info("NBA Betting Analytics - Full Update")
     steps = [
         ("NBA Results", update_game_results),
+        ("NBA Rosters", sync_rosters),
         ("NBA Schedules", update_schedules),
+        ("NBA Calibration Gates", load_calibration_gates),
         ("NBA Predictions", generate_predictions),
         ("NBA Evaluate", evaluate_predictions),
-        ("NBA Suggestions", suggested_bets_and_calibration),
+        ("NBA Suggestions", log_suggested_bets),
     ]
     results = {}
     for name, fn in steps:

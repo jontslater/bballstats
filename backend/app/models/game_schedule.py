@@ -1,7 +1,7 @@
 """
 GameSchedule model - Upcoming games
 """
-from sqlalchemy import Column, Integer, ForeignKey, Date, DateTime, String
+from sqlalchemy import Column, Integer, ForeignKey, Date, DateTime, String, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -28,6 +28,10 @@ class GameSchedule(Base):
     away_team = relationship("Team", foreign_keys=[away_team_id])
     season = relationship("Season")
     game = relationship("Game", back_populates="schedules")
+
+    __table_args__ = (
+        UniqueConstraint("sport", "external_game_id", name="uq_game_schedules_sport_external_game_id"),
+    )
 
     def __repr__(self):
         return f"<GameSchedule {self.away_team_id} @ {self.home_team_id} on {self.game_date}>"

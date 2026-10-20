@@ -17,6 +17,36 @@ class BettingLineService:
     
     def __init__(self, db: Session):
         self.db = db
+
+    def find_matching_line(
+        self,
+        game_id: int,
+        player_id: int,
+        stat_type: str,
+        model_line: float,
+        line_tolerance: float = 0.25,
+    ) -> Optional[BettingLine]:
+        """Find sportsbook line for player/stat; prefer line closest to model line."""
+        lines = (
+            self.db.query(BettingLine)
+            .filter(
+                BettingLine.game_id == game_id,
+                BettingLine.player_id == player_id,
+                BettingLine.stat_type == stat_type,
+            )
+            .all()
+        )
+        if not lines:
+            return None
+        with_over = [ln for ln in lines if ln.over_line is not None and ln.over_odds]
+        if not with_over:
+            return None
+        close = [
+            ln for ln in with_over if abs(float(ln.over_line) - model_line) <= line_tolerance
+        ]
+        if not close:
+            return None
+        return min(close, key=lambda ln: (abs(float(ln.over_line) - model_line), ln.line_id))
     
     def add_betting_line(
         self,
