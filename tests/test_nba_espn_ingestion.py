@@ -35,7 +35,7 @@ from app.services.nba_results import upsert_final_from_espn
 from app.services.nba_schedule import persist_nba_schedule_games
 
 
-FIXTURE = Path(__file__).parent / "fixtures" / "espn_nba_summary_sample.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "espn_nba_summary_min.json"
 
 
 def _session():
