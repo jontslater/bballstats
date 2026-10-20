@@ -164,7 +164,8 @@ class PredictionService:
             # Get their recent starter rate (last 10 games)
             from datetime import timedelta
             from app.models.lineup import Lineup
-            thirty_days_ago = game.game_date - timedelta(days=30)
+            lookback_days = 400 if self.sport == 'NBA' else 30
+            thirty_days_ago = game.game_date - timedelta(days=lookback_days)
             
             recent_starter_count = self.db.query(Lineup).join(Game).filter(
                 and_(
@@ -197,13 +198,14 @@ class PredictionService:
         # Use last 20 games for more recent form
         # For NFL, use the same season logic as distribution (use game's season)
         # For NBA, can still use game's season for precision
-        season_ids_for_minutes = [season_id]  # Use game's season (2025 for NFL)
+        season_ids_for_minutes = None if self.sport == 'NBA' else [season_id]
         
+        recent_games_window = 10 if self.sport == 'NBA' else 20
         historical_avg_minutes = self.dist_engine.get_historical_avg_minutes(
             player_id,
             sport=self.sport,
             season_ids=season_ids_for_minutes,
-            recent_games=20  # Use last 20 games instead of all-time
+            recent_games=recent_games_window,
         )
         
         if not historical_avg_minutes:
@@ -226,8 +228,14 @@ class PredictionService:
         elif self.sport == 'NFL':
             min_historical_threshold = 5.0
         else:  # NBA
-            min_historical_threshold = 12.0
-            
+            min_historical_threshold = 20.0
+
+        if self.sport == 'NBA' and game.game_status in ['scheduled', 'in_progress']:
+            from app.services.injury_context import InjuryContext
+            inj = InjuryContext(self.db).get_player_injury_status(player_id)
+            if inj and inj.get('status') in ('Out', 'Doubtful'):
+                return None
+
         if game.game_status in ['scheduled', 'in_progress']:
             if historical_avg_minutes < min_historical_threshold:
                 return None  # Player rarely plays, unlikely to have betting lines
@@ -383,16 +391,14 @@ class PredictionService:
                 return None  # Too few minutes, unlikely to have betting lines available
         
         # Determine minimum games threshold (lower for NFL due to data limitations)
-        min_games_threshold = 5 if self.sport == 'NFL' else 15
-        
-        # Get base distribution
-        # For NFL, use current season (2025) if available, otherwise fallback to previous seasons
-        # For NBA, use the game's season
         if self.sport == 'NFL':
-            # Prefer using the game's season (2025) if we have data
-            # Otherwise use previous seasons as fallback
-            season_ids_for_dist = [season_id]  # Use the game's season (2025)
+            min_games_threshold = 5
+            season_ids_for_dist = [season_id]
+        elif self.sport == 'NBA':
+            min_games_threshold = 10
+            season_ids_for_dist = None
         else:
+            min_games_threshold = 15
             season_ids_for_dist = [season_id]
         
         base_dist = self.dist_engine.calculate_base_distribution(

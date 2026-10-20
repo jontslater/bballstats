@@ -220,6 +220,10 @@ class CalibratedProbabilityCalculator:
         
         # Clamp to valid range
         calibrated_prob = max(0.01, min(0.99, calibrated_prob))
+
+        if self.sport == 'NBA':
+            from app.services.nba_prop_calibration import apply_nba_probability_adjustment
+            calibrated_prob = apply_nba_probability_adjustment(stat_type, calibrated_prob)
         
         return {
             'probability': round(calibrated_prob, 3),

@@ -1,7 +1,7 @@
 """
 Game model - NBA and NFL games
 """
-from sqlalchemy import Column, Integer, Date, ForeignKey, String, Float, DateTime
+from sqlalchemy import Column, Integer, Date, ForeignKey, String, Float, DateTime, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -31,6 +31,10 @@ class Game(Base):
     predictions = relationship("Prediction", back_populates="game")
     schedules = relationship("GameSchedule", back_populates="game")
     lineups = relationship("Lineup", back_populates="game")
+
+    __table_args__ = (
+        UniqueConstraint("sport", "espn_game_id", name="uq_games_sport_espn_game_id"),
+    )
 
     def __repr__(self):
         return f"<Game {self.away_team_id} @ {self.home_team_id} on {self.game_date}>"

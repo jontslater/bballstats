@@ -20,6 +20,7 @@ from .lineup import Lineup
 from .betting_line import BettingLine
 from .parlay import Parlay
 from .poor_mans_bet import PoorMansBetChallenge, PoorMansBetDay
+from .nba_prop_calibration_gate import NbaPropCalibrationGate
 
 __all__ = [
     "Team",
@@ -43,5 +44,6 @@ __all__ = [
     "Parlay",
     "PoorMansBetChallenge",
     "PoorMansBetDay",
+    "NbaPropCalibrationGate",
 ]
 

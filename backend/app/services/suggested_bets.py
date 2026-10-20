@@ -157,17 +157,35 @@ class SuggestedBetsService(BaseSportService):
             if probability is None or line is None or line <= 0:
                 continue
             
-            # Get stat/line-specific base rate for edge calculation
-            from app.constants.base_rates import get_base_rate
             line_rounded = round(line, 1)
             # Pitcher K OVER 0.5 is ~league-wide 85-90% for starters; the stored
             # base rate is 0.50 so the implied edge is meaningless. Skip it.
             if self.sport == 'MLB' and pred.stat_type == 'strikeouts' and line_rounded <= 0.5:
                 continue
-            base_rate = get_base_rate(pred.stat_type, line_rounded, default=0.50)
-            
-            edge = probability - base_rate
-            
+
+            if self.sport == 'NBA':
+                from app.services.nba_prop_calibration import prop_passes_calibration_gate
+                from app.models.betting_line import BettingLine
+                from app.services.betting_line_service import BettingLineService
+                if not prop_passes_calibration_gate(pred.stat_type, db=self.db):
+                    continue
+                betting_line = BettingLineService(self.db).find_matching_line(
+                    game_id=pred.game_id,
+                    player_id=pred.player_id,
+                    stat_type=pred.stat_type,
+                    model_line=line_rounded,
+                )
+                if not betting_line or not betting_line.over_odds:
+                    continue
+                break_even = BettingLineService(self.db)._odds_to_probability(betting_line.over_odds)
+                edge = probability - break_even
+                if edge < 0.03:
+                    continue
+            else:
+                from app.constants.base_rates import get_base_rate
+                base_rate = get_base_rate(pred.stat_type, line_rounded, default=0.50)
+                edge = probability - base_rate
+
             # Filter by bet type with stricter requirements for 'safe' and 'standard' tiers
             if pred.bet_type == 'safe':
                 # Safe bets must have p >= 0.55 AND positive edge over base rate
