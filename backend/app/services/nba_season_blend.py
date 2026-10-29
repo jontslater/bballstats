@@ -4,6 +4,7 @@ Blend current- and prior-season NBA samples for early-season predictions.
 from __future__ import annotations
 
 import math
+from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, func
@@ -32,8 +33,14 @@ def prior_nba_season_id(db: Session, current_season_id: int) -> Optional[int]:
     return prev.season_id if prev else None
 
 
-def count_finished_games(db: Session, player_id: int, season_id: int) -> int:
-    return (
+def count_finished_games(
+    db: Session,
+    player_id: int,
+    season_id: int,
+    *,
+    as_of_date: Optional[date] = None,
+) -> int:
+    q = (
         db.query(func.count(PlayerGameStat.stat_id))
         .join(Game, Game.game_id == PlayerGameStat.game_id)
         .filter(
@@ -43,9 +50,10 @@ def count_finished_games(db: Session, player_id: int, season_id: int) -> int:
             Game.game_status == "finished",
             PlayerGameStat.minutes_played > 0,
         )
-        .scalar()
-        or 0
     )
+    if as_of_date is not None:
+        q = q.filter(Game.game_date < as_of_date)
+    return q.scalar() or 0
 
 
 def _blend_stats(
@@ -83,8 +91,12 @@ def blended_nba_base_distribution(
     projected_minutes: float,
     current_season_id: int,
     min_games: int = NBA_BLEND_MIN_CURRENT_GAMES,
+    *,
+    as_of_date: Optional[date] = None,
 ) -> Optional[Dict[str, Any]]:
-    n_current = count_finished_games(db, player_id, current_season_id)
+    n_current = count_finished_games(
+        db, player_id, current_season_id, as_of_date=as_of_date
+    )
     current = dist_engine.calculate_base_distribution(
         player_id=player_id,
         stat_type=stat_type,
@@ -92,6 +104,7 @@ def blended_nba_base_distribution(
         projected_minutes=projected_minutes,
         season_ids=[current_season_id],
         min_games=1,
+        as_of_date=as_of_date,
     )
     if n_current >= min_games:
         full = dist_engine.calculate_base_distribution(
@@ -101,6 +114,7 @@ def blended_nba_base_distribution(
             projected_minutes=projected_minutes,
             season_ids=[current_season_id],
             min_games=min_games,
+            as_of_date=as_of_date,
         )
         if full:
             full["blend_weight_current"] = 1.0
@@ -116,6 +130,7 @@ def blended_nba_base_distribution(
             projected_minutes=projected_minutes,
             season_ids=[prior_id],
             min_games=min_games,
+            as_of_date=as_of_date,
         )
     return _blend_stats(current, prior, n_current, min_games)
 
@@ -128,14 +143,19 @@ def blended_nba_avg_minutes(
     recent_games: int = 10,
     only_starters: bool = False,
     min_games: int = NBA_BLEND_MIN_CURRENT_GAMES,
+    *,
+    as_of_date: Optional[date] = None,
 ) -> Optional[float]:
-    n_current = count_finished_games(db, player_id, current_season_id)
+    n_current = count_finished_games(
+        db, player_id, current_season_id, as_of_date=as_of_date
+    )
     current = dist_engine.get_historical_avg_minutes(
         player_id,
         sport="NBA",
         season_ids=[current_season_id],
         recent_games=recent_games,
         only_starters=only_starters,
+        as_of_date=as_of_date,
     )
     if n_current >= min_games and current:
         return current
@@ -149,6 +169,7 @@ def blended_nba_avg_minutes(
             season_ids=[prior_id],
             recent_games=recent_games,
             only_starters=only_starters,
+            as_of_date=as_of_date,
         )
     if current is None and prior is None:
         return None
@@ -164,12 +185,15 @@ def nba_rate_scaled_mean(
     base_mean: float,
     historical_avg_minutes: float,
     projected_minutes: float,
+    *,
+    max_minutes_ratio: float = 1.05,
 ) -> float:
     """Scale per-game mean to projected minutes using per-minute rate from sample minutes."""
     if historical_avg_minutes <= 0 or projected_minutes <= 0:
         return base_mean
+    capped_projected = min(projected_minutes, historical_avg_minutes * max_minutes_ratio)
     rate = base_mean / historical_avg_minutes
-    return round(rate * projected_minutes, 2)
+    return round(rate * capped_projected, 2)
 
 
 def nba_context_multiplier_cap(factors: List[float], cap: float = 1.05) -> float:

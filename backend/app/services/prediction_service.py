@@ -64,7 +64,12 @@ class PredictionService:
         self,
         player_id: int,
         game_id: int,
-        stat_type: str = 'points'
+        stat_type: str = 'points',
+        *,
+        pit_mode: bool = False,
+        as_of_date: Optional[date] = None,
+        persist: bool = True,
+        apply_bias_correction: bool = True,
     ) -> Optional[Prediction]:
         """
         Generate a prediction for a player in a game.
@@ -84,6 +89,10 @@ class PredictionService:
         if not game or not player:
             return None
 
+        if pit_mode and as_of_date is None:
+            as_of_date = game.game_date
+        pit_as_of = as_of_date if (pit_mode or as_of_date is not None) else None
+
         if self.sport == 'MLB':
             from app.services.mlb_probable_pitchers import (
                 MlbProbablePitcherResolver,
@@ -101,7 +110,7 @@ class PredictionService:
                 return None
         
         # EARLY FILTER: For upcoming games, check if player is likely to play
-        if game.game_status in ['scheduled', 'in_progress']:
+        if game.game_status in ['scheduled', 'in_progress'] and not pit_mode:
             # Check injury status - skip if Out, Doubtful, or Questionable
             # (Questionable players are risky and may not play)
             injury_status = self.injury_context.get_player_injury_status(player_id)
@@ -210,6 +219,7 @@ class PredictionService:
                 player_id,
                 season_id,
                 recent_games=recent_games_window,
+                as_of_date=pit_as_of,
             )
         else:
             historical_avg_minutes = self.dist_engine.get_historical_avg_minutes(
@@ -241,13 +251,13 @@ class PredictionService:
         else:  # NBA
             min_historical_threshold = 20.0
 
-        if self.sport == 'NBA' and game.game_status in ['scheduled', 'in_progress']:
+        if self.sport == 'NBA' and game.game_status in ['scheduled', 'in_progress'] and not pit_mode:
             from app.services.injury_context import InjuryContext
             inj = InjuryContext(self.db).get_player_injury_status(player_id)
             if inj and inj.get('status') in ('Out', 'Doubtful'):
                 return None
 
-        if game.game_status in ['scheduled', 'in_progress']:
+        if game.game_status in ['scheduled', 'in_progress'] and not pit_mode:
             if historical_avg_minutes < min_historical_threshold:
                 return None  # Player rarely plays, unlikely to have betting lines
         
@@ -266,6 +276,7 @@ class PredictionService:
                         season_id,
                         recent_games=20,
                         only_starters=True,
+                        as_of_date=pit_as_of,
                     )
                     if self.sport == "NBA"
                     else self.dist_engine.get_historical_avg_minutes(
@@ -414,9 +425,17 @@ class PredictionService:
         else:  # NBA
             min_minutes_threshold = 12 if (blowout_risk_high and blowout_risk_score >= 0.6 and not is_confirmed_starter) else 15
         
-        if game.game_status in ['scheduled', 'in_progress']:
+        if game.game_status in ['scheduled', 'in_progress'] and not pit_mode:
             if projected_minutes < min_minutes_threshold:
                 return None  # Too few minutes, unlikely to have betting lines available
+        
+        minutes_for_dist = projected_minutes
+        if (
+            self.sport == 'NBA'
+            and historical_avg_minutes
+            and not minutes_redist.get('benefits_from_injury')
+        ):
+            minutes_for_dist = min(projected_minutes, historical_avg_minutes * 1.05)
         
         # Determine minimum games threshold (lower for NFL due to data limitations)
         if self.sport == 'NFL':
@@ -439,9 +458,10 @@ class PredictionService:
                 self.db,
                 player_id,
                 stat_type,
-                projected_minutes,
+                minutes_for_dist,
                 season_id,
                 min_games=min_games_threshold,
+                as_of_date=pit_as_of,
             )
         else:
             min_games_threshold = 15
@@ -475,7 +495,7 @@ class PredictionService:
         
         if self.sport == 'NBA':
             historical_usage = self.dist_engine.get_historical_usage_rate(
-                player_id, season_ids=[season_id]
+                player_id, season_ids=[season_id], as_of_date=pit_as_of
             )
             if historical_usage and historical_usage > 0:
                 usage_redist = self.redist_engine.calculate_redistributed_usage(
@@ -532,7 +552,13 @@ class PredictionService:
         if self.sport == 'NBA':
             from app.services.nba_season_blend import nba_rate_scaled_mean
 
-            base_mean = nba_rate_scaled_mean(base_mean, historical_avg_minutes, projected_minutes)
+            rate_cap = 1.22 if minutes_redist.get('benefits_from_injury') else 1.05
+            base_mean = nba_rate_scaled_mean(
+                base_mean,
+                historical_avg_minutes,
+                projected_minutes,
+                max_minutes_ratio=rate_cap,
+            )
             base_dist['mean'] = base_mean
             minutes_for_rate = projected_minutes
         
@@ -627,6 +653,14 @@ class PredictionService:
             mean_cap = base_mean * minutes_ratio * 1.08
             if mean_adjustments['adjusted_mean'] > mean_cap:
                 mean_adjustments['adjusted_mean'] = mean_cap
+
+        if self.sport == 'NBA' and apply_bias_correction:
+            from app.services.nba_mean_bias_correction import apply_mean_bias_correction
+
+            mean_adjustments['adjusted_mean'] = apply_mean_bias_correction(
+                mean_adjustments['adjusted_mean'],
+                stat_type,
+            )
         
         # Step 3: Calculate variance adjustments
         minutes_locked = self.redist_engine.is_minutes_locked(player_id, player.current_team_id)
@@ -678,6 +712,19 @@ class PredictionService:
             league_mean=league_mean,
             league_std=league_std
         )
+
+        if not persist:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                player_id=player_id,
+                game_id=game_id,
+                stat_type=stat_type,
+                bet_type='safe',
+                distribution_mean=mean_adjustments['adjusted_mean'],
+                distribution_std_dev=variance_adjustments['adjusted_std'],
+                safe_line=bet_lines['safe_line'],
+            )
 
         if self.sport == 'MLB' and stat_type in ('hits', 'total_bases'):
             from app.services.mlb_equivalent_props import apply_canonical_hit_over_half_probabilities
