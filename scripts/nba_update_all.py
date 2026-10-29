@@ -42,6 +42,55 @@ def update_game_results():
     return True
 
 
+def refresh_game_results_after_schedule():
+    """Second pass: box scores for games marked final during schedule sync."""
+    logger.info("STEP 3b: NBA results refresh (finished games missing box scores)...")
+    import subprocess
+
+    env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
+    r = subprocess.run(
+        [sys.executable, "scripts/nba_collect_game_results.py", "--lookback-days", "1"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        env=env,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.returncode != 0:
+        logger.error(r.stderr)
+        return False
+    return True
+
+
+def load_betting_lines(with_lines: bool):
+    if not with_lines:
+        return True
+    logger.info("STEP: Load NBA player prop lines (The Odds API)...")
+    import subprocess
+
+    env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
+    r = subprocess.run(
+        [
+            sys.executable,
+            "scripts/nba_load_betting_lines.py",
+            "--predictions-only",
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        env=env,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.stdout:
+        logger.info(r.stdout.strip())
+    if r.returncode != 0:
+        logger.error(r.stderr or "nba_load_betting_lines failed")
+        return False
+    return True
+
+
 def sync_rosters():
     logger.info("STEP 2: Sync NBA rosters from ESPN...")
     from app.database import SessionLocal
@@ -176,12 +225,24 @@ def log_suggested_bets():
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run full NBA data refresh pipeline")
+    parser.add_argument(
+        "--with-lines",
+        action="store_true",
+        help="After predictions, ingest FanDuel/DraftKings player prop lines via The Odds API.",
+    )
+    args = parser.parse_args()
+
     steps = [
         ("NBA Results", update_game_results),
         ("NBA Rosters", sync_rosters),
         ("NBA Schedules", update_schedules),
+        ("NBA Results Refresh", refresh_game_results_after_schedule),
         ("NBA Calibration Gates", load_calibration_gates),
         ("NBA Predictions", generate_predictions),
+        ("NBA Betting Lines", lambda: load_betting_lines(args.with_lines)),
         ("NBA Evaluate", evaluate_predictions),
         ("NBA Suggestions", log_suggested_bets),
     ]
