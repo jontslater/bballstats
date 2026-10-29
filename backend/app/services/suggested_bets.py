@@ -104,6 +104,15 @@ class SuggestedBetsService(BaseSportService):
         ).all()
 
         print(f"Found {len(predictions)} predictions matching criteria (bet_types: {allowed_bet_types}, confidence: {allowed_confidence})")
+
+        if self.sport == 'NBA':
+            deduped: Dict[tuple, Prediction] = {}
+            for pred in predictions:
+                key = (pred.player_id, pred.game_id, pred.stat_type)
+                existing = deduped.get(key)
+                if existing is None or pred.bet_type == 'safe':
+                    deduped[key] = pred
+            predictions = list(deduped.values())
         
         # If we don't have enough long shots, lower the confidence requirement for them
         long_shot_count = sum(1 for p in predictions if p.bet_type == 'long_shot')
@@ -158,6 +167,7 @@ class SuggestedBetsService(BaseSportService):
                 continue
             
             line_rounded = round(line, 1)
+            bet_side = 'over'
             # Pitcher K OVER 0.5 is ~league-wide 85-90% for starters; the stored
             # base rate is 0.50 so the implied edge is meaningless. Skip it.
             if self.sport == 'MLB' and pred.stat_type == 'strikeouts' and line_rounded <= 0.5:
@@ -165,22 +175,83 @@ class SuggestedBetsService(BaseSportService):
 
             if self.sport == 'NBA':
                 from app.services.nba_prop_calibration import prop_passes_calibration_gate
-                from app.models.betting_line import BettingLine
                 from app.services.betting_line_service import BettingLineService
+                from app.services.nba_sportsbook_edge import (
+                    find_sportsbook_line,
+                    mean_book_gap_limit,
+                    mean_vs_book_misaligned,
+                    probability_over_line,
+                    probability_under_line,
+                    probability_edge_exceeds_cap,
+                    stat_point_edge_exceeds_cap,
+                )
                 if not prop_passes_calibration_gate(pred.stat_type, db=self.db):
                     continue
-                betting_line = BettingLineService(self.db).find_matching_line(
+                betting_line = find_sportsbook_line(
+                    self.db,
                     game_id=pred.game_id,
                     player_id=pred.player_id,
                     stat_type=pred.stat_type,
-                    model_line=line_rounded,
                 )
-                if not betting_line or not betting_line.over_odds:
+                if not betting_line or betting_line.over_line is None:
                     continue
-                break_even = BettingLineService(self.db)._odds_to_probability(betting_line.over_odds)
-                edge = probability - break_even
+                model_mean = pred.distribution_mean
+                model_std = pred.distribution_std_dev
+                if model_mean is None:
+                    continue
+                book_line = float(betting_line.over_line)
+                if mean_vs_book_misaligned(model_mean, book_line, pred.stat_type):
+                    print(
+                        f"⚠️  Skipping NBA prop (mean vs book gap > {mean_book_gap_limit(pred.stat_type):.1f}): "
+                        f"player {pred.player_id} {pred.stat_type} mean={model_mean:.1f} book={book_line:.1f}"
+                    )
+                    continue
+                if stat_point_edge_exceeds_cap(model_mean, book_line):
+                    print(
+                        f"⚠️  Skipping NBA prop (point edge > cap): "
+                        f"player {pred.player_id} {pred.stat_type} mean={model_mean:.1f} book={book_line:.1f}"
+                    )
+                    continue
+                line_service = BettingLineService(self.db)
+                p_over = probability_over_line(
+                    model_mean, model_std, book_line, stat_type=pred.stat_type
+                )
+                p_under = probability_under_line(
+                    model_mean, model_std, book_line, stat_type=pred.stat_type
+                )
+                be_over = (
+                    line_service._odds_to_probability(betting_line.over_odds)
+                    if betting_line.over_odds
+                    else None
+                )
+                under_odds = betting_line.under_odds or betting_line.over_odds
+                be_under = (
+                    line_service._odds_to_probability(under_odds) if under_odds else None
+                )
+                edge_over = (p_over - be_over) if be_over is not None else -1.0
+                edge_under = (p_under - be_under) if be_under is not None else -1.0
+                if edge_over >= edge_under:
+                    bet_side = 'over'
+                    probability = p_over
+                    break_even = be_over
+                    edge = edge_over
+                    if be_over is None:
+                        continue
+                    if probability_edge_exceeds_cap(probability, break_even):
+                        continue
+                else:
+                    bet_side = 'under'
+                    probability = p_under
+                    break_even = be_under
+                    edge = edge_under
+                    if be_under is None:
+                        continue
+                    if probability_edge_exceeds_cap(probability, break_even):
+                        continue
                 if edge < 0.03:
                     continue
+                line = book_line
+                line_rounded = round(line, 1)
             else:
                 from app.constants.base_rates import get_base_rate
                 base_rate = get_base_rate(pred.stat_type, line_rounded, default=0.50)
@@ -345,6 +416,7 @@ class SuggestedBetsService(BaseSportService):
                 'stat_type': pred.stat_type,
                 'bet_type': pred.bet_type,
                 'line': final_line,
+                'bet_side': bet_side,
                 'probability': round(float(probability) if probability is not None else 0.5, 3),
                 'confidence_level': pred.confidence_level,
                 'confidence_tier': pred.confidence_level,  # Alias for clarity

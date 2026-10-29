@@ -23,7 +23,36 @@ logger = logging.getLogger(__name__)
 
 
 def update_game_results():
-    logger.info("STEP 1: NBA game results (lookback 1 day)...")
+    logger.info("STEP 1: NBA game results (lookback 1 day + season missing backfill)...")
+    import subprocess
+
+    env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
+    for args in (
+        ["scripts/nba_collect_game_results.py", "--lookback-days", "1"],
+        ["scripts/nba_collect_game_results.py", "--backfill-season-missing"],
+    ):
+        r = subprocess.run(
+            [sys.executable, *args],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            env=env,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if r.stdout:
+            logger.info(r.stdout.strip())
+        if r.stderr:
+            logger.info(r.stderr.strip())
+        if r.returncode != 0:
+            logger.error(r.stderr or r.stdout)
+            return False
+    return True
+
+
+def refresh_game_results_after_schedule():
+    """Second pass: box scores for games marked final during schedule sync."""
+    logger.info("STEP 3b: NBA results refresh (finished games missing box scores)...")
     import subprocess
 
     env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
@@ -38,6 +67,36 @@ def update_game_results():
     )
     if r.returncode != 0:
         logger.error(r.stderr)
+        return False
+    return True
+
+
+def load_betting_lines(with_lines: bool):
+    if not with_lines:
+        return True
+    logger.info("STEP: Load NBA player prop lines (The Odds API)...")
+    import subprocess
+
+    env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
+    r = subprocess.run(
+        [
+            sys.executable,
+            "scripts/nba_load_betting_lines.py",
+            "--predictions-only",
+        ],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        env=env,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.stdout:
+        logger.info(r.stdout.strip())
+    if r.stderr:
+        logger.info(r.stderr.strip())
+    if r.returncode != 0:
+        logger.error(r.stderr or "nba_load_betting_lines failed")
         return False
     return True
 
@@ -82,6 +141,27 @@ def update_schedules():
     return True
 
 
+def dedupe_prediction_rows():
+    logger.info("STEP 5b: Dedupe NBA prediction rows...")
+    import subprocess
+
+    env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
+    r = subprocess.run(
+        [sys.executable, "scripts/nba_dedupe_predictions.py"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        env=env,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.stdout:
+        logger.info(r.stdout.strip())
+    if r.stderr:
+        logger.info(r.stderr.strip())
+    return r.returncode == 0
+
+
 def load_calibration_gates():
     logger.info("STEP 4: Load persisted NBA calibration gates (recompute if stale)...")
     from app.database import SessionLocal
@@ -96,9 +176,12 @@ def load_calibration_gates():
         db.close()
 
 
-def generate_predictions():
-    logger.info("STEP 5: NBA predictions...")
+def generate_predictions(days_ahead: int = 0):
+    logger.info("STEP 5: NBA predictions (days_ahead=%s)...", days_ahead)
     import subprocess
+
+    from app.database import SessionLocal
+    from app.services.nba_pipeline_helpers import nba_prediction_generation_ok
 
     env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
     r = subprocess.run(
@@ -106,7 +189,7 @@ def generate_predictions():
             sys.executable,
             "scripts/generate_predictions.py",
             "--days",
-            "1",
+            str(days_ahead),
             "--stat-types",
             "points,rebounds,assists,three_pointers_made,pts+ast+reb",
         ],
@@ -117,7 +200,41 @@ def generate_predictions():
         encoding="utf-8",
         errors="replace",
     )
-    return r.returncode == 0
+    if r.stdout:
+        logger.info(r.stdout.strip())
+    if r.stderr:
+        logger.info(r.stderr.strip())
+    if r.returncode != 0:
+        logger.error("generate_predictions failed")
+        return False
+
+    created = updated = 0
+    import re
+
+    for line in (r.stdout or "").splitlines():
+        m = re.search(r"Created:\s*(\d+)", line)
+        if m:
+            created = int(m.group(1))
+        m = re.search(r"Updated:\s*(\d+)", line)
+        if m and "Created:" in line:
+            updated = int(m.group(1))
+        m = re.search(r"Created (\d+), Updated (\d+)", line)
+        if m:
+            created += int(m.group(1))
+            updated += int(m.group(2))
+
+    db = SessionLocal()
+    try:
+        ok, msg = nba_prediction_generation_ok(
+            db, days_ahead=days_ahead, created=created, updated=updated
+        )
+        if not ok:
+            logger.error(f"NBA predictions check failed: {msg}")
+            return False
+        logger.info(f"NBA predictions check: {msg}")
+        return True
+    finally:
+        db.close()
 
 
 def evaluate_predictions():
@@ -176,12 +293,31 @@ def log_suggested_bets():
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run full NBA data refresh pipeline")
+    parser.add_argument(
+        "--with-lines",
+        action="store_true",
+        help="After predictions, ingest FanDuel/DraftKings player prop lines via The Odds API.",
+    )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=0,
+        help="Prediction window: 0 = today only, 1 = today+tomorrow, etc. (default: 0)",
+    )
+    args = parser.parse_args()
+
     steps = [
         ("NBA Results", update_game_results),
         ("NBA Rosters", sync_rosters),
         ("NBA Schedules", update_schedules),
+        ("NBA Results Refresh", refresh_game_results_after_schedule),
         ("NBA Calibration Gates", load_calibration_gates),
-        ("NBA Predictions", generate_predictions),
+        ("NBA Predictions", lambda: generate_predictions(args.days)),
+        ("NBA Dedupe Predictions", dedupe_prediction_rows),
+        ("NBA Betting Lines", lambda: load_betting_lines(args.with_lines)),
         ("NBA Evaluate", evaluate_predictions),
         ("NBA Suggestions", log_suggested_bets),
     ]

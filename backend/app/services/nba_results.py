@@ -87,6 +87,21 @@ def _game_has_stats(db: Session, game_id: int) -> bool:
     )
 
 
+def _game_stat_count(db: Session, game_id: int) -> int:
+    return (
+        db.query(PlayerGameStat.stat_id)
+        .filter(PlayerGameStat.sport == "NBA", PlayerGameStat.game_id == game_id)
+        .count()
+    )
+
+
+MIN_BOX_SCORE_PLAYERS = 16
+
+
+def _game_has_complete_box_score(db: Session, game_id: int) -> bool:
+    return _game_stat_count(db, game_id) >= MIN_BOX_SCORE_PLAYERS
+
+
 def upsert_injuries_for_game(db: Session, game_date: date, injuries: List[Dict]) -> int:
     written = 0
     for inj in injuries:
@@ -182,7 +197,12 @@ def upsert_final_from_espn(
     game_date = api_game["game_date"]
 
     existing = _lookup_game(db, espn_id, game_date, home.team_id, away.team_id)
-    if existing and skip_if_complete and existing.game_status == "finished" and _game_has_stats(db, existing.game_id):
+    if (
+        existing
+        and skip_if_complete
+        and existing.game_status == "finished"
+        and _game_has_complete_box_score(db, existing.game_id)
+    ):
         return existing, False, 0
 
     box = client.get_box_score_for_game(espn_id, game_meta=api_game)
@@ -294,6 +314,140 @@ def collect_games_for_date(
             if existing and _game_has_stats(db, existing.game_id):
                 continue
         _, was_created, n_stats = upsert_final_from_espn(db, client, api_game, season)
+        if n_stats > 0 or was_created:
+            processed += 1
+            if was_created:
+                created += 1
+    extra_created, extra_processed = _collect_finished_games_missing_box_scores(
+        db, client, game_date, season, skip_if_has_stats
+    )
+    return created + extra_created, processed + extra_processed
+
+
+def _api_game_from_row(db: Session, game: Game) -> Optional[Dict]:
+    home = db.query(Team).filter(Team.team_id == game.home_team_id).first()
+    away = db.query(Team).filter(Team.team_id == game.away_team_id).first()
+    if not home or not away or not game.espn_game_id:
+        return None
+    return {
+        "espn_game_id": str(game.espn_game_id),
+        "game_date": game.game_date,
+        "home_team": home.abbreviation,
+        "away_team": away.abbreviation,
+        "home_score": game.home_score,
+        "away_score": game.away_score,
+        "status": "finished",
+    }
+
+
+def _collect_finished_games_missing_box_scores(
+    db: Session,
+    client: ESPNNBAClient,
+    game_date: date,
+    season: Season,
+    skip_if_has_stats: bool,
+) -> Tuple[int, int]:
+    """Backfill box scores for games marked finished (e.g. after schedule sync) without full stats."""
+    extra_created = extra_processed = 0
+    stale = (
+        db.query(Game)
+        .filter(
+            Game.sport == "NBA",
+            Game.game_date == game_date,
+            Game.game_status == "finished",
+            Game.espn_game_id.isnot(None),
+        )
+        .all()
+    )
+    for game in stale:
+        if skip_if_has_stats and _game_has_complete_box_score(db, game.game_id):
+            continue
+        if _game_has_complete_box_score(db, game.game_id):
+            continue
+        api_game = _api_game_from_row(db, game)
+        if not api_game:
+            continue
+        _, was_created, n_stats = upsert_final_from_espn(
+            db, client, api_game, season, skip_if_complete=False
+        )
+        if n_stats > 0 or was_created:
+            extra_processed += 1
+            if was_created:
+                extra_created += 1
+    return extra_created, extra_processed
+
+
+def games_missing_box_scores_for_season_backfill(
+    db: Session,
+    season_id: int,
+    *,
+    as_of: Optional[date] = None,
+) -> List[Game]:
+    """Past-dated season games without a complete box score (any non-cancelled status)."""
+    as_of = as_of or date.today()
+    rows = (
+        db.query(Game)
+        .filter(
+            Game.sport == "NBA",
+            Game.season_id == season_id,
+            Game.game_date < as_of,
+            Game.espn_game_id.isnot(None),
+            Game.game_status.in_(("scheduled", "in_progress", "finished")),
+        )
+        .order_by(Game.game_date)
+        .all()
+    )
+    return [g for g in rows if not _game_has_complete_box_score(db, g.game_id)]
+
+
+def backfill_current_season_missing_box_scores(
+    db: Session,
+    client: ESPNNBAClient,
+) -> Tuple[int, int]:
+    """
+    Fetch box scores for current-season games before today that lack stats,
+    including games still marked scheduled/in_progress in DB.
+    """
+    season = (
+        db.query(Season)
+        .filter(Season.sport == "NBA", Season.is_current.is_(True))
+        .order_by(Season.season_id.desc())
+        .first()
+    )
+    if not season:
+        return 0, 0
+
+    stale = games_missing_box_scores_for_season_backfill(db, season.season_id)
+    created = processed = 0
+    dates_touched: set = set()
+
+    for game in stale:
+        if game.game_date not in dates_touched:
+            dates_touched.add(game.game_date)
+            api_day = client.get_games_for_date(game.game_date)
+            for g in api_day:
+                g["game_date"] = game.game_date
+            day_season = resolve_nba_season_for_date(db, game.game_date) or season
+            for api_game in api_day:
+                if api_game.get("status") != "finished":
+                    continue
+                _, was_created, n_stats = upsert_final_from_espn(
+                    db, client, api_game, day_season, skip_if_complete=False
+                )
+                if n_stats > 0 or was_created:
+                    processed += 1
+                    if was_created:
+                        created += 1
+
+        if _game_has_complete_box_score(db, game.game_id):
+            continue
+        api_game = _api_game_from_row(db, game)
+        if not api_game:
+            continue
+        day_season = resolve_nba_season_for_date(db, game.game_date) or season
+        _, was_created, n_stats = upsert_final_from_espn(
+            db, client, api_game, day_season, skip_if_complete=False
+        )
         if n_stats > 0 or was_created:
             processed += 1
             if was_created:

@@ -64,7 +64,12 @@ class PredictionService:
         self,
         player_id: int,
         game_id: int,
-        stat_type: str = 'points'
+        stat_type: str = 'points',
+        *,
+        pit_mode: bool = False,
+        as_of_date: Optional[date] = None,
+        persist: bool = True,
+        apply_bias_correction: bool = True,
     ) -> Optional[Prediction]:
         """
         Generate a prediction for a player in a game.
@@ -84,6 +89,10 @@ class PredictionService:
         if not game or not player:
             return None
 
+        if pit_mode and as_of_date is None:
+            as_of_date = game.game_date
+        pit_as_of = as_of_date if (pit_mode or as_of_date is not None) else None
+
         if self.sport == 'MLB':
             from app.services.mlb_probable_pitchers import (
                 MlbProbablePitcherResolver,
@@ -101,7 +110,7 @@ class PredictionService:
                 return None
         
         # EARLY FILTER: For upcoming games, check if player is likely to play
-        if game.game_status in ['scheduled', 'in_progress']:
+        if game.game_status in ['scheduled', 'in_progress'] and not pit_mode:
             # Check injury status - skip if Out, Doubtful, or Questionable
             # (Questionable players are risky and may not play)
             injury_status = self.injury_context.get_player_injury_status(player_id)
@@ -197,16 +206,28 @@ class PredictionService:
         # Step 2: Calculate base minutes based on role
         # Use last 20 games for more recent form
         # For NFL, use the same season logic as distribution (use game's season)
-        # For NBA, can still use game's season for precision
-        season_ids_for_minutes = None if self.sport == 'NBA' else [season_id]
+        # For NBA, blend current + prior season until enough current games exist
+        season_ids_for_minutes = None
         
         recent_games_window = 10 if self.sport == 'NBA' else 20
-        historical_avg_minutes = self.dist_engine.get_historical_avg_minutes(
-            player_id,
-            sport=self.sport,
-            season_ids=season_ids_for_minutes,
-            recent_games=recent_games_window,
-        )
+        if self.sport == 'NBA':
+            from app.services.nba_season_blend import blended_nba_avg_minutes
+
+            historical_avg_minutes = blended_nba_avg_minutes(
+                self.dist_engine,
+                self.db,
+                player_id,
+                season_id,
+                recent_games=recent_games_window,
+                as_of_date=pit_as_of,
+            )
+        else:
+            historical_avg_minutes = self.dist_engine.get_historical_avg_minutes(
+                player_id,
+                sport=self.sport,
+                season_ids=season_ids_for_minutes,
+                recent_games=recent_games_window,
+            )
         
         if not historical_avg_minutes:
             # For NFL, minutes/snaps might not be available, but we can still generate predictions
@@ -230,31 +251,41 @@ class PredictionService:
         else:  # NBA
             min_historical_threshold = 20.0
 
-        if self.sport == 'NBA' and game.game_status in ['scheduled', 'in_progress']:
+        if self.sport == 'NBA' and game.game_status in ['scheduled', 'in_progress'] and not pit_mode:
             from app.services.injury_context import InjuryContext
             inj = InjuryContext(self.db).get_player_injury_status(player_id)
             if inj and inj.get('status') in ('Out', 'Doubtful'):
                 return None
 
-        if game.game_status in ['scheduled', 'in_progress']:
+        if game.game_status in ['scheduled', 'in_progress'] and not pit_mode:
             if historical_avg_minutes < min_historical_threshold:
                 return None  # Player rarely plays, unlikely to have betting lines
         
         # If lineup is confirmed, use role-specific baseline
         if is_confirmed_starter:
             if is_promoted_bench_player:
-                # This is a bench player promoted to starter - use bench game history as baseline
-                # (redistribution engine will add the increase)
-                # Don't use starter-only games because they don't have many/any
                 print(f"   Using bench game history as baseline for promoted starter")
             else:
-                # Regular starter - get starter-specific minutes (only from games where player started)
-                starter_minutes = self.dist_engine.get_historical_avg_minutes(
-                    player_id,
-                    sport=self.sport,
-                    season_ids=season_ids_for_minutes,
-                    recent_games=20,
-                    only_starters=True  # Only use games where player was a starter
+                from app.services.nba_season_blend import blended_nba_avg_minutes
+
+                starter_minutes = (
+                    blended_nba_avg_minutes(
+                        self.dist_engine,
+                        self.db,
+                        player_id,
+                        season_id,
+                        recent_games=20,
+                        only_starters=True,
+                        as_of_date=pit_as_of,
+                    )
+                    if self.sport == "NBA"
+                    else self.dist_engine.get_historical_avg_minutes(
+                        player_id,
+                        sport=self.sport,
+                        season_ids=season_ids_for_minutes,
+                        recent_games=20,
+                        only_starters=True,
+                    )
                 )
                 # Use starter minutes if available, otherwise use general average
                 if starter_minutes and starter_minutes > 0:
@@ -348,7 +379,7 @@ class PredictionService:
             if not normal_starter_out and player_position:
                 # Conservative boost for promoted bench player (even without confirmed starter out)
                 # They're starting, so they'll get more minutes than usual
-                minutes_boost = max(5.0, historical_avg_minutes * 0.40)  # At least +5 min or 40% increase
+                minutes_boost = max(5.0, historical_avg_minutes * 0.25)
                 projected_minutes = historical_avg_minutes + minutes_boost
                 minutes_redist['minutes_increase'] = minutes_boost
                 minutes_redist['projected_minutes'] = projected_minutes
@@ -371,6 +402,14 @@ class PredictionService:
                 # Increase by 20-40% depending on risk score
                 blowout_increase = 0.20 + (blowout_risk_score - 0.6) * 0.50  # 20-40% increase
                 projected_minutes *= (1.0 + blowout_increase)
+
+        if self.sport == 'NBA' and historical_avg_minutes > 0:
+            max_projected = historical_avg_minutes * (
+                1.22 if minutes_redist.get('benefits_from_injury') else 1.12
+            )
+            if projected_minutes > max_projected:
+                projected_minutes = max_projected
+                minutes_redist['projected_minutes'] = projected_minutes
         
         # FILTER: For upcoming games, skip players with very low projected minutes
         # Sportsbooks typically only offer lines for players expected to play 15+ minutes
@@ -386,29 +425,55 @@ class PredictionService:
         else:  # NBA
             min_minutes_threshold = 12 if (blowout_risk_high and blowout_risk_score >= 0.6 and not is_confirmed_starter) else 15
         
-        if game.game_status in ['scheduled', 'in_progress']:
+        if game.game_status in ['scheduled', 'in_progress'] and not pit_mode:
             if projected_minutes < min_minutes_threshold:
                 return None  # Too few minutes, unlikely to have betting lines available
+        
+        minutes_for_dist = projected_minutes
+        if (
+            self.sport == 'NBA'
+            and historical_avg_minutes
+            and not minutes_redist.get('benefits_from_injury')
+        ):
+            minutes_for_dist = min(projected_minutes, historical_avg_minutes * 1.05)
         
         # Determine minimum games threshold (lower for NFL due to data limitations)
         if self.sport == 'NFL':
             min_games_threshold = 5
             season_ids_for_dist = [season_id]
+            base_dist = self.dist_engine.calculate_base_distribution(
+                player_id=player_id,
+                stat_type=stat_type,
+                sport=self.sport,
+                projected_minutes=projected_minutes,
+                season_ids=season_ids_for_dist,
+                min_games=min_games_threshold,
+            )
         elif self.sport == 'NBA':
             min_games_threshold = 10
-            season_ids_for_dist = None
+            from app.services.nba_season_blend import blended_nba_base_distribution
+
+            base_dist = blended_nba_base_distribution(
+                self.dist_engine,
+                self.db,
+                player_id,
+                stat_type,
+                minutes_for_dist,
+                season_id,
+                min_games=min_games_threshold,
+                as_of_date=pit_as_of,
+            )
         else:
             min_games_threshold = 15
             season_ids_for_dist = [season_id]
-        
-        base_dist = self.dist_engine.calculate_base_distribution(
-            player_id=player_id,
-            stat_type=stat_type,
-            sport=self.sport,
-            projected_minutes=projected_minutes,
-            season_ids=season_ids_for_dist,
-            min_games=min_games_threshold
-        )
+            base_dist = self.dist_engine.calculate_base_distribution(
+                player_id=player_id,
+                stat_type=stat_type,
+                sport=self.sport,
+                projected_minutes=projected_minutes,
+                season_ids=season_ids_for_dist,
+                min_games=min_games_threshold,
+            )
         
         if not base_dist or base_dist.get('mean') is None or base_dist.get('std_dev') is None:
             return None  # Can't generate prediction without valid base distribution
@@ -430,7 +495,7 @@ class PredictionService:
         
         if self.sport == 'NBA':
             historical_usage = self.dist_engine.get_historical_usage_rate(
-                player_id, season_ids=[season_id]
+                player_id, season_ids=[season_id], as_of_date=pit_as_of
             )
             if historical_usage and historical_usage > 0:
                 usage_redist = self.redist_engine.calculate_redistributed_usage(
@@ -482,13 +547,27 @@ class PredictionService:
         base_mean = base_dist.get('mean')
         if base_mean is None:
             return None  # Can't proceed without base mean
+
+        minutes_for_rate = historical_avg_minutes
+        if self.sport == 'NBA':
+            from app.services.nba_season_blend import nba_rate_scaled_mean
+
+            rate_cap = 1.22 if minutes_redist.get('benefits_from_injury') else 1.05
+            base_mean = nba_rate_scaled_mean(
+                base_mean,
+                historical_avg_minutes,
+                projected_minutes,
+                max_minutes_ratio=rate_cap,
+            )
+            base_dist['mean'] = base_mean
+            minutes_for_rate = projected_minutes
         
         mean_adjustments = self.adjustments.calculate_mean_adjustments(
             base_mean=base_mean,
             player_id=player_id,
             opponent_team_id=opponent_team_id,
             projected_minutes=projected_minutes,
-            historical_avg_minutes=historical_avg_minutes,
+            historical_avg_minutes=minutes_for_rate,
             is_home=is_home,
             player_position=player.position,
             season_id=season_id,
@@ -537,6 +616,7 @@ class PredictionService:
         time_of_day_factor = time_of_day_factor if time_of_day_factor is not None else 1.0
         clutch_factor = clutch_factor if clutch_factor is not None else 1.0
         
+        pre_context_mean = mean_adjustments['adjusted_mean']
         mean_adjustments['adjusted_mean'] *= rest_days_factor
         mean_adjustments['adjusted_mean'] *= relative_rest_factor
         mean_adjustments['adjusted_mean'] *= team_performance_factor
@@ -544,10 +624,47 @@ class PredictionService:
         mean_adjustments['adjusted_mean'] *= national_tv_factor
         mean_adjustments['adjusted_mean'] *= time_of_day_factor
         mean_adjustments['adjusted_mean'] *= clutch_factor
+
+        if self.sport == 'NBA':
+            from app.services.nba_season_blend import nba_context_multiplier_cap
+
+            capped = pre_context_mean * nba_context_multiplier_cap(
+                [
+                    rest_days_factor,
+                    relative_rest_factor,
+                    team_performance_factor,
+                    importance_factor,
+                    national_tv_factor,
+                    time_of_day_factor,
+                    clutch_factor,
+                ],
+                cap=1.05,
+            )
+            if mean_adjustments['adjusted_mean'] > capped:
+                mean_adjustments['adjusted_mean'] = capped
         
         # ENHANCEMENT: Apply injury-based stat boost (beyond minutes/usage redistribution)
         mean_adjustments['adjusted_mean'] *= stat_boost_from_injuries
         mean_adjustments['injury_stat_boost'] = stat_boost_from_injuries
+
+        if self.sport == 'NBA' and base_mean and base_mean > 0:
+            minutes_ratio = projected_minutes / max(historical_avg_minutes, 1.0)
+            minutes_ratio = min(minutes_ratio, 1.12 if not minutes_redist.get('benefits_from_injury') else 1.22)
+            mean_cap = base_mean * minutes_ratio * 1.08
+            if mean_adjustments['adjusted_mean'] > mean_cap:
+                mean_adjustments['adjusted_mean'] = mean_cap
+
+        if self.sport == 'NBA' and apply_bias_correction:
+            from app.services.nba_mean_bias_correction import apply_mean_bias_correction
+            from app.services.nba_prop_calibration_store import get_tier_subtract_offsets
+
+            offsets = get_tier_subtract_offsets()
+            if offsets:
+                mean_adjustments['adjusted_mean'] = apply_mean_bias_correction(
+                    mean_adjustments['adjusted_mean'],
+                    stat_type,
+                    offsets=offsets,
+                )
         
         # Step 3: Calculate variance adjustments
         minutes_locked = self.redist_engine.is_minutes_locked(player_id, player.current_team_id)
@@ -599,6 +716,19 @@ class PredictionService:
             league_mean=league_mean,
             league_std=league_std
         )
+
+        if not persist:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                player_id=player_id,
+                game_id=game_id,
+                stat_type=stat_type,
+                bet_type='safe',
+                distribution_mean=mean_adjustments['adjusted_mean'],
+                distribution_std_dev=variance_adjustments['adjusted_std'],
+                safe_line=bet_lines['safe_line'],
+            )
 
         if self.sport == 'MLB' and stat_type in ('hits', 'total_bases'):
             from app.services.mlb_equivalent_props import apply_canonical_hit_over_half_probabilities
@@ -736,6 +866,27 @@ class PredictionService:
             ).first()
             if stale_long_shot:
                 self.db.delete(stale_long_shot)
+
+        if (
+            bet_lines['safe_line'] == bet_lines['standard_line']
+            and (
+                bet_lines['long_shot_line'] is None
+                or bet_lines['safe_line'] == bet_lines['long_shot_line']
+            )
+        ):
+            qualifying_bet_types = ['safe']
+            for stale_type in ('standard', 'long_shot'):
+                stale = self.db.query(Prediction).filter(
+                    and_(
+                        Prediction.player_id == player_id,
+                        Prediction.game_id == game_id,
+                        Prediction.stat_type == stat_type,
+                        Prediction.bet_type == stale_type,
+                        Prediction.sport == self.sport,
+                    )
+                ).first()
+                if stale:
+                    self.db.delete(stale)
         
         # Step 8: Analyze lineup context for reasoning
         lineup_context = None
@@ -1198,10 +1349,19 @@ class PredictionService:
                     self.db.rollback()
                     continue
         
-        # Generate and save combo bets for players with predictions
-        combo_created, combo_updated = self._generate_combo_predictions_for_game(game_id, all_players)
+        # Generate and save combo bets for players with predictions (optional stat types only)
+        combo_stat_types = {'points_rebounds', 'points_assists', 'rebounds_assists'}
+        if any(st in stat_types for st in combo_stat_types):
+            combo_created, combo_updated = self._generate_combo_predictions_for_game(game_id, all_players)
+        else:
+            combo_created, combo_updated = 0, 0
         created += combo_created
         updated += combo_updated
+
+        if self.sport == "NBA":
+            from app.services.nba_prediction_cleanup import dedupe_nba_predictions
+
+            dedupe_nba_predictions(self.db, dry_run=False)
         
         # Final commit
         self.db.commit()
