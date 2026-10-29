@@ -1,21 +1,13 @@
 """
 Per-stat / tier mean bias correction for NBA prop predictions.
 
-Learned offsets subtract from model mean (model was high vs actual).
+Production subtract offsets come from PIT-fit calibration JSON only (no hard-coded defaults).
 """
 from __future__ import annotations
 
 from collections import defaultdict
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-# Tier-only defaults from 2026-27 early-season graded bias (model - actual).
-DEFAULT_TIER_BIAS_SUBTRACT: Dict[str, float] = {
-    "star": 6.02,
-    "rotation": 3.17,
-    "bench": 1.47,
-}
-
-# Scale tier correction by stat magnitude (points vs counting stats).
 STAT_TIER_SCALE: Dict[str, float] = {
     "points": 1.0,
     "pts+ast+reb": 1.0,
@@ -46,11 +38,16 @@ def apply_mean_bias_correction(
     tier: Optional[str] = None,
     offsets: Optional[Mapping[str, float]] = None,
 ) -> float:
-    """Subtract fitted tier bias (optionally scaled by stat type)."""
+    """Subtract fitted tier bias (optionally scaled by stat type). No-op when offsets empty."""
     if mean is None:
         return mean
+    offsets = offsets or {}
+    if not offsets:
+        return round(float(mean), 2)
     tier = tier or player_tier_for_bias(mean, stat_type)
-    base = (offsets or DEFAULT_TIER_BIAS_SUBTRACT).get(tier, 0.0)
+    base = float(offsets.get(tier, 0.0))
+    if base == 0.0:
+        return round(float(mean), 2)
     scale = STAT_TIER_SCALE.get(stat_type, 0.5)
     corrected = mean - base * scale
     return round(max(corrected, 0.0), 2)
@@ -59,10 +56,6 @@ def apply_mean_bias_correction(
 def fit_tier_bias_subtract(
     errors: List[Tuple[str, str, float]],
 ) -> Dict[str, float]:
-    """
-    Fit tier-only subtract offsets from (stat_type, tier, error) rows.
-    error = model_mean - actual (positive => model too high).
-    """
     by_tier: Dict[str, List[float]] = defaultdict(list)
     for _stat, tier, err in errors:
         by_tier[tier].append(err)
@@ -72,42 +65,40 @@ def fit_tier_bias_subtract(
     }
 
 
-def fit_stat_tier_bias_subtract(
+def fit_shrunk_tier_subtract(
     errors: List[Tuple[str, str, float]],
-) -> Dict[str, Dict[str, float]]:
-    """Fit per-stat tier subtract offsets."""
-    buckets: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
-    for stat, tier, err in errors:
-        buckets[stat][tier].append(err)
-    out: Dict[str, Dict[str, float]] = {}
-    for stat, tiers in buckets.items():
-        out[stat] = {
-            tier: round(sum(vals) / len(vals), 3) if vals else 0.0
-            for tier, vals in tiers.items()
-        }
-    return out
-
-
-def apply_stat_tier_mean_bias_correction(
-    mean: float,
-    stat_type: str,
     *,
-    tier: Optional[str] = None,
-    stat_tier_offsets: Optional[Mapping[str, Mapping[str, float]]] = None,
-) -> float:
-    tier = tier or player_tier_for_bias(mean, stat_type)
-    table = stat_tier_offsets or {}
-    off = table.get(stat_type, {}).get(tier)
-    if off is None:
-        return apply_mean_bias_correction(mean, stat_type, tier=tier)
-    corrected = mean - off
-    return round(max(corrected, 0.0), 2)
+    per_tier_cap: float = 2.0,
+    shrink_prior_n: float = 40.0,
+) -> Dict[str, float]:
+    """
+    Fit tier subtract amounts with cap and shrinkage toward zero.
+    error = model_mean - actual (positive => subtract from mean).
+    """
+    by_tier: Dict[str, List[float]] = defaultdict(list)
+    for _stat, tier, err in errors:
+        by_tier[tier].append(err)
+    out: Dict[str, float] = {}
+    cap = max(0.5, float(per_tier_cap))
+    for tier, vals in by_tier.items():
+        if not vals:
+            continue
+        raw = sum(vals) / len(vals)
+        w = len(vals) / (len(vals) + shrink_prior_n)
+        shrunk = raw * w
+        if shrunk > cap:
+            shrunk = cap
+        elif shrunk < -cap:
+            shrunk = -cap
+        if abs(shrunk) < 0.05:
+            shrunk = 0.0
+        out[tier] = round(shrunk, 3)
+    return out
 
 
 def bias_report_from_errors(
     errors: List[Tuple[str, str, float]],
 ) -> Dict[str, Any]:
-    """Summarize mean bias overall and by tier."""
     if not errors:
         return {"n": 0, "overall_mean_bias": None, "tier_mean_bias": {}}
     overall = sum(e[2] for e in errors) / len(errors)

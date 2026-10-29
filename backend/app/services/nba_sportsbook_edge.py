@@ -72,18 +72,65 @@ def clamp_probability(p: float) -> float:
     return max(PROB_CLAMP_LOW, min(PROB_CLAMP_HIGH, float(p)))
 
 
-def probability_over_line(
+def shrink_probability(p: float, shrink: float) -> float:
+    """Pull probability toward 0.5 (shrink in [0,1])."""
+    shrink = max(0.0, min(1.0, float(shrink)))
+    return clamp_probability(0.5 + shrink * (float(p) - 0.5))
+
+
+def raw_probability_over_line(
     mean: float,
     std_dev: float,
     book_line: float,
     stat_type: str = "points",
 ) -> float:
-    """P(stat > book_line) with stat-specific std floor and probability clamp."""
     if mean is None or book_line is None:
         return PROB_CLAMP_LOW
     sigma = effective_std_for_prop(stat_type, mean, std_dev)
     raw = float(1.0 - norm.cdf(book_line, loc=mean, scale=sigma))
     return clamp_probability(raw)
+
+
+def probability_over_line(
+    mean: float,
+    std_dev: float,
+    book_line: float,
+    stat_type: str = "points",
+    *,
+    calibrate: bool = True,
+    prob_shrink: Optional[float] = None,
+) -> float:
+    """P(stat > book_line) with std floor, clamp, and optional shrink calibration."""
+    raw = raw_probability_over_line(mean, std_dev, book_line, stat_type=stat_type)
+    if not calibrate:
+        return raw
+    if prob_shrink is None:
+        from app.services.nba_prop_calibration_store import get_prob_shrink
+
+        prob_shrink = get_prob_shrink()
+    if prob_shrink >= 0.999:
+        return raw
+    return shrink_probability(raw, prob_shrink)
+
+
+def probability_under_line(
+    mean: float,
+    std_dev: float,
+    book_line: float,
+    stat_type: str = "points",
+    *,
+    calibrate: bool = True,
+    prob_shrink: Optional[float] = None,
+) -> float:
+    p_over = probability_over_line(
+        mean,
+        std_dev,
+        book_line,
+        stat_type=stat_type,
+        calibrate=calibrate,
+        prob_shrink=prob_shrink,
+    )
+    return clamp_probability(1.0 - p_over)
 
 
 def probability_edge_exceeds_cap(probability: float, break_even: float) -> bool:
@@ -104,7 +151,6 @@ def find_sportsbook_line(
             BettingLine.player_id == player_id,
             BettingLine.stat_type == stat_type,
             BettingLine.over_line.isnot(None),
-            BettingLine.over_odds.isnot(None),
         )
         .all()
     )

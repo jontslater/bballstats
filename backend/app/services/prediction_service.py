@@ -656,11 +656,15 @@ class PredictionService:
 
         if self.sport == 'NBA' and apply_bias_correction:
             from app.services.nba_mean_bias_correction import apply_mean_bias_correction
+            from app.services.nba_prop_calibration_store import get_tier_subtract_offsets
 
-            mean_adjustments['adjusted_mean'] = apply_mean_bias_correction(
-                mean_adjustments['adjusted_mean'],
-                stat_type,
-            )
+            offsets = get_tier_subtract_offsets()
+            if offsets:
+                mean_adjustments['adjusted_mean'] = apply_mean_bias_correction(
+                    mean_adjustments['adjusted_mean'],
+                    stat_type,
+                    offsets=offsets,
+                )
         
         # Step 3: Calculate variance adjustments
         minutes_locked = self.redist_engine.is_minutes_locked(player_id, player.current_team_id)

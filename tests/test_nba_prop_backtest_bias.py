@@ -20,10 +20,13 @@ from app.models import Game, Player, PlayerGameStat, Season, Team
 from app.services.distribution_engine import DistributionEngine
 from app.services.nba_mean_bias_correction import (
     apply_mean_bias_correction,
-    bias_report_from_errors,
+    fit_shrunk_tier_subtract,
 )
-from app.services.nba_prop_backtest import rolling_median_proxy_line
+from app.services.nba_prop_backtest import sample_candidates
+from app.services.nba_prop_player_cache import PlayerStatHistoryCache, PitCandidate
+from app.services.nba_prop_prob_fit import fit_prob_shrink_brier
 from app.services.nba_season_blend import nba_rate_scaled_mean
+from app.services.nba_sportsbook_edge import shrink_probability
 
 
 def _session():
@@ -33,16 +36,29 @@ def _session():
 
 
 class TestMeanBiasCorrection(unittest.TestCase):
-    def test_subtracts_star_tier_for_points(self):
-        corrected = apply_mean_bias_correction(30.0, "points")
-        self.assertLess(corrected, 30.0)
-        self.assertAlmostEqual(corrected, 30.0 - 6.02, places=2)
+    def test_no_op_without_offsets(self):
+        self.assertAlmostEqual(apply_mean_bias_correction(30.0, "points"), 30.0)
 
-    def test_bias_report(self):
-        errors = [("points", "star", 6.0), ("points", "bench", 1.0)]
-        rep = bias_report_from_errors(errors)
-        self.assertEqual(rep["n"], 2)
-        self.assertAlmostEqual(rep["overall_mean_bias"], 3.5, places=2)
+    def test_subtracts_when_offsets_provided(self):
+        corrected = apply_mean_bias_correction(
+            30.0, "points", offsets={"star": 2.0}
+        )
+        self.assertAlmostEqual(corrected, 28.0)
+
+    def test_fit_shrunk_caps(self):
+        errors = [("points", "star", 5.0)] * 10
+        off = fit_shrunk_tier_subtract(errors, per_tier_cap=2.0, shrink_prior_n=5.0)
+        self.assertLessEqual(off["star"], 2.0)
+
+
+class TestProbShrink(unittest.TestCase):
+    def test_shrink_moves_toward_half(self):
+        self.assertLess(shrink_probability(0.7, 0.5), 0.7)
+
+    def test_fit_reduces_overconfidence(self):
+        samples = [(0.65, False)] * 40 + [(0.65, True)] * 10
+        s = fit_prob_shrink_brier(samples)
+        self.assertLess(s, 1.0)
 
 
 class TestRateScaledMeanCap(unittest.TestCase):
@@ -51,8 +67,8 @@ class TestRateScaledMeanCap(unittest.TestCase):
         self.assertAlmostEqual(uncapped, 20.0 * 31.5 / 30.0, places=2)
 
 
-class TestRollingMedian(unittest.TestCase):
-    def test_uses_only_prior_games(self):
+class TestPlayerCache(unittest.TestCase):
+    def test_rolling_median_prior_only(self):
         db = _session()
         team = Team(sport="NBA", abbreviation="BOS", name="Celtics", conference="E", division="A")
         season = Season(sport="NBA", season_year="2025-26", is_current=True)
@@ -84,11 +100,19 @@ class TestRollingMedian(unittest.TestCase):
                 )
             )
         db.commit()
-        med = rolling_median_proxy_line(
-            db, player.player_id, "points", date(2025, 11, 6), season_ids=[season.season_id]
-        )
+        cache = PlayerStatHistoryCache(db, [season.season_id])
+        med = cache.rolling_median(player.player_id, "points", date(2025, 11, 6))
         self.assertEqual(med, 14.0)
         db.close()
+
+
+class TestPitSampling(unittest.TestCase):
+    def test_stride_sample_spreads(self):
+        cands = [
+            PitCandidate(1, 1, "points", date(2025, 10, i), float(i)) for i in range(1, 11)
+        ]
+        picked = sample_candidates(cands, 5, strategy="stride")
+        self.assertEqual(len(picked), 5)
 
 
 class TestDistributionAsOf(unittest.TestCase):
