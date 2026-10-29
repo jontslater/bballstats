@@ -198,7 +198,7 @@ class PredictionService:
         # Use last 20 games for more recent form
         # For NFL, use the same season logic as distribution (use game's season)
         # For NBA, can still use game's season for precision
-        season_ids_for_minutes = None if self.sport == 'NBA' else [season_id]
+        season_ids_for_minutes = [season_id] if self.sport == 'NBA' else None
         
         recent_games_window = 10 if self.sport == 'NBA' else 20
         historical_avg_minutes = self.dist_engine.get_historical_avg_minutes(
@@ -348,7 +348,7 @@ class PredictionService:
             if not normal_starter_out and player_position:
                 # Conservative boost for promoted bench player (even without confirmed starter out)
                 # They're starting, so they'll get more minutes than usual
-                minutes_boost = max(5.0, historical_avg_minutes * 0.40)  # At least +5 min or 40% increase
+                minutes_boost = max(5.0, historical_avg_minutes * 0.25)
                 projected_minutes = historical_avg_minutes + minutes_boost
                 minutes_redist['minutes_increase'] = minutes_boost
                 minutes_redist['projected_minutes'] = projected_minutes
@@ -371,6 +371,14 @@ class PredictionService:
                 # Increase by 20-40% depending on risk score
                 blowout_increase = 0.20 + (blowout_risk_score - 0.6) * 0.50  # 20-40% increase
                 projected_minutes *= (1.0 + blowout_increase)
+
+        if self.sport == 'NBA' and historical_avg_minutes > 0:
+            max_projected = historical_avg_minutes * (
+                1.22 if minutes_redist.get('benefits_from_injury') else 1.12
+            )
+            if projected_minutes > max_projected:
+                projected_minutes = max_projected
+                minutes_redist['projected_minutes'] = projected_minutes
         
         # FILTER: For upcoming games, skip players with very low projected minutes
         # Sportsbooks typically only offer lines for players expected to play 15+ minutes
@@ -396,7 +404,7 @@ class PredictionService:
             season_ids_for_dist = [season_id]
         elif self.sport == 'NBA':
             min_games_threshold = 10
-            season_ids_for_dist = None
+            season_ids_for_dist = [season_id]
         else:
             min_games_threshold = 15
             season_ids_for_dist = [season_id]
@@ -548,6 +556,13 @@ class PredictionService:
         # ENHANCEMENT: Apply injury-based stat boost (beyond minutes/usage redistribution)
         mean_adjustments['adjusted_mean'] *= stat_boost_from_injuries
         mean_adjustments['injury_stat_boost'] = stat_boost_from_injuries
+
+        if self.sport == 'NBA' and base_mean and base_mean > 0:
+            minutes_ratio = projected_minutes / max(historical_avg_minutes, 1.0)
+            minutes_ratio = min(minutes_ratio, 1.12 if not minutes_redist.get('benefits_from_injury') else 1.22)
+            mean_cap = base_mean * minutes_ratio * 1.08
+            if mean_adjustments['adjusted_mean'] > mean_cap:
+                mean_adjustments['adjusted_mean'] = mean_cap
         
         # Step 3: Calculate variance adjustments
         minutes_locked = self.redist_engine.is_minutes_locked(player_id, player.current_team_id)
@@ -736,6 +751,27 @@ class PredictionService:
             ).first()
             if stale_long_shot:
                 self.db.delete(stale_long_shot)
+
+        if (
+            bet_lines['safe_line'] == bet_lines['standard_line']
+            and (
+                bet_lines['long_shot_line'] is None
+                or bet_lines['safe_line'] == bet_lines['long_shot_line']
+            )
+        ):
+            qualifying_bet_types = ['safe']
+            for stale_type in ('standard', 'long_shot'):
+                stale = self.db.query(Prediction).filter(
+                    and_(
+                        Prediction.player_id == player_id,
+                        Prediction.game_id == game_id,
+                        Prediction.stat_type == stat_type,
+                        Prediction.bet_type == stale_type,
+                        Prediction.sport == self.sport,
+                    )
+                ).first()
+                if stale:
+                    self.db.delete(stale)
         
         # Step 8: Analyze lineup context for reasoning
         lineup_context = None
@@ -1198,8 +1234,12 @@ class PredictionService:
                     self.db.rollback()
                     continue
         
-        # Generate and save combo bets for players with predictions
-        combo_created, combo_updated = self._generate_combo_predictions_for_game(game_id, all_players)
+        # Generate and save combo bets for players with predictions (optional stat types only)
+        combo_stat_types = {'points_rebounds', 'points_assists', 'rebounds_assists'}
+        if any(st in stat_types for st in combo_stat_types):
+            combo_created, combo_updated = self._generate_combo_predictions_for_game(game_id, all_players)
+        else:
+            combo_created, combo_updated = 0, 0
         created += combo_created
         updated += combo_updated
         

@@ -26,13 +26,14 @@ from app.models import (  # noqa: F401
     BettingLine,
 )
 from app.services.nba_odds_lines import (
-    MARKET_TO_STAT_TYPE,
     ingest_nba_player_prop_lines,
     match_player_id,
     normalize_player_name,
     normalize_team_name,
+    _pick_market_outcomes,
 )
-from app.services.betting_line_service import BettingLineService
+from app.services.nba_sportsbook_edge import probability_over_line
+from app.scrapers.odds_api_client import OddsApiClient, OddsApiError
 from app.services.suggested_bets import SuggestedBetsService
 from app.models import NbaPropCalibrationGate
 
@@ -89,12 +90,66 @@ class TestNameNormalization(unittest.TestCase):
         self.assertEqual(normalize_player_name("Nikola Jokić Jr."), normalize_player_name("nikola jokic"))
         self.assertEqual(normalize_team_name("Los Angeles Clippers"), normalize_team_name("LA Clippers"))
 
+    def test_ambiguous_normalized_name_unmatched(self):
+        db = _session()
+        _, player, home, away = _seed_game(db)
+        dup = Player(sport="NBA", player_id=12, name="LeBron James", current_team_id=home.team_id)
+        db.add(dup)
+        db.flush()
+        roster = [player, dup]
+        self.assertIsNone(match_player_id("LeBron James", roster))
+
     def test_match_player_on_roster(self):
         db = _session()
         _, player, home, away = _seed_game(db)
         roster = [player, Player(sport="NBA", player_id=11, name="Other Guy", current_team_id=away.team_id)]
         pid = match_player_id("LeBron James", roster)
         self.assertEqual(pid, player.player_id)
+
+    def test_per_market_bookmaker_fallback(self):
+        payload = {
+            "bookmakers": [
+                {
+                    "key": "fanduel",
+                    "markets": [
+                        {
+                            "key": "player_points",
+                            "outcomes": [{"name": "Over", "description": "A", "price": -110, "point": 10.5}],
+                        },
+                        {"key": "player_rebounds", "outcomes": []},
+                    ],
+                },
+                {
+                    "key": "draftkings",
+                    "markets": [
+                        {
+                            "key": "player_rebounds",
+                            "outcomes": [{"name": "Over", "description": "A", "price": -120, "point": 5.5}],
+                        }
+                    ],
+                },
+            ]
+        }
+        picked = _pick_market_outcomes(
+            payload, ["player_points", "player_rebounds"], ["fanduel", "draftkings"]
+        )
+        self.assertEqual(picked["player_points"][0], "fanduel")
+        self.assertEqual(picked["player_rebounds"][0], "draftkings")
+
+    def test_dry_run_does_not_call_client(self):
+        db = _session()
+        target = date(2025, 11, 1)
+
+        class FailClient:
+            def fetch_nba_events(self, *_a, **_k):
+                raise AssertionError("dry run must not fetch events")
+
+            def fetch_event_odds(self, *_a, **_k):
+                raise AssertionError("dry run must not fetch odds")
+
+        summary = ingest_nba_player_prop_lines(db, FailClient(), target, dry_run=True)
+        self.assertEqual(summary.events_fetched, 0)
+        db.close()
 
 
 class TestOddsIngestion(unittest.TestCase):
@@ -222,20 +277,55 @@ class TestOddsIngestion(unittest.TestCase):
                 safe_probability=0.62,
                 standard_line=26.5,
                 standard_probability=0.55,
+                distribution_mean=28.0,
+                distribution_std_dev=6.0,
                 confidence_level="HIGH",
             )
         )
         self.db.commit()
+        from app.services.nba_prop_calibration import load_prop_gates
+
+        load_prop_gates(self.db, max_age_hours=9999)
         client = MockOddsClient(self.events, self.odds)
         ingest_nba_player_prop_lines(self.db, client, self.target)
         svc = SuggestedBetsService(self.db, sport="NBA")
         bets = svc.get_suggested_bets(game_date=self.target, limit=5)
         self.assertGreaterEqual(len(bets), 1)
 
+    def test_suggestion_uses_book_line_not_model_tier_tolerance(self):
+        """Model safe line far from book line still qualifies when mean supports book over."""
+        self.db.add(NbaPropCalibrationGate(stat_type="points", passes_gate=True, prob_adjustment=0.0))
+        self.db.add(
+            Prediction(
+                sport="NBA",
+                player_id=self.player.player_id,
+                game_id=self.game.game_id,
+                stat_type="points",
+                bet_type="safe",
+                safe_line=30.5,
+                safe_probability=0.55,
+                standard_line=32.5,
+                standard_probability=0.45,
+                distribution_mean=28.0,
+                distribution_std_dev=6.0,
+                confidence_level="HIGH",
+            )
+        )
+        self.db.commit()
+        from app.services.nba_prop_calibration import load_prop_gates
+
+        load_prop_gates(self.db, max_age_hours=9999)
+        client = MockOddsClient(self.events, self.odds)
+        ingest_nba_player_prop_lines(self.db, client, self.target)
+        bets = SuggestedBetsService(self.db, sport="NBA").get_suggested_bets(
+            game_date=self.target, limit=5
+        )
+        self.assertGreaterEqual(len(bets), 1)
+        self.assertAlmostEqual(bets[0]["line"], 24.5, places=1)
+
 
 class TestOddsApiClientCache(unittest.TestCase):
     def test_cache_roundtrip(self):
-        from app.scrapers.odds_api_client import OddsApiClient
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -244,6 +334,44 @@ class TestOddsApiClientCache(unittest.TestCase):
             client._write_cache(path, [{"id": "evt1"}])
             data = client._read_cache(path)
             self.assertEqual(data[0]["id"], "evt1")
+
+    def test_cache_ttl_expires(self):
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = OddsApiClient(
+                "test-key",
+                cache_dir=Path(tmp),
+                use_cache=True,
+                cache_ttl_seconds=1,
+            )
+            path = client._cache_path("2025-11-01", "events.json")
+            client._write_cache(path, [{"id": "evt1"}])
+            time.sleep(1.1)
+            self.assertIsNone(client._read_cache(path))
+
+    def test_http_error_redacts_api_key(self):
+        import requests
+
+        class StubSession:
+            def request(self, method, url, params=None, timeout=30):
+                resp = requests.Response()
+                resp.status_code = 401
+                resp._content = b"Invalid apiKey=supersecret123 in request"
+                resp.url = f"{url}?apiKey=supersecret123"
+                return resp
+
+        client = OddsApiClient("supersecret123", session=StubSession())
+        with self.assertRaises(OddsApiError) as ctx:
+            client.fetch_nba_events("2025-11-01")
+        self.assertNotIn("supersecret123", str(ctx.exception))
+        self.assertIn("REDACTED", str(ctx.exception))
+
+    def test_probability_over_book_line(self):
+        p = probability_over_line(28.0, 6.0, 24.5)
+        self.assertGreater(p, 0.5)
+        self.assertLess(p, 1.0)
 
 
 if __name__ == "__main__":

@@ -104,6 +104,15 @@ class SuggestedBetsService(BaseSportService):
         ).all()
 
         print(f"Found {len(predictions)} predictions matching criteria (bet_types: {allowed_bet_types}, confidence: {allowed_confidence})")
+
+        if self.sport == 'NBA':
+            deduped: Dict[tuple, Prediction] = {}
+            for pred in predictions:
+                key = (pred.player_id, pred.game_id, pred.stat_type)
+                existing = deduped.get(key)
+                if existing is None or pred.bet_type == 'safe':
+                    deduped[key] = pred
+            predictions = list(deduped.values())
         
         # If we don't have enough long shots, lower the confidence requirement for them
         long_shot_count = sum(1 for p in predictions if p.bet_type == 'long_shot')
@@ -165,22 +174,40 @@ class SuggestedBetsService(BaseSportService):
 
             if self.sport == 'NBA':
                 from app.services.nba_prop_calibration import prop_passes_calibration_gate
-                from app.models.betting_line import BettingLine
                 from app.services.betting_line_service import BettingLineService
+                from app.services.nba_sportsbook_edge import (
+                    NBA_MAX_MEAN_BOOK_LINE_GAP,
+                    find_sportsbook_line,
+                    probability_over_line,
+                )
                 if not prop_passes_calibration_gate(pred.stat_type, db=self.db):
                     continue
-                betting_line = BettingLineService(self.db).find_matching_line(
+                betting_line = find_sportsbook_line(
+                    self.db,
                     game_id=pred.game_id,
                     player_id=pred.player_id,
                     stat_type=pred.stat_type,
-                    model_line=line_rounded,
                 )
-                if not betting_line or not betting_line.over_odds:
+                if not betting_line or not betting_line.over_odds or betting_line.over_line is None:
                     continue
+                model_mean = pred.distribution_mean
+                model_std = pred.distribution_std_dev
+                if model_mean is None:
+                    continue
+                book_line = float(betting_line.over_line)
+                if abs(model_mean - book_line) > NBA_MAX_MEAN_BOOK_LINE_GAP:
+                    print(
+                        f"⚠️  Skipping NBA prop (mean vs book gap): "
+                        f"player {pred.player_id} {pred.stat_type} mean={model_mean:.1f} book={book_line:.1f}"
+                    )
+                    continue
+                probability = probability_over_line(model_mean, model_std, book_line)
                 break_even = BettingLineService(self.db)._odds_to_probability(betting_line.over_odds)
                 edge = probability - break_even
                 if edge < 0.03:
                     continue
+                line = book_line
+                line_rounded = round(line, 1)
             else:
                 from app.constants.base_rates import get_base_rate
                 base_rate = get_base_rate(pred.stat_type, line_rounded, default=0.50)

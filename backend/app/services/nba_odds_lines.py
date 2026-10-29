@@ -181,7 +181,7 @@ def match_player_id(
     if len(exact) == 1:
         return exact[0].player_id
     if len(exact) > 1:
-        return exact[0].player_id
+        return None
     parts = target.split()
     if len(parts) >= 2:
         last = parts[-1]
@@ -213,25 +213,42 @@ def _game_ids_with_predictions(db: Session, target_date: date) -> Set[int]:
     return {r[0] for r in rows}
 
 
+def _pick_market_outcomes(
+    odds_payload: Dict[str, Any],
+    market_keys: Sequence[str],
+    bookmaker_priority: Sequence[str],
+) -> Dict[str, Tuple[str, List[Dict[str, Any]]]]:
+    """
+    Per-market bookmaker selection (FanDuel first, DraftKings fallback per market).
+    Returns market_key -> (bookmaker_key, outcomes).
+    """
+    bookmakers = {b.get("key"): b for b in odds_payload.get("bookmakers") or [] if b.get("key")}
+    selected: Dict[str, Tuple[str, List[Dict[str, Any]]]] = {}
+    for mkey in market_keys:
+        for book_key in bookmaker_priority:
+            book = bookmakers.get(book_key)
+            if not book:
+                continue
+            for market in book.get("markets") or []:
+                if market.get("key") == mkey and market.get("outcomes"):
+                    selected[mkey] = (book_key, market.get("outcomes") or [])
+                    break
+            if mkey in selected:
+                break
+    return selected
+
+
 def _pick_bookmaker_markets(
     odds_payload: Dict[str, Any],
     market_keys: Sequence[str],
     bookmaker_priority: Sequence[str],
 ) -> Tuple[Optional[str], Dict[str, List[Dict[str, Any]]]]:
-    """Return (bookmaker_key_used, market_key -> outcomes)."""
-    bookmakers = {b.get("key"): b for b in odds_payload.get("bookmakers") or [] if b.get("key")}
-    for book_key in bookmaker_priority:
-        book = bookmakers.get(book_key)
-        if not book:
-            continue
-        markets_by_key: Dict[str, List[Dict[str, Any]]] = {}
-        for market in book.get("markets") or []:
-            mkey = market.get("key")
-            if mkey in market_keys and market.get("outcomes"):
-                markets_by_key[mkey] = market.get("outcomes") or []
-        if markets_by_key:
-            return book_key, markets_by_key
-    return None, {}
+    """Legacy helper: returns primary book + outcomes (prefer FanDuel if any market hit)."""
+    per_market = _pick_market_outcomes(odds_payload, market_keys, bookmaker_priority)
+    if not per_market:
+        return None, {}
+    primary = bookmaker_priority[0] if bookmaker_priority else next(iter(per_market.values()))[0]
+    return primary, {k: v[1] for k, v in per_market.items()}
 
 
 def _parse_prop_outcomes(
@@ -272,6 +289,9 @@ def ingest_nba_player_prop_lines(
     market_list = list(markets or DEFAULT_MARKETS)
     cache_date = target_date.isoformat()
     summary = IngestSummary()
+    if dry_run:
+        logger.info("Dry run: skipping Odds API HTTP calls")
+        return summary
 
     events, _ = client.fetch_nba_events(cache_date)
     team_lookup = _build_team_lookup(db)
@@ -309,18 +329,18 @@ def ingest_nba_player_prop_lines(
         if not odds_payload:
             continue
 
-        book_used, markets_outcomes = _pick_bookmaker_markets(odds_payload, market_list, bookmaker_priority)
-        if not book_used:
+        markets_outcomes = _pick_market_outcomes(odds_payload, market_list, bookmaker_priority)
+        if not markets_outcomes:
             logger.warning("No bookmaker lines for event %s", event_id)
             continue
-        sportsbook = BOOKMAKER_DISPLAY.get(book_used, book_used.title())
 
         roster = _players_for_game_teams(db, game.home_team_id, game.away_team_id)
 
-        for market_key, outcomes in markets_outcomes.items():
+        for market_key, (book_used, outcomes) in markets_outcomes.items():
             stat_type = MARKET_TO_STAT_TYPE.get(market_key)
             if not stat_type:
                 continue
+            sportsbook = BOOKMAKER_DISPLAY.get(book_used, book_used.title())
             props = _parse_prop_outcomes(outcomes)
             for _norm, prop in props.items():
                 player_name = prop.get("player_name") or ""

@@ -85,6 +85,8 @@ def load_betting_lines(with_lines: bool):
     )
     if r.stdout:
         logger.info(r.stdout.strip())
+    if r.stderr:
+        logger.error(r.stderr.strip())
     if r.returncode != 0:
         logger.error(r.stderr or "nba_load_betting_lines failed")
         return False

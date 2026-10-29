@@ -59,6 +59,11 @@ def main() -> int:
         action="store_true",
         help="Do not read or write on-disk API response cache.",
     )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ignore cached API responses (still writes fresh cache unless --no-cache).",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("ODDS_API_KEY", "").strip()
@@ -74,7 +79,11 @@ def main() -> int:
 
     target_date = date.fromisoformat(args.date) if args.date else central_today()
 
-    client = OddsApiClient(api_key or "dry-run-placeholder", use_cache=not args.no_cache)
+    client = OddsApiClient(
+        api_key or "dry-run-placeholder",
+        use_cache=not args.no_cache,
+        force_refresh=args.refresh,
+    )
     db = SessionLocal()
     try:
         summary = ingest_nba_player_prop_lines(

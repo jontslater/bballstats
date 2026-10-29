@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -17,7 +18,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.the-odds-api.com/v4"
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[2] / "data" / "cache" / "odds_api"
+DEFAULT_CACHE_TTL_SECONDS = 3600
 NBA_SPORT_KEY = "basketball_nba"
+
+
+class OddsApiError(Exception):
+    """Raised for Odds API failures without leaking credentials."""
+
+
+def _redact_api_key(text: str, api_key: str) -> str:
+    if not text or not api_key:
+        return text or ""
+    return text.replace(api_key, "***REDACTED***")
 
 
 class OddsApiClient:
@@ -29,6 +41,8 @@ class OddsApiClient:
         cache_dir: Optional[Path] = None,
         session: Optional[requests.Session] = None,
         use_cache: bool = True,
+        cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        force_refresh: bool = False,
     ):
         if not api_key:
             raise ValueError("ODDS_API_KEY is required")
@@ -37,13 +51,21 @@ class OddsApiClient:
         self.cache_dir = cache_dir or DEFAULT_CACHE_DIR
         self.session = session or requests.Session()
         self.use_cache = use_cache
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.force_refresh = force_refresh
         self.last_requests_remaining: Optional[str] = None
 
     def _cache_path(self, *parts: str) -> Path:
         return self.cache_dir.joinpath(*parts)
 
+    def _cache_is_fresh(self, path: Path) -> bool:
+        if self.force_refresh or not path.is_file():
+            return False
+        age = time.time() - path.stat().st_mtime
+        return age <= self.cache_ttl_seconds
+
     def _read_cache(self, path: Path) -> Optional[Any]:
-        if not self.use_cache or not path.is_file():
+        if not self.use_cache or not self._cache_is_fresh(path):
             return None
         try:
             return json.loads(path.read_text(encoding="utf-8"))
@@ -75,13 +97,27 @@ class OddsApiClient:
         query = dict(params or {})
         query["apiKey"] = self.api_key
         url = f"{self.base_url}{path}"
-        resp = self.session.request(method, url, params=query, timeout=30)
+        try:
+            resp = self.session.request(method, url, params=query, timeout=30)
+        except requests.RequestException as exc:
+            raise OddsApiError(f"Odds API request failed for {path}: {exc}") from exc
+
         remaining = resp.headers.get("x-requests-remaining")
         if remaining is not None:
             self.last_requests_remaining = remaining
             logger.info("The Odds API x-requests-remaining: %s", remaining)
-        resp.raise_for_status()
-        data = resp.json()
+
+        if resp.status_code >= 400:
+            body = _redact_api_key(resp.text[:500], self.api_key)
+            raise OddsApiError(
+                f"Odds API HTTP {resp.status_code} for {path}: {body}"
+            )
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise OddsApiError(f"Odds API returned invalid JSON for {path}") from exc
+
         if cache_file:
             self._write_cache(cache_file, data)
         return data, False
