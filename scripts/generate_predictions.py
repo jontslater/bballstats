@@ -27,7 +27,7 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description='Generate predictions')
     parser.add_argument('--game-id', type=int, help='Generate for specific game')
-    parser.add_argument('--days', type=int, default=1, help='Days ahead to generate (default: 1)')
+    parser.add_argument('--days', type=int, default=0, help='Days ahead from today (0 = today only, default: 0)')
     parser.add_argument('--stat-types', type=str, default='points,rebounds,assists',
                        help='Comma-separated stat types (default: points,rebounds,assists)')
     

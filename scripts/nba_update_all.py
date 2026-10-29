@@ -141,6 +141,27 @@ def update_schedules():
     return True
 
 
+def dedupe_prediction_rows():
+    logger.info("STEP 5b: Dedupe NBA prediction rows...")
+    import subprocess
+
+    env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
+    r = subprocess.run(
+        [sys.executable, "scripts/nba_dedupe_predictions.py"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        env=env,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if r.stdout:
+        logger.info(r.stdout.strip())
+    if r.stderr:
+        logger.info(r.stderr.strip())
+    return r.returncode == 0
+
+
 def load_calibration_gates():
     logger.info("STEP 4: Load persisted NBA calibration gates (recompute if stale)...")
     from app.database import SessionLocal
@@ -155,8 +176,8 @@ def load_calibration_gates():
         db.close()
 
 
-def generate_predictions():
-    logger.info("STEP 5: NBA predictions...")
+def generate_predictions(days_ahead: int = 0):
+    logger.info("STEP 5: NBA predictions (days_ahead=%s)...", days_ahead)
     import subprocess
 
     from app.database import SessionLocal
@@ -168,7 +189,7 @@ def generate_predictions():
             sys.executable,
             "scripts/generate_predictions.py",
             "--days",
-            "1",
+            str(days_ahead),
             "--stat-types",
             "points,rebounds,assists,three_pointers_made,pts+ast+reb",
         ],
@@ -204,7 +225,9 @@ def generate_predictions():
 
     db = SessionLocal()
     try:
-        ok, msg = nba_prediction_generation_ok(db, days_ahead=1, created=created, updated=updated)
+        ok, msg = nba_prediction_generation_ok(
+            db, days_ahead=days_ahead, created=created, updated=updated
+        )
         if not ok:
             logger.error(f"NBA predictions check failed: {msg}")
             return False
@@ -278,6 +301,12 @@ def main():
         action="store_true",
         help="After predictions, ingest FanDuel/DraftKings player prop lines via The Odds API.",
     )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=0,
+        help="Prediction window: 0 = today only, 1 = today+tomorrow, etc. (default: 0)",
+    )
     args = parser.parse_args()
 
     steps = [
@@ -286,7 +315,8 @@ def main():
         ("NBA Schedules", update_schedules),
         ("NBA Results Refresh", refresh_game_results_after_schedule),
         ("NBA Calibration Gates", load_calibration_gates),
-        ("NBA Predictions", generate_predictions),
+        ("NBA Predictions", lambda: generate_predictions(args.days)),
+        ("NBA Dedupe Predictions", dedupe_prediction_rows),
         ("NBA Betting Lines", lambda: load_betting_lines(args.with_lines)),
         ("NBA Evaluate", evaluate_predictions),
         ("NBA Suggestions", log_suggested_bets),

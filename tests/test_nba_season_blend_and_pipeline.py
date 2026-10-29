@@ -27,10 +27,18 @@ from app.services.nba_season_blend import (
     _blend_stats,
 )
 from app.services.nba_sportsbook_edge import (
+    MAX_PROB_EDGE,
+    PROB_CLAMP_HIGH,
+    PROB_CLAMP_LOW,
+    clamp_probability,
+    effective_std_for_prop,
     mean_book_gap_limit,
     mean_vs_book_misaligned,
+    probability_edge_exceeds_cap,
+    probability_over_line,
     stat_point_edge_exceeds_cap,
 )
+from app.services.nba_results import games_missing_box_scores_for_season_backfill
 
 
 def _session():
@@ -108,6 +116,56 @@ class TestSeasonBlend(unittest.TestCase):
         self.assertGreater(dist["mean"], 0)
         mins = blended_nba_avg_minutes(engine, db, player.player_id, cur.season_id)
         self.assertIsNotNone(mins)
+        db.close()
+
+
+class TestProbabilityCalibration(unittest.TestCase):
+    def test_std_floor_prevents_absurd_over_confidence(self):
+        # Lillard-like: mean 23.3, line 20.5, model std too narrow at 2.8
+        p = probability_over_line(23.3, 2.8, 20.5, stat_type="points")
+        self.assertLess(p, 0.85)
+        self.assertGreaterEqual(p, PROB_CLAMP_LOW)
+
+    def test_assists_floor(self):
+        p = probability_over_line(5.2, 0.9, 3.5, stat_type="assists")
+        self.assertLess(p, 0.90)
+        self.assertGreater(p, 0.55)
+
+    def test_probability_clamped(self):
+        p = probability_over_line(40.0, 20.0, 10.0, stat_type="points")
+        self.assertEqual(p, PROB_CLAMP_HIGH)
+
+    def test_prob_edge_cap(self):
+        self.assertTrue(probability_edge_exceeds_cap(0.75, 0.60))
+        self.assertFalse(probability_edge_exceeds_cap(0.65, 0.60))
+
+    def test_effective_std_minimum(self):
+        sigma = effective_std_for_prop("points", 20.0, 1.0)
+        self.assertGreaterEqual(sigma, 0.35 * 20.0)
+
+
+class TestBackfillCandidateSelection(unittest.TestCase):
+    def test_includes_past_scheduled_without_box_score(self):
+        db = _session()
+        team = Team(sport="NBA", abbreviation="LAL", name="Lakers", conference="W", division="P")
+        season = Season(sport="NBA", season_year="2026-27", is_current=True)
+        db.add_all([team, season])
+        db.flush()
+        past = Game(
+            sport="NBA",
+            game_date=date(2020, 10, 25),
+            season_id=season.season_id,
+            home_team_id=team.team_id,
+            away_team_id=team.team_id,
+            game_status="scheduled",
+            espn_game_id="111",
+        )
+        db.add(past)
+        db.commit()
+        missing = games_missing_box_scores_for_season_backfill(
+            db, season.season_id, as_of=date(2020, 10, 29)
+        )
+        self.assertEqual(len(missing), 1)
         db.close()
 
 

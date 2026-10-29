@@ -377,13 +377,36 @@ def _collect_finished_games_missing_box_scores(
     return extra_created, extra_processed
 
 
+def games_missing_box_scores_for_season_backfill(
+    db: Session,
+    season_id: int,
+    *,
+    as_of: Optional[date] = None,
+) -> List[Game]:
+    """Past-dated season games without a complete box score (any non-cancelled status)."""
+    as_of = as_of or date.today()
+    rows = (
+        db.query(Game)
+        .filter(
+            Game.sport == "NBA",
+            Game.season_id == season_id,
+            Game.game_date < as_of,
+            Game.espn_game_id.isnot(None),
+            Game.game_status.in_(("scheduled", "in_progress", "finished")),
+        )
+        .order_by(Game.game_date)
+        .all()
+    )
+    return [g for g in rows if not _game_has_complete_box_score(db, g.game_id)]
+
+
 def backfill_current_season_missing_box_scores(
     db: Session,
     client: ESPNNBAClient,
 ) -> Tuple[int, int]:
     """
-    Fetch box scores for all finished NBA games in the current season
-    that lack a complete box score (e.g. Oct 20-27 gap after schedule-only sync).
+    Fetch box scores for current-season games before today that lack stats,
+    including games still marked scheduled/in_progress in DB.
     """
     season = (
         db.query(Season)
@@ -394,20 +417,28 @@ def backfill_current_season_missing_box_scores(
     if not season:
         return 0, 0
 
-    stale = (
-        db.query(Game)
-        .filter(
-            Game.sport == "NBA",
-            Game.season_id == season.season_id,
-            Game.game_status == "finished",
-            Game.espn_game_id.isnot(None),
-        )
-        .order_by(Game.game_date)
-        .all()
-    )
-
+    stale = games_missing_box_scores_for_season_backfill(db, season.season_id)
     created = processed = 0
+    dates_touched: set = set()
+
     for game in stale:
+        if game.game_date not in dates_touched:
+            dates_touched.add(game.game_date)
+            api_day = client.get_games_for_date(game.game_date)
+            for g in api_day:
+                g["game_date"] = game.game_date
+            day_season = resolve_nba_season_for_date(db, game.game_date) or season
+            for api_game in api_day:
+                if api_game.get("status") != "finished":
+                    continue
+                _, was_created, n_stats = upsert_final_from_espn(
+                    db, client, api_game, day_season, skip_if_complete=False
+                )
+                if n_stats > 0 or was_created:
+                    processed += 1
+                    if was_created:
+                        created += 1
+
         if _game_has_complete_box_score(db, game.game_id):
             continue
         api_game = _api_game_from_row(db, game)

@@ -32,7 +32,7 @@ from app.services.nba_odds_lines import (
     normalize_team_name,
     _pick_market_outcomes,
 )
-from app.services.nba_sportsbook_edge import probability_over_line
+from app.services.nba_sportsbook_edge import probability_over_line, PROB_CLAMP_HIGH
 from app.scrapers.odds_api_client import OddsApiClient, OddsApiError
 from app.services.suggested_bets import SuggestedBetsService
 from app.models import NbaPropCalibrationGate
@@ -277,7 +277,7 @@ class TestOddsIngestion(unittest.TestCase):
                 safe_probability=0.62,
                 standard_line=26.5,
                 standard_probability=0.55,
-                distribution_mean=28.0,
+                distribution_mean=26.0,
                 distribution_std_dev=6.0,
                 confidence_level="HIGH",
             )
@@ -306,7 +306,7 @@ class TestOddsIngestion(unittest.TestCase):
                 safe_probability=0.55,
                 standard_line=32.5,
                 standard_probability=0.45,
-                distribution_mean=28.0,
+                distribution_mean=26.0,
                 distribution_std_dev=6.0,
                 confidence_level="HIGH",
             )
@@ -369,9 +369,9 @@ class TestOddsApiClientCache(unittest.TestCase):
         self.assertIn("REDACTED", str(ctx.exception))
 
     def test_probability_over_book_line(self):
-        p = probability_over_line(28.0, 6.0, 24.5)
+        p = probability_over_line(28.0, 6.0, 24.5, stat_type="points")
         self.assertGreater(p, 0.5)
-        self.assertLess(p, 1.0)
+        self.assertLessEqual(p, PROB_CLAMP_HIGH)
 
 
 if __name__ == "__main__":

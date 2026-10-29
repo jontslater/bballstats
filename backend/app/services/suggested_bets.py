@@ -180,6 +180,7 @@ class SuggestedBetsService(BaseSportService):
                     mean_book_gap_limit,
                     mean_vs_book_misaligned,
                     probability_over_line,
+                    probability_edge_exceeds_cap,
                     stat_point_edge_exceeds_cap,
                 )
                 if not prop_passes_calibration_gate(pred.stat_type, db=self.db):
@@ -209,9 +210,13 @@ class SuggestedBetsService(BaseSportService):
                         f"player {pred.player_id} {pred.stat_type} mean={model_mean:.1f} book={book_line:.1f}"
                     )
                     continue
-                probability = probability_over_line(model_mean, model_std, book_line)
+                probability = probability_over_line(
+                    model_mean, model_std, book_line, stat_type=pred.stat_type
+                )
                 break_even = BettingLineService(self.db)._odds_to_probability(betting_line.over_odds)
                 edge = probability - break_even
+                if probability_edge_exceeds_cap(probability, break_even):
+                    continue
                 if edge < 0.03:
                     continue
                 line = book_line
