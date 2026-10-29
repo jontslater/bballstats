@@ -375,3 +375,50 @@ def _collect_finished_games_missing_box_scores(
             if was_created:
                 extra_created += 1
     return extra_created, extra_processed
+
+
+def backfill_current_season_missing_box_scores(
+    db: Session,
+    client: ESPNNBAClient,
+) -> Tuple[int, int]:
+    """
+    Fetch box scores for all finished NBA games in the current season
+    that lack a complete box score (e.g. Oct 20-27 gap after schedule-only sync).
+    """
+    season = (
+        db.query(Season)
+        .filter(Season.sport == "NBA", Season.is_current.is_(True))
+        .order_by(Season.season_id.desc())
+        .first()
+    )
+    if not season:
+        return 0, 0
+
+    stale = (
+        db.query(Game)
+        .filter(
+            Game.sport == "NBA",
+            Game.season_id == season.season_id,
+            Game.game_status == "finished",
+            Game.espn_game_id.isnot(None),
+        )
+        .order_by(Game.game_date)
+        .all()
+    )
+
+    created = processed = 0
+    for game in stale:
+        if _game_has_complete_box_score(db, game.game_id):
+            continue
+        api_game = _api_game_from_row(db, game)
+        if not api_game:
+            continue
+        day_season = resolve_nba_season_for_date(db, game.game_date) or season
+        _, was_created, n_stats = upsert_final_from_espn(
+            db, client, api_game, day_season, skip_if_complete=False
+        )
+        if n_stats > 0 or was_created:
+            processed += 1
+            if was_created:
+                created += 1
+    return created, processed

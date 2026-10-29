@@ -176,9 +176,11 @@ class SuggestedBetsService(BaseSportService):
                 from app.services.nba_prop_calibration import prop_passes_calibration_gate
                 from app.services.betting_line_service import BettingLineService
                 from app.services.nba_sportsbook_edge import (
-                    NBA_MAX_MEAN_BOOK_LINE_GAP,
                     find_sportsbook_line,
+                    mean_book_gap_limit,
+                    mean_vs_book_misaligned,
                     probability_over_line,
+                    stat_point_edge_exceeds_cap,
                 )
                 if not prop_passes_calibration_gate(pred.stat_type, db=self.db):
                     continue
@@ -195,9 +197,15 @@ class SuggestedBetsService(BaseSportService):
                 if model_mean is None:
                     continue
                 book_line = float(betting_line.over_line)
-                if abs(model_mean - book_line) > NBA_MAX_MEAN_BOOK_LINE_GAP:
+                if mean_vs_book_misaligned(model_mean, book_line, pred.stat_type):
                     print(
-                        f"⚠️  Skipping NBA prop (mean vs book gap): "
+                        f"⚠️  Skipping NBA prop (mean vs book gap > {mean_book_gap_limit(pred.stat_type):.1f}): "
+                        f"player {pred.player_id} {pred.stat_type} mean={model_mean:.1f} book={book_line:.1f}"
+                    )
+                    continue
+                if stat_point_edge_exceeds_cap(model_mean, book_line):
+                    print(
+                        f"⚠️  Skipping NBA prop (point edge > cap): "
                         f"player {pred.player_id} {pred.stat_type} mean={model_mean:.1f} book={book_line:.1f}"
                     )
                     continue

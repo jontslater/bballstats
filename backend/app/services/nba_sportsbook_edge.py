@@ -10,10 +10,32 @@ from sqlalchemy.orm import Session
 
 from app.models.betting_line import BettingLine
 
-# Mean vs book line gap above this is treated as bad model/book alignment.
-NBA_MAX_MEAN_BOOK_LINE_GAP = 15.0
-
 BOOKMAKER_PREFERENCE = ("FanDuel", "DraftKings")
+
+# Max |model mean − book line| before treating as misaligned data.
+STAT_MEAN_BOOK_GAP: dict[str, float] = {
+    "points": 4.0,
+    "rebounds": 2.5,
+    "assists": 2.5,
+    "three_pointers_made": 1.5,
+    "pts+ast+reb": 4.0,
+}
+DEFAULT_MEAN_BOOK_GAP = 3.5
+
+# Skip when model mean exceeds book line by this many stat units (over-only edge sanity).
+MAX_STAT_POINT_EDGE = 10.0
+
+
+def mean_book_gap_limit(stat_type: str) -> float:
+    return STAT_MEAN_BOOK_GAP.get(stat_type, DEFAULT_MEAN_BOOK_GAP)
+
+
+def mean_vs_book_misaligned(model_mean: float, book_line: float, stat_type: str) -> bool:
+    return abs(model_mean - book_line) > mean_book_gap_limit(stat_type)
+
+
+def stat_point_edge_exceeds_cap(model_mean: float, book_line: float) -> bool:
+    return (model_mean - book_line) > MAX_STAT_POINT_EDGE
 
 
 def probability_over_line(mean: float, std_dev: float, book_line: float) -> float:

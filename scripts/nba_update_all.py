@@ -23,22 +23,30 @@ logger = logging.getLogger(__name__)
 
 
 def update_game_results():
-    logger.info("STEP 1: NBA game results (lookback 1 day)...")
+    logger.info("STEP 1: NBA game results (lookback 1 day + season missing backfill)...")
     import subprocess
 
     env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
-    r = subprocess.run(
-        [sys.executable, "scripts/nba_collect_game_results.py", "--lookback-days", "1"],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-        env=env,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if r.returncode != 0:
-        logger.error(r.stderr)
-        return False
+    for args in (
+        ["scripts/nba_collect_game_results.py", "--lookback-days", "1"],
+        ["scripts/nba_collect_game_results.py", "--backfill-season-missing"],
+    ):
+        r = subprocess.run(
+            [sys.executable, *args],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            env=env,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if r.stdout:
+            logger.info(r.stdout.strip())
+        if r.stderr:
+            logger.info(r.stderr.strip())
+        if r.returncode != 0:
+            logger.error(r.stderr or r.stdout)
+            return False
     return True
 
 
@@ -86,7 +94,7 @@ def load_betting_lines(with_lines: bool):
     if r.stdout:
         logger.info(r.stdout.strip())
     if r.stderr:
-        logger.error(r.stderr.strip())
+        logger.info(r.stderr.strip())
     if r.returncode != 0:
         logger.error(r.stderr or "nba_load_betting_lines failed")
         return False
@@ -151,6 +159,9 @@ def generate_predictions():
     logger.info("STEP 5: NBA predictions...")
     import subprocess
 
+    from app.database import SessionLocal
+    from app.services.nba_pipeline_helpers import nba_prediction_generation_ok
+
     env = {**dict(__import__("os").environ), "PYTHONUTF8": "1"}
     r = subprocess.run(
         [
@@ -168,7 +179,39 @@ def generate_predictions():
         encoding="utf-8",
         errors="replace",
     )
-    return r.returncode == 0
+    if r.stdout:
+        logger.info(r.stdout.strip())
+    if r.stderr:
+        logger.info(r.stderr.strip())
+    if r.returncode != 0:
+        logger.error("generate_predictions failed")
+        return False
+
+    created = updated = 0
+    import re
+
+    for line in (r.stdout or "").splitlines():
+        m = re.search(r"Created:\s*(\d+)", line)
+        if m:
+            created = int(m.group(1))
+        m = re.search(r"Updated:\s*(\d+)", line)
+        if m and "Created:" in line:
+            updated = int(m.group(1))
+        m = re.search(r"Created (\d+), Updated (\d+)", line)
+        if m:
+            created += int(m.group(1))
+            updated += int(m.group(2))
+
+    db = SessionLocal()
+    try:
+        ok, msg = nba_prediction_generation_ok(db, days_ahead=1, created=created, updated=updated)
+        if not ok:
+            logger.error(f"NBA predictions check failed: {msg}")
+            return False
+        logger.info(f"NBA predictions check: {msg}")
+        return True
+    finally:
+        db.close()
 
 
 def evaluate_predictions():

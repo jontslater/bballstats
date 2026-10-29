@@ -27,9 +27,17 @@ class OddsApiError(Exception):
 
 
 def _redact_api_key(text: str, api_key: str) -> str:
-    if not text or not api_key:
+    if not text:
         return text or ""
-    return text.replace(api_key, "***REDACTED***")
+    redacted = text
+    if api_key:
+        redacted = redacted.replace(api_key, "***REDACTED***")
+    redacted = re.sub(r"apiKey=[^&\s\"']+", "apiKey=***REDACTED***", redacted, flags=re.IGNORECASE)
+    return redacted
+
+
+def _safe_error_message(path: str, detail: str, api_key: str) -> str:
+    return f"Odds API error for {path}: {_redact_api_key(detail, api_key)}"
 
 
 class OddsApiClient:
@@ -100,7 +108,9 @@ class OddsApiClient:
         try:
             resp = self.session.request(method, url, params=query, timeout=30)
         except requests.RequestException as exc:
-            raise OddsApiError(f"Odds API request failed for {path}: {exc}") from exc
+            raise OddsApiError(
+                _safe_error_message(path, str(exc), self.api_key)
+            ) from exc
 
         remaining = resp.headers.get("x-requests-remaining")
         if remaining is not None:
@@ -110,7 +120,7 @@ class OddsApiClient:
         if resp.status_code >= 400:
             body = _redact_api_key(resp.text[:500], self.api_key)
             raise OddsApiError(
-                f"Odds API HTTP {resp.status_code} for {path}: {body}"
+                _safe_error_message(path, f"HTTP {resp.status_code}: {body}", self.api_key)
             )
 
         try:
