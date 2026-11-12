@@ -31,7 +31,8 @@ class DistributionEngine:
         projected_minutes: Optional[float] = None,
         is_starter: Optional[bool] = None,
         season_ids: Optional[List[int]] = None,
-        min_games: int = 15
+        min_games: int = 15,
+        as_of_date: Optional[date] = None,
     ) -> Optional[Dict]:
         """
         Calculate base distribution for a player's stat.
@@ -90,6 +91,8 @@ class DistributionEngine:
                 Game.game_status == 'finished'
             )
         )
+        if as_of_date is not None:
+            query = query.filter(Game.game_date < as_of_date)
         
         # Filter by time played (minutes for NBA, snaps for NFL, at_bats/IP for MLB)
         if sport == 'NBA':
@@ -280,7 +283,8 @@ class DistributionEngine:
         sport: str = 'NBA',
         season_ids: Optional[List[int]] = None,
         recent_games: Optional[int] = None,
-        only_starters: bool = False
+        only_starters: bool = False,
+        as_of_date: Optional[date] = None,
     ) -> Optional[float]:
         """
         Get historical average minutes/snaps for a player.
@@ -336,6 +340,8 @@ class DistributionEngine:
                 Game.game_status == 'finished'
             )
         ).order_by(desc(Game.game_date))
+        if as_of_date is not None:
+            query = query.filter(Game.game_date < as_of_date)
         
         # Filter by time played
         if sport == 'NBA':
@@ -445,7 +451,8 @@ class DistributionEngine:
     def get_historical_usage_rate(
         self,
         player_id: int,
-        season_ids: Optional[List[int]] = None
+        season_ids: Optional[List[int]] = None,
+        as_of_date: Optional[date] = None,
     ) -> Optional[float]:
         """
         Get historical usage rate for a player.
@@ -489,6 +496,8 @@ class DistributionEngine:
                 PlayerGameStat.minutes_played > 0
             )
         )
+        if as_of_date is not None:
+            query = query.filter(Game.game_date < as_of_date)
         
         stats_list = query.all()
         

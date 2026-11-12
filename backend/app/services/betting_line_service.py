@@ -56,7 +56,8 @@ class BettingLineService:
         over_line: float,
         over_odds: str = "-110",
         under_odds: str = "-110",
-        sportsbook: str = "DraftKings"
+        sportsbook: str = "DraftKings",
+        source: str = "manual",
     ) -> BettingLine:
         """
         Add or update a betting line.
@@ -79,6 +80,7 @@ class BettingLineService:
             existing.under_line = over_line  # Usually same
             existing.over_odds = over_odds
             existing.under_odds = under_odds
+            existing.source = source
             self.db.commit()
             self.db.refresh(existing)
             return existing
@@ -92,7 +94,8 @@ class BettingLineService:
             under_line=over_line,
             over_odds=over_odds,
             under_odds=under_odds,
-            sportsbook=sportsbook
+            sportsbook=sportsbook,
+            source=source,
         )
         
         self.db.add(betting_line)

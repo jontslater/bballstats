@@ -21,7 +21,7 @@ sys.path.insert(0, str(project_root / "backend"))
 from app.database import SessionLocal
 from app.models import Season
 from app.scrapers.espn_nba_client import ESPNNBAClient
-from app.services.nba_results import NBA_RESULTS_LOOKBACK_DAYS, collect_games_for_date
+from app.services.nba_results import NBA_RESULTS_LOOKBACK_DAYS, collect_games_for_date, backfill_current_season_missing_box_scores
 
 
 def backfill_range(db, client, start: date, end: date, skip_existing: bool = False):
@@ -52,11 +52,22 @@ def main():
     parser.add_argument("--end-date", type=str)
     parser.add_argument("--season", type=str)
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument(
+        "--backfill-season-missing",
+        action="store_true",
+        help="Backfill box scores for all finished games in the current NBA season missing stats",
+    )
     args = parser.parse_args()
 
     db = SessionLocal()
     client = ESPNNBAClient(delay=0.35)
     try:
+        if args.backfill_season_missing:
+            c, p = backfill_current_season_missing_box_scores(db, client)
+            db.commit()
+            print(f"Season backfill: created={c}, processed={p}")
+            return 0
+
         if args.previous_day or args.date:
             d = date.fromisoformat(args.date) if args.date else date.today() - timedelta(days=1)
             c, p = collect_games_for_date(db, client, d, skip_if_has_stats=args.skip_existing)
