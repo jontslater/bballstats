@@ -71,7 +71,12 @@ def _blend_stats(
     if not current or n_current == 0:
         return prior
     w = min(1.0, n_current / float(min_current))
-    mean = w * current["mean"] + (1.0 - w) * prior["mean"]
+    prior_mean = float(prior["mean"])
+    cur_mean = float(current["mean"])
+    # Early-season star scoring: prior-year pace often runs hot before current form shows up.
+    if prior_mean >= 22 and cur_mean < prior_mean:
+        prior_mean *= 0.965
+    mean = w * cur_mean + (1.0 - w) * prior_mean
     std_c = current.get("std_dev") or 1.0
     std_p = prior.get("std_dev") or 1.0
     std = math.sqrt(max(w * std_c**2 + (1.0 - w) * std_p**2, 1e-6))

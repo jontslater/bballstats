@@ -20,10 +20,10 @@ from app.services.nba_mean_bias_correction import (
     bias_report_from_errors,
     fit_shrunk_tier_subtract,
     player_tier_for_bias,
-    STAT_TIER_SCALE,
 )
 from app.services.nba_prop_calibration_store import (
     get_prob_shrink,
+    get_prob_sigma_scale,
     get_tier_subtract_offsets,
     save_calibration,
 )
@@ -32,7 +32,7 @@ from app.services.nba_prop_player_cache import (
     PlayerStatHistoryCache,
     stat_value_from_row,
 )
-from app.services.nba_prop_prob_fit import collect_prob_samples, fit_prob_shrink_brier
+from app.services.nba_prop_prob_fit import fit_prob_calibration
 from app.services.nba_sportsbook_edge import find_sportsbook_line, probability_over_line
 from app.services.prediction_service import PredictionService
 
@@ -47,6 +47,7 @@ def _add_cal_bucket(
     *,
     calibrate: bool = True,
     prob_shrink: Optional[float] = None,
+    prob_sigma_scale: Optional[float] = None,
 ) -> None:
     p_over = probability_over_line(
         mean,
@@ -55,6 +56,7 @@ def _add_cal_bucket(
         stat_type=stat_type,
         calibrate=calibrate,
         prob_shrink=prob_shrink,
+        prob_sigma_scale=prob_sigma_scale,
     )
     bucket = f"{int(p_over * 10) * 10}-{int(p_over * 10) * 10 + 10}%"
     row = table.setdefault(bucket, {"n": 0, "hits": 0, "p_sum": 0.0})
@@ -76,6 +78,7 @@ class BacktestReport:
     raw_errors: List[Tuple[str, str, float]] = field(default_factory=list)
     fitted_tier_subtract: Dict[str, float] = field(default_factory=dict)
     prob_shrink_used: Optional[float] = None
+    prob_sigma_scale_used: Optional[float] = None
     sample_count_requested: Optional[int] = None
     sample_count_used: Optional[int] = None
 
@@ -97,6 +100,7 @@ class BacktestReport:
                 }
             return out
 
+        tier_counts = {tier: len(vals) for tier, vals in self.tier_mean_error.items()}
         return {
             "season_year": self.season_year,
             "mode": self.mode,
@@ -107,10 +111,12 @@ class BacktestReport:
             "tier_mean_bias": {
                 k: (round(v, 3) if v is not None else None) for k, v in tier_bias.items()
             },
+            "tier_counts": tier_counts,
             "calibration_median_line": _cal_table(self.calibration_median),
             "calibration_book_line": _cal_table(self.calibration_book),
             "fitted_tier_subtract": self.fitted_tier_subtract,
             "prob_shrink_used": self.prob_shrink_used,
+            "prob_sigma_scale_used": self.prob_sigma_scale_used,
             "sample_count_requested": self.sample_count_requested,
             "sample_count_used": self.sample_count_used,
         }
@@ -155,6 +161,15 @@ def build_pit_candidates(
                 continue
             if cache.rolling_median(stat_row.player_id, stat_type, game.game_date) is None:
                 continue
+            pts_med = cache.rolling_median(
+                stat_row.player_id, "points", game.game_date
+            )
+            if pts_med is not None and pts_med >= 22:
+                w_tier = "star"
+            elif pts_med is not None and pts_med >= 14:
+                w_tier = "rotation"
+            else:
+                w_tier = "bench"
             candidates.append(
                 PitCandidate(
                     game_id=game.game_id,
@@ -162,6 +177,7 @@ def build_pit_candidates(
                     stat_type=stat_type,
                     game_date=game.game_date,
                     actual=float(actual),
+                    workload_tier=w_tier,
                 )
             )
     return candidates
@@ -181,7 +197,26 @@ def sample_candidates(
         picked = candidates[::step][:max_samples]
         return picked
     rng = random.Random(seed)
-    return rng.sample(candidates, max_samples)
+    by_tier: Dict[str, List[PitCandidate]] = defaultdict(list)
+    for c in candidates:
+        by_tier[c.workload_tier].append(c)
+    for tier in by_tier:
+        rng.shuffle(by_tier[tier])
+    target_star = max(10, int(max_samples * 0.28))
+    picked: List[PitCandidate] = []
+    star_pool = by_tier.get("star", [])
+    if star_pool:
+        n_star = min(len(star_pool), target_star)
+        picked.extend(rng.sample(star_pool, n_star))
+    remainder = [c for c in candidates if c not in picked]
+    need = max_samples - len(picked)
+    if need > 0 and remainder:
+        picked.extend(rng.sample(remainder, min(need, len(remainder))))
+    if len(picked) < max_samples:
+        extra = [c for c in candidates if c not in picked]
+        rng.shuffle(extra)
+        picked.extend(extra[: max_samples - len(picked)])
+    return picked[:max_samples]
 
 
 def _score_pit_row(
@@ -195,6 +230,7 @@ def _score_pit_row(
     tier_subtract: Optional[Dict[str, float]],
     calibrate: bool,
     prob_shrink: Optional[float],
+    prob_sigma_scale: Optional[float] = None,
 ) -> None:
     err = mean - candidate.actual
     report.n_predictions += 1
@@ -216,6 +252,7 @@ def _score_pit_row(
             candidate.stat_type,
             calibrate=calibrate,
             prob_shrink=prob_shrink,
+            prob_sigma_scale=prob_sigma_scale,
         )
 
     book = find_sportsbook_line(
@@ -231,6 +268,7 @@ def _score_pit_row(
             candidate.stat_type,
             calibrate=calibrate,
             prob_shrink=prob_shrink,
+            prob_sigma_scale=prob_sigma_scale,
         )
 
 
@@ -271,7 +309,9 @@ def _run_pit_backtest(
         offsets = None
 
     shrink = prob_shrink if prob_shrink is not None else get_prob_shrink()
+    sigma_scale = get_prob_sigma_scale() if calibrate_prob else 1.0
     report.prob_shrink_used = shrink if calibrate_prob else 1.0
+    report.prob_sigma_scale_used = sigma_scale if calibrate_prob else 1.0
 
     for candidate in picked:
         pred = svc.generate_prediction(
@@ -301,6 +341,7 @@ def _run_pit_backtest(
             tier_subtract=offsets,
             calibrate=calibrate_prob,
             prob_shrink=shrink if calibrate_prob else 1.0,
+            prob_sigma_scale=sigma_scale,
         )
 
     report.fitted_tier_subtract = fit_shrunk_tier_subtract(report.raw_errors)
@@ -374,18 +415,20 @@ def fit_and_save_calibration(
                 c.actual,
             )
         )
-    prob_shrink = fit_prob_shrink_brier(collect_prob_samples(prob_rows))
+    sigma_scale, prob_shrink = fit_prob_calibration(prob_rows)
     save_calibration(
         {
             "fit_season": train_season,
             "tier_subtract": tier_sub,
             "prob_shrink": prob_shrink,
+            "prob_sigma_scale": sigma_scale,
         }
     )
     return {
         "train_bias": train.to_dict(),
         "tier_subtract_saved": tier_sub,
         "prob_shrink_saved": prob_shrink,
+        "prob_sigma_scale_saved": sigma_scale,
     }
 
 

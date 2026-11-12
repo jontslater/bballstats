@@ -65,6 +65,13 @@ def fit_tier_bias_subtract(
     }
 
 
+_TIER_SHRINK_PRIOR_N: Dict[str, float] = {
+    "star": 18.0,
+    "rotation": 40.0,
+    "bench": 40.0,
+}
+
+
 def fit_shrunk_tier_subtract(
     errors: List[Tuple[str, str, float]],
     *,
@@ -84,7 +91,8 @@ def fit_shrunk_tier_subtract(
         if not vals:
             continue
         raw = sum(vals) / len(vals)
-        w = len(vals) / (len(vals) + shrink_prior_n)
+        prior_n = _TIER_SHRINK_PRIOR_N.get(tier, shrink_prior_n)
+        w = len(vals) / (len(vals) + prior_n)
         shrunk = raw * w
         if shrunk > cap:
             shrunk = cap
@@ -108,8 +116,10 @@ def bias_report_from_errors(
     tier_bias = {
         t: round(sum(v) / len(v), 3) for t, v in tier_vals.items() if v
     }
+    tier_counts = {t: len(v) for t, v in tier_vals.items()}
     return {
         "n": len(errors),
         "overall_mean_bias": round(overall, 3),
         "tier_mean_bias": tier_bias,
+        "tier_counts": tier_counts,
     }

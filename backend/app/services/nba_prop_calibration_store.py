@@ -4,24 +4,52 @@ Load / save NBA prop calibration (tier mean subtract, P(over) shrink) fit on PIT
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Iterator, Mapping, Optional
 
 _DEFAULT: Dict[str, Any] = {
     "fit_season": None,
     "tier_subtract": {},
     "prob_shrink": 1.0,
+    "prob_sigma_scale": 1.0,
 }
 
 _CACHE: Optional[Dict[str, Any]] = None
+_OVERRIDE: Optional[Dict[str, Any]] = None
 
 
 def calibration_file_path() -> Path:
     return Path(__file__).resolve().parent.parent / "data" / "nba_prop_calibration.json"
 
 
+def set_calibration_override(data: Optional[Mapping[str, Any]]) -> None:
+    """Force in-memory calibration (tests). Pass None to clear."""
+    global _OVERRIDE, _CACHE
+    _OVERRIDE = dict(data) if data is not None else None
+    _CACHE = None
+
+
+@contextmanager
+def calibration_override(data: Mapping[str, Any]) -> Iterator[None]:
+  set_calibration_override(data)
+  try:
+    yield
+  finally:
+    set_calibration_override(None)
+
+
+def reset_calibration_cache() -> None:
+    global _CACHE
+    _CACHE = None
+
+
 def load_calibration(*, reload: bool = False) -> Dict[str, Any]:
     global _CACHE
+    if _OVERRIDE is not None:
+        merged = dict(_DEFAULT)
+        merged.update(_OVERRIDE)
+        return merged
     if _CACHE is not None and not reload:
         return _CACHE
     path = calibration_file_path()
@@ -60,3 +88,12 @@ def get_prob_shrink() -> float:
         return float(val)
     except (TypeError, ValueError):
         return 1.0
+
+
+def get_prob_sigma_scale() -> float:
+    val = load_calibration().get("prob_sigma_scale", 1.0)
+    try:
+        scale = float(val)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(1.0, scale)

@@ -53,7 +53,8 @@ class TestSeasonBlend(unittest.TestCase):
         prior = {"mean": 30.0, "std_dev": 6.0, "sample_size": 40}
         out = _blend_stats(current, prior, n_current=5, min_current=10)
         self.assertAlmostEqual(out["blend_weight_current"], 0.5, places=3)
-        self.assertAlmostEqual(out["mean"], 25.0, places=2)
+        # High prior star pace is damped slightly while current season ramps up.
+        self.assertAlmostEqual(out["mean"], 24.48, places=2)
 
     def test_rate_scaled_mean_lowers_for_fewer_minutes(self):
         scaled = nba_rate_scaled_mean(20.0, 32.0, 24.0)
@@ -122,17 +123,23 @@ class TestSeasonBlend(unittest.TestCase):
 class TestProbabilityCalibration(unittest.TestCase):
     def test_std_floor_prevents_absurd_over_confidence(self):
         # Lillard-like: mean 23.3, line 20.5, model std too narrow at 2.8
-        p = probability_over_line(23.3, 2.8, 20.5, stat_type="points")
+        p = probability_over_line(
+            23.3, 2.8, 20.5, stat_type="points", calibrate=False
+        )
         self.assertLess(p, 0.85)
         self.assertGreaterEqual(p, PROB_CLAMP_LOW)
 
     def test_assists_floor(self):
-        p = probability_over_line(5.2, 0.9, 3.5, stat_type="assists")
+        p = probability_over_line(
+            5.2, 0.9, 3.5, stat_type="assists", calibrate=False
+        )
         self.assertLess(p, 0.90)
         self.assertGreater(p, 0.55)
 
     def test_probability_clamped(self):
-        p = probability_over_line(40.0, 20.0, 10.0, stat_type="points")
+        p = probability_over_line(
+            40.0, 20.0, 10.0, stat_type="points", calibrate=False
+        )
         self.assertEqual(p, PROB_CLAMP_HIGH)
 
     def test_prob_edge_cap(self):

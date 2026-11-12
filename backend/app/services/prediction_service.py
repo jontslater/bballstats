@@ -404,9 +404,14 @@ class PredictionService:
                 projected_minutes *= (1.0 + blowout_increase)
 
         if self.sport == 'NBA' and historical_avg_minutes > 0:
-            max_projected = historical_avg_minutes * (
-                1.22 if minutes_redist.get('benefits_from_injury') else 1.12
-            )
+            high_workload = historical_avg_minutes >= 30.0
+            if high_workload and not minutes_redist.get('benefits_from_injury'):
+                max_ratio = 1.04
+            else:
+                max_ratio = (
+                    1.22 if minutes_redist.get('benefits_from_injury') else 1.10
+                )
+            max_projected = historical_avg_minutes * max_ratio
             if projected_minutes > max_projected:
                 projected_minutes = max_projected
                 minutes_redist['projected_minutes'] = projected_minutes
@@ -435,7 +440,8 @@ class PredictionService:
             and historical_avg_minutes
             and not minutes_redist.get('benefits_from_injury')
         ):
-            minutes_for_dist = min(projected_minutes, historical_avg_minutes * 1.05)
+            dist_cap = 1.03 if historical_avg_minutes >= 30.0 else 1.05
+            minutes_for_dist = min(projected_minutes, historical_avg_minutes * dist_cap)
         
         # Determine minimum games threshold (lower for NFL due to data limitations)
         if self.sport == 'NFL':
@@ -552,7 +558,12 @@ class PredictionService:
         if self.sport == 'NBA':
             from app.services.nba_season_blend import nba_rate_scaled_mean
 
-            rate_cap = 1.22 if minutes_redist.get('benefits_from_injury') else 1.05
+            if historical_avg_minutes >= 30.0 and not minutes_redist.get(
+                'benefits_from_injury'
+            ):
+                rate_cap = 1.02
+            else:
+                rate_cap = 1.22 if minutes_redist.get('benefits_from_injury') else 1.05
             base_mean = nba_rate_scaled_mean(
                 base_mean,
                 historical_avg_minutes,
@@ -628,6 +639,7 @@ class PredictionService:
         if self.sport == 'NBA':
             from app.services.nba_season_blend import nba_context_multiplier_cap
 
+            ctx_cap = 1.02 if historical_avg_minutes >= 30.0 else 1.05
             capped = pre_context_mean * nba_context_multiplier_cap(
                 [
                     rest_days_factor,
@@ -638,7 +650,7 @@ class PredictionService:
                     time_of_day_factor,
                     clutch_factor,
                 ],
-                cap=1.05,
+                cap=ctx_cap,
             )
             if mean_adjustments['adjusted_mean'] > capped:
                 mean_adjustments['adjusted_mean'] = capped
@@ -649,8 +661,16 @@ class PredictionService:
 
         if self.sport == 'NBA' and base_mean and base_mean > 0:
             minutes_ratio = projected_minutes / max(historical_avg_minutes, 1.0)
-            minutes_ratio = min(minutes_ratio, 1.12 if not minutes_redist.get('benefits_from_injury') else 1.22)
-            mean_cap = base_mean * minutes_ratio * 1.08
+            if historical_avg_minutes >= 30.0 and not minutes_redist.get(
+                'benefits_from_injury'
+            ):
+                cap_ratio = 1.04
+                context_ceiling = 1.03
+            else:
+                cap_ratio = 1.22 if minutes_redist.get('benefits_from_injury') else 1.10
+                context_ceiling = 1.08
+            minutes_ratio = min(minutes_ratio, cap_ratio)
+            mean_cap = base_mean * minutes_ratio * context_ceiling
             if mean_adjustments['adjusted_mean'] > mean_cap:
                 mean_adjustments['adjusted_mean'] = mean_cap
 

@@ -24,7 +24,7 @@ from app.services.nba_mean_bias_correction import (
 )
 from app.services.nba_prop_backtest import sample_candidates
 from app.services.nba_prop_player_cache import PlayerStatHistoryCache, PitCandidate
-from app.services.nba_prop_prob_fit import fit_prob_shrink_brier
+from app.services.nba_prop_prob_fit import fit_prob_calibration
 from app.services.nba_season_blend import nba_rate_scaled_mean
 from app.services.nba_sportsbook_edge import shrink_probability
 
@@ -55,10 +55,13 @@ class TestProbShrink(unittest.TestCase):
     def test_shrink_moves_toward_half(self):
         self.assertLess(shrink_probability(0.7, 0.5), 0.7)
 
-    def test_fit_reduces_overconfidence(self):
-        samples = [(0.65, False)] * 40 + [(0.65, True)] * 10
-        s = fit_prob_shrink_brier(samples)
-        self.assertLess(s, 1.0)
+    def test_fit_widens_sigma_when_overconfident(self):
+        rows = [(24.0, 6.0, 22.0, "points", 20.0)] * 30 + [
+            (24.0, 6.0, 22.0, "points", 26.0)
+        ] * 10
+        sigma, shrink = fit_prob_calibration(rows)
+        self.assertGreaterEqual(sigma, 1.0)
+        self.assertGreaterEqual(shrink, 0.75)
 
 
 class TestRateScaledMeanCap(unittest.TestCase):

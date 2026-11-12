@@ -83,10 +83,17 @@ def raw_probability_over_line(
     std_dev: float,
     book_line: float,
     stat_type: str = "points",
+    *,
+    sigma_scale: Optional[float] = None,
 ) -> float:
     if mean is None or book_line is None:
         return PROB_CLAMP_LOW
     sigma = effective_std_for_prop(stat_type, mean, std_dev)
+    if sigma_scale is None:
+        from app.services.nba_prop_calibration_store import get_prob_sigma_scale
+
+        sigma_scale = get_prob_sigma_scale()
+    sigma *= max(1.0, float(sigma_scale or 1.0))
     raw = float(1.0 - norm.cdf(book_line, loc=mean, scale=sigma))
     return clamp_probability(raw)
 
@@ -99,9 +106,20 @@ def probability_over_line(
     *,
     calibrate: bool = True,
     prob_shrink: Optional[float] = None,
+    prob_sigma_scale: Optional[float] = None,
 ) -> float:
     """P(stat > book_line) with std floor, clamp, and optional shrink calibration."""
-    raw = raw_probability_over_line(mean, std_dev, book_line, stat_type=stat_type)
+    if prob_sigma_scale is None and calibrate:
+        from app.services.nba_prop_calibration_store import get_prob_sigma_scale
+
+        prob_sigma_scale = get_prob_sigma_scale()
+    raw = raw_probability_over_line(
+        mean,
+        std_dev,
+        book_line,
+        stat_type=stat_type,
+        sigma_scale=prob_sigma_scale if calibrate else 1.0,
+    )
     if not calibrate:
         return raw
     if prob_shrink is None:

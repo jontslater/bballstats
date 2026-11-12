@@ -39,6 +39,7 @@ class PitCandidate:
     stat_type: str
     game_date: date
     actual: float
+    workload_tier: str = "rotation"
 
 
 class PlayerStatHistoryCache:
